@@ -50,7 +50,7 @@ class ShareRideController extends GetxController {
       return results.fold(
         (failure) {
           isLoading.value = false;
-          AppToasts.showError(failure.message);
+          AppToasts.showError(context,failure.message);
           return failure.message;
         },
         (response) {

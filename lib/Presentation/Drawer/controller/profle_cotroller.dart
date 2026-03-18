@@ -73,42 +73,11 @@ class ProfleCotroller extends GetxController {
     profileImagePath.value = path;
   }
 
-  /*  Future<void> saveData(GlobalKey<FormState> formKey) async {
-    if (!formKey.currentState!.validate()) return;
-
-    isLoading.value = true;
-
-    String firstName = nameController.text.split(" ").first;
-    String lastName =
-    nameController.text.split(" ").length > 1
-        ? nameController.text.split(" ").last
-        : "";
-
-    String dateOfBirth = dobController.text;
-    String gender = genderController.text;
-    String email = emailController.text;
-    String profileImage = profileImagePath.value;
-
-    String? result = await submitProfileData(
-      frontImageFile: ,
-      firstName: firstName,
-      lastName: lastName,
-      dateOfBirth: dateOfBirth,
-      gender: gender,
-      email: email,
-      profileImage: profileImage,
-    );
-
-    if (result != null) {
-      userName.value = nameController.text;
-      isEditing.value = false;
-      Get.snackbar("Success", "Profile updated successfully");
-    }
-
-    isLoading.value = false;
-  }*/
-
-  Future<void> saveData(GlobalKey<FormState> formKey) async {
+  Future<void> saveData(
+    GlobalKey<FormState> formKey,
+    BuildContext context,
+  ) async
+  {
     if (!formKey.currentState!.validate()) return;
 
     isLoading.value = true;
@@ -157,22 +126,90 @@ class ProfleCotroller extends GetxController {
     if (result != null) {
       userName.value = nameController.text;
       isEditing.value = false;
-      Get.snackbar(
-        "Success",
-        "Profile updated successfully",
-        backgroundColor: Colors.green,
-        colorText: Colors.white,
-        snackPosition: SnackPosition.TOP, // or TOP
-        margin: const EdgeInsets.all(10),
-        borderRadius: 8,
-        duration: const Duration(seconds: 3),
-      );
+      AppToasts.showSuccess(context, "Profile updated successfully");
     }
 
     isLoading.value = false;
   }
-
   Future<String?> submitProfileData({
+    required String firstName,
+    required String lastName,
+    required String dateOfBirth,
+    required String gender,
+    required String email,
+    required String emergencyNumber,
+    required String countryCode,
+    File? frontImageFile,
+    required String profileImage,
+    BuildContext? context,
+  }) async {
+    try {
+      isLoading.value = true;
+      String? frontImageUrl;
+
+      if (frontImageFile != null) {
+        final frontResult = await apiDataSource.userProfileUpload(
+          imageFile: frontImageFile,
+        );
+
+        frontImageUrl = frontResult.fold(
+              (failure) {
+            AppLogger.log.e("Front Upload Failed: ${failure.message}");
+            if (context != null) {
+              AppToasts.customToast(context, failure.message);
+            }
+            return null;
+          },
+              (success) => success.message,
+        );
+
+        if (frontImageUrl == null) {
+          isLoading.value = false;
+          return null;
+        }
+      } else {
+        frontImageUrl = this.frontImageUrl.value.isNotEmpty
+            ? this.frontImageUrl.value
+            : profileImage;
+      }
+
+      final results = await apiDataSource.submitProfileData(
+        firstName: firstName,
+        lastName: lastName,
+        dateOfBirth: dateOfBirth,
+        gender: gender,
+        email: email,
+        profileImage: frontImageUrl,
+        emergencyNumber: emergencyNumber,
+        countryCode: countryCode,
+      );
+
+      return results.fold(
+            (failure) {
+          isLoading.value = false;
+          if (context != null) {
+            AppToasts.customToast(context, failure.message);
+          }
+          AppLogger.log.e("Failure: ${failure.message}");
+          return null; // important
+        },
+            (response) {
+          getProfileData();
+          isLoading.value = false;
+          AppLogger.log.i("Success: ${response.message}");
+          return response.message;
+        },
+      );
+    } catch (e) {
+      isLoading.value = false;
+      AppLogger.log.e(e);
+      if (context != null) {
+        AppToasts.customToast(context, "Something went wrong");
+      }
+      return null;
+    }
+  }
+/*  Future<String?> submitProfileData({
     required String firstName,
     required String lastName,
     required String dateOfBirth,
@@ -227,70 +264,10 @@ class ProfleCotroller extends GetxController {
           AppToasts.customToast(context!, failure.message);
           AppLogger.log.e("Failure: $failure");
 
-          return null;
+          return failure.message;
         },
         (response) {
           getProfileData();
-          isLoading.value = false;
-          AppLogger.log.i("Success: ${response.message}");
-          return response.message;
-        },
-      );
-    } catch (e) {
-      isLoading.value = false;
-      AppLogger.log.e(e);
-      return null;
-    }
-  }
-
-  /* Future<void> submitProfileData({
-    required String firstName,
-    required String lastName,
-    required String dateOfBirth,
-    required String gender,
-    required String email,
-    File? frontImageFile,
-    required String profileImage,
-  }) async {
-    try {
-      isLoading.value = true;
-      String? frontImageUrl;
-
-      if (frontImageFile != null) {
-        final frontResult = await apiDataSource.userProfileUpload(
-          imageFile: frontImageFile,
-        );
-
-        frontImageUrl = frontResult.fold((failure) {
-          // CustomSnackBar.showError("Front Upload Failed: ${failure.message}");
-          return null;
-        }, (success) => success.message);
-
-        if (frontImageUrl == null) {
-          isLoading.value = false;
-          return;
-        }
-      } else {
-        // Use existing URL if no new file
-        frontImageUrl = this.frontImageUrl.value;
-      }
-
-      final results = await apiDataSource.submitProfileData(
-        firstName: firstName,
-        lastName: lastName,
-        dateOfBirth: dateOfBirth,
-        gender: gender,
-        email: email,
-        profileImage: frontImageUrl,
-      );
-
-      return results.fold(
-            (failure) {
-          isLoading.value = false;
-          AppLogger.log.e("Failure: $failure");
-          return null;
-        },
-            (response) {
           isLoading.value = false;
           AppLogger.log.i("Success: ${response.message}");
           return response.message;
@@ -352,6 +329,3 @@ class ProfleCotroller extends GetxController {
     }
   }
 }
-
-
-

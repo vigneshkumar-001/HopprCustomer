@@ -191,6 +191,7 @@ class CustomTextFields {
     String? Function(String?)? validator,
     bool filled  = false,
     Color? filledColor ,
+    FocusNode? focusNode,
 
     bool readOnly = false,
   }) {
@@ -203,6 +204,7 @@ class CustomTextFields {
         ),
         SizedBox(height: 8),
         TextFormField(
+          focusNode: focusNode,
           cursorColor: Colors.black,
 
           autovalidateMode: AutovalidateMode.onUserInteraction,

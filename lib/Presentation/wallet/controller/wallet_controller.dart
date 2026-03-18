@@ -60,6 +60,7 @@ class WalletController extends GetxController {
 
   Future<void> addWallet({
     required double amount,
+    required BuildContext context,
     required String method,
   }) async {
     isLoading.value = true;
@@ -70,7 +71,7 @@ class WalletController extends GetxController {
       );
       results.fold(
         (failure) {
-          AppToasts.showError(failure.message);
+          AppToasts.showError(context,failure.message);
           AppLogger.log.e("❌ Ride history fetch failed: $failure");
         },
         (response) {

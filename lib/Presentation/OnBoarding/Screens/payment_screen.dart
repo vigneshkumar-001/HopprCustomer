@@ -81,7 +81,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
   Future<void> _saveReceiptSummary(String summary) async {
     final file = File('${Directory.systemTemp.path}${Platform.pathSeparator}hoppr_receipt_${widget.bookingId ?? 'ride'}.txt');
     await file.writeAsString(summary);
-    AppToasts.showSuccess('Summary saved: ${file.path}');
+    AppToasts.showSuccess(context,'Summary saved: ${file.path}');
   }
 
   Future<void> _showPaymentSuccessSheet({required String paymentMethod, String? transactionId}) async {
@@ -120,7 +120,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
               Row(children: [
                 Expanded(child: AppButtons.button(onTap: () => Share.share(summary), text: 'Share', buttonColor: Colors.white, textColor: Colors.black, hasBorder: true, borderColor: const Color(0xFFD0D5DD))),
                 const SizedBox(width: 10),
-                Expanded(child: AppButtons.button(onTap: () async { await Clipboard.setData(ClipboardData(text: summary)); AppToasts.showSuccess('Receipt copied'); }, text: 'Copy', buttonColor: Colors.white, textColor: Colors.black, hasBorder: true, borderColor: const Color(0xFFD0D5DD))),
+                Expanded(child: AppButtons.button(onTap: () async { await Clipboard.setData(ClipboardData(text: summary)); AppToasts.showSuccess(context,'Receipt copied'); }, text: 'Copy', buttonColor: Colors.white, textColor: Colors.black, hasBorder: true, borderColor: const Color(0xFFD0D5DD))),
               ]),
               const SizedBox(height: 10),
               Row(children: [
@@ -355,10 +355,10 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
     if (!mounted) return;
     if (result == true) {
-      AppToasts.showSuccess('Payment Successful');
+      AppToasts.showSuccess(context,'Payment Successful');
       await _completePaymentFlow(paymentMethod: 'PayPal');
     } else if (result == false) {
-      AppToasts.showError('Payment failed or cancelled');
+      AppToasts.showError(context,'Payment failed or cancelled');
     }
   }
 
@@ -472,7 +472,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
       if (decoded is Map && decoded.containsKey('error')) {
         final errorMsg = decoded['error'] ?? 'Unknown error occurred';
         if (context.mounted) {
-          AppToasts.showError(errorMsg.toString());
+          AppToasts.showError(context,errorMsg.toString());
           // ScaffoldMessenger.of(context).showSnackBar(
           //   SnackBar(content: Text(errorMsg.toString())),
           // );
@@ -494,7 +494,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
         // ScaffoldMessenger.of(context).showSnackBar(
         //   SnackBar(content: Text('Error creating payment intent: $err')),
         // );
-        AppToasts.showError('$err');
+        AppToasts.showError(context,'$err');
       }
       return null;
     }
@@ -563,25 +563,25 @@ class _PaymentScreenState extends State<PaymentScreen> {
           );
 
           if (result != null && result["status"] == "success") {
-            AppToasts.showSuccess('Payment Successful');
+            AppToasts.showSuccess(context,'Payment Successful');
             AppLogger.log.i("Payment Successful: ${result["transactionId"]}");
             await _completePaymentFlow(paymentMethod: 'FlutterWave', transactionId: result['transactionId']?.toString());
           } else {
-            AppToasts.showError("Payment failed or cancelled");
+            AppToasts.showError(context,"Payment failed or cancelled");
           }
         } else {
           final errorMsg = data['message'] ?? "Failed to initialize payment";
-          AppToasts.showError(errorMsg);
+          AppToasts.showError(context,errorMsg);
         }
       } else {
         final errorMsg = data['message'] ?? "Failed to initialize payment";
-        AppToasts.showError(errorMsg);
+        AppToasts.showError(context,errorMsg);
         AppLogger.log.e(
           'Failed to initialize Flutterwave payment: ${response.body}',
         );
       }
     } catch (e) {
-      AppToasts.showError(e.toString());
+      AppToasts.showError(context,e.toString());
       AppLogger.log.e("Error during Flutterwave payment: $e");
     } finally {
       setState(() => flutterWaveLoading = false);
@@ -667,7 +667,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
                     if (_emailController.text.isEmpty ||
                         _nameController.text.isEmpty ||
                         _phoneController.text.isEmpty) {
-                      AppToasts.showError("All fields are required");
+                      AppToasts.showError(context,"All fields are required");
                       return;
                     }
 
@@ -780,25 +780,25 @@ class _PaymentScreenState extends State<PaymentScreen> {
           );
 
           if (result != null && result["status"] == "success") {
-            AppToasts.showSuccess('Payment Successful');
+            AppToasts.showSuccess(context,'Payment Successful');
             AppLogger.log.i("Payment Successful: ${result["transactionId"]}");
             await _completePaymentFlow(paymentMethod: 'Paystack', transactionId: result['transactionId']?.toString());
           } else {
-            AppToasts.showError("Payment failed or cancelled");
+            AppToasts.showError(context,"Payment failed or cancelled");
           }
         } else {
           final errorMsg = data['message'] ?? "Failed to initialize payment";
-          AppToasts.showError(errorMsg);
+          AppToasts.showError(context,errorMsg);
         }
       } else {
         final errorMsg = data['message'] ?? "Failed to initialize payment";
-        AppToasts.showError(errorMsg);
+        AppToasts.showError(context,errorMsg);
         AppLogger.log.e(
           'Failed to initialize Flutterwave payment: ${response.body}',
         );
       }
     } catch (e) {
-      AppToasts.showError(e.toString());
+      AppToasts.showError(context,e.toString());
       AppLogger.log.e("Error during Flutterwave payment: $e");
     } finally {
       setState(() => payStackLoading = false);

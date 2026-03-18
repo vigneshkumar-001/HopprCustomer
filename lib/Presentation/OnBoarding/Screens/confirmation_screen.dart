@@ -447,7 +447,7 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                                                   _couponCtrl.text.trim();
 
                                               await packageController
-                                                  .applyCoupon(
+                                                  .applyCoupon(context: context,
                                                     actionType: 'REMOVE',
                                                     code: code,
                                                     bookingId: bookingId,
@@ -456,7 +456,7 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
 
                                             if (ctx.mounted) Navigator.pop(ctx);
                                             AppToasts.showSuccess(
-                                              'Coupon removed',
+                                              context,        'Coupon removed',
                                             );
                                           },
                                   isLoading: loading,
@@ -475,7 +475,7 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                                           final code = _couponCtrl.text.trim();
                                           if (code.isEmpty) {
                                             AppToasts.showError(
-                                              'Enter a coupon code',
+                                              context,'Enter a coupon code',
                                             );
                                             return;
                                           }
@@ -534,6 +534,7 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
           packageController.packageDetails.value?.data?.bookingId;
 
       final result = await packageController.applyCoupon(
+        context: context,
         actionType: actionType,
         code: code,
         bookingId: bookingId ?? '',

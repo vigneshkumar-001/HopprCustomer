@@ -64,7 +64,8 @@ class OrderConfirmScreen extends StatefulWidget {
   State<OrderConfirmScreen> createState() => _OrderConfirmScreenState();
 }
 
-class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticKeepAliveClientMixin, WidgetsBindingObserver {
+class _OrderConfirmScreenState extends State<OrderConfirmScreen>
+    with AutomaticKeepAliveClientMixin, WidgetsBindingObserver {
   @override
   bool get wantKeepAlive => true;
 
@@ -73,7 +74,9 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
   final TextEditingController _startController = TextEditingController();
   final TextEditingController _destController = TextEditingController();
   bool _hasNavigatedToPayment = false;
-  static const MethodChannel _screenChannel = MethodChannel('ride_screen_control');
+  static const MethodChannel _screenChannel = MethodChannel(
+    'ride_screen_control',
+  );
 
   @override
   void initState() {
@@ -121,7 +124,6 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
     Get.delete<OrderConfirmController>(tag: widget.bookingId, force: true);
     super.dispose();
   }
-
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
@@ -179,7 +181,10 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
                     markers: c.markers.toSet(),
                     polylines: c.polylines.toSet(),
                     circles: c.circles.toSet(),
-                    minMaxZoomPreference: const MinMaxZoomPreference(11.0, 17.0),
+                    minMaxZoomPreference: const MinMaxZoomPreference(
+                      11.0,
+                      17.0,
+                    ),
 
                     onMapCreated: (controller) async {
                       // final style = await DefaultAssetBundle.of(context)
@@ -206,7 +211,7 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
                       final prefs = await SharedPreferences.getInstance();
                       String? sosNumber = prefs.getString('sosNumber');
                       if (sosNumber == null || sosNumber.trim().isEmpty) {
-                        AppToasts.showError('SOS number not set');
+                        AppToasts.showError(context, 'SOS number not set');
                         return;
                       }
 
@@ -219,7 +224,7 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
                       final normalized = hasPlus ? '+$digitsOnly' : digitsOnly;
 
                       if (normalized.isEmpty) {
-                        AppToasts.showError('Invalid SOS number');
+                        AppToasts.showError(context,'Invalid SOS number');
                         return;
                       }
 
@@ -228,9 +233,9 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
                         uri,
                         mode: LaunchMode.externalApplication,
                       );
-                      if (!ok) AppToasts.showError('Could not open dialer');
+                      if (!ok) AppToasts.showError(context,'Could not open dialer');
                     } catch (_) {
-                      AppToasts.showError('Failed to start call');
+                      AppToasts.showError(context,'Failed to start call');
                     }
                   },
                   child: Container(
@@ -256,7 +261,8 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
                 left: 16,
                 right: 88,
                 child: Obx(() {
-                  if (!c.isDriverConfirmed.value || c.etaChipText.value.isEmpty) {
+                  if (!c.isDriverConfirmed.value ||
+                      c.etaChipText.value.isEmpty) {
                     return const SizedBox.shrink();
                   }
                   return Align(
@@ -288,13 +294,16 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
               // Bottom sheet
               Obx(
                 () => DraggableScrollableSheet(
-                  key: ValueKey('${c.isDriverConfirmed.value}-${c.isWaitingForDriver.value}-${c.noDriverFound.value}'),
+                  key: ValueKey(
+                    '${c.isDriverConfirmed.value}-${c.isWaitingForDriver.value}-${c.noDriverFound.value}',
+                  ),
                   initialChildSize: c.isDriverConfirmed.value ? 0.65 : 0.5,
                   minChildSize: 0.4,
                   maxChildSize: c.isDriverConfirmed.value ? 0.9 : 0.80,
                   builder: (context, scrollController) {
                     return Obx(() {
-                      final sheetStateKey = '${c.isDriverConfirmed.value}-${c.isWaitingForDriver.value}-${c.noDriverFound.value}';
+                      final sheetStateKey =
+                          '${c.isDriverConfirmed.value}-${c.isWaitingForDriver.value}-${c.noDriverFound.value}';
                       return AnimatedSwitcher(
                         duration: const Duration(milliseconds: 220),
                         child: Container(
@@ -396,7 +405,14 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
               c.driverSearchController.carBooking.value?.bookingId ??
               c.bookingId;
           if (!mounted) return;
-          Get.off(() => PaymentScreen(bookingId: id, amount: c.amount.value, driverName: c.driverName.value, driverProfilePic: c.profilePic.value));
+          Get.off(
+            () => PaymentScreen(
+              bookingId: id,
+              amount: c.amount.value,
+              driverName: c.driverName.value,
+              driverProfilePic: c.profilePic.value,
+            ),
+          );
         });
       }
 
@@ -419,7 +435,9 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
           ),
           const SizedBox(height: 12),
           _rideStatusTimeline(),
-          if (c.otp.value.isNotEmpty && !c.driverStartedRide.value && !c.destinationReached.value) ...[
+          if (c.otp.value.isNotEmpty &&
+              !c.driverStartedRide.value &&
+              !c.destinationReached.value) ...[
             const SizedBox(height: 14),
             _otpHighlightCard(),
           ],
@@ -446,13 +464,16 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
                           color: AppColors.containerColor1,
                         ),
                         clipBehavior: Clip.antiAlias,
-                        child: c.profilePic.value.isNotEmpty
-                            ? Image.network(
-                                c.profilePic.value,
-                                fit: BoxFit.cover,
-                                errorBuilder: (_, __, ___) => const Icon(Icons.person, size: 20),
-                              )
-                            : const Icon(Icons.person, size: 20),
+                        child:
+                            c.profilePic.value.isNotEmpty
+                                ? Image.network(
+                                  c.profilePic.value,
+                                  fit: BoxFit.cover,
+                                  errorBuilder:
+                                      (_, __, ___) =>
+                                          const Icon(Icons.person, size: 20),
+                                )
+                                : const Icon(Icons.person, size: 20),
                       ),
                       const SizedBox(width: 10),
                       CustomTextFields.textWithStylesSmall(
@@ -555,7 +576,6 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
     });
   }
 
-
   Widget _etaChip() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -563,7 +583,11 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
         color: Colors.white,
         borderRadius: BorderRadius.circular(22),
         boxShadow: const [
-          BoxShadow(color: Colors.black12, blurRadius: 10, offset: Offset(0, 4)),
+          BoxShadow(
+            color: Colors.black12,
+            blurRadius: 10,
+            offset: Offset(0, 4),
+          ),
         ],
       ),
       child: Row(
@@ -604,7 +628,10 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Ride status', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+          const Text(
+            'Ride status',
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+          ),
           const SizedBox(height: 12),
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
@@ -612,7 +639,10 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
               children: List.generate(steps.length, (index) {
                 final completed = index < activeIndex;
                 final active = index == activeIndex;
-                final color = completed || active ? Colors.black : const Color(0xFFD0D5DD);
+                final color =
+                    completed || active
+                        ? Colors.black
+                        : const Color(0xFFD0D5DD);
                 return Row(
                   children: [
                     Column(
@@ -622,13 +652,32 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
                           height: 18,
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
-                            color: completed || active ? Colors.black : Colors.white,
+                            color:
+                                completed || active
+                                    ? Colors.black
+                                    : Colors.white,
                             border: Border.all(color: color, width: 2),
                           ),
-                          child: completed
-                              ? const Icon(Icons.check, size: 10, color: Colors.white)
-                              : active
-                                  ? const Center(child: SizedBox(width: 6, height: 6, child: DecoratedBox(decoration: BoxDecoration(color: Colors.white, shape: BoxShape.circle))))
+                          child:
+                              completed
+                                  ? const Icon(
+                                    Icons.check,
+                                    size: 10,
+                                    color: Colors.white,
+                                  )
+                                  : active
+                                  ? const Center(
+                                    child: SizedBox(
+                                      width: 6,
+                                      height: 6,
+                                      child: DecoratedBox(
+                                        decoration: BoxDecoration(
+                                          color: Colors.white,
+                                          shape: BoxShape.circle,
+                                        ),
+                                      ),
+                                    ),
+                                  )
                                   : null,
                         ),
                         const SizedBox(height: 8),
@@ -637,7 +686,15 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
                           child: Text(
                             steps[index],
                             textAlign: TextAlign.center,
-                            style: TextStyle(fontSize: 11, fontWeight: active ? FontWeight.w700 : FontWeight.w500, color: completed || active ? Colors.black : const Color(0xFF98A2B3)),
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight:
+                                  active ? FontWeight.w700 : FontWeight.w500,
+                              color:
+                                  completed || active
+                                      ? Colors.black
+                                      : const Color(0xFF98A2B3),
+                            ),
                           ),
                         ),
                       ],
@@ -647,7 +704,10 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
                         width: 34,
                         height: 2,
                         margin: const EdgeInsets.only(bottom: 24),
-                        color: index < activeIndex ? Colors.black : const Color(0xFFE4E7EC),
+                        color:
+                            index < activeIndex
+                                ? Colors.black
+                                : const Color(0xFFE4E7EC),
                       ),
                   ],
                 );
@@ -672,14 +732,29 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('Ride OTP', style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w600)),
+                const Text(
+                  'Ride OTP',
+                  style: TextStyle(
+                    color: Colors.white70,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
                 const SizedBox(height: 6),
                 Text(
                   c.otp.value,
-                  style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.w800, letterSpacing: 3),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 28,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 3,
+                  ),
                 ),
                 const SizedBox(height: 4),
-                const Text('Share this OTP when the driver reaches pickup.', style: TextStyle(color: Colors.white70, fontSize: 11)),
+                const Text(
+                  'Share this OTP when the driver reaches pickup.',
+                  style: TextStyle(color: Colors.white70, fontSize: 11),
+                ),
               ],
             ),
           ),
@@ -687,7 +762,7 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
           InkWell(
             onTap: () async {
               await Clipboard.setData(ClipboardData(text: c.otp.value));
-              AppToasts.showSuccess('OTP copied');
+              AppToasts.showSuccess(context,'OTP copied');
             },
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -709,6 +784,7 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
       ),
     );
   }
+
   Widget _fareBox() {
     return Obx(
       () => Container(
@@ -745,20 +821,20 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
                         c.otp.value.isEmpty
                             ? const SizedBox.shrink()
                             : Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 10,
-                                  vertical: 6,
-                                ),
-                                decoration: BoxDecoration(
-                                  borderRadius: BorderRadius.circular(6),
-                                  color: AppColors.userChatContainerColor,
-                                ),
-                                child: CustomTextFields.textWithStyles600(
-                                  'OTP - ${c.otp.value}',
-                                  fontSize: 16,
-                                  color: AppColors.commonWhite,
-                                ),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 6,
                               ),
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(6),
+                                color: AppColors.userChatContainerColor,
+                              ),
+                              child: CustomTextFields.textWithStyles600(
+                                'OTP - ${c.otp.value}',
+                                fontSize: 16,
+                                color: AppColors.commonWhite,
+                              ),
+                            ),
                       ],
                     ),
                     Padding(
@@ -788,9 +864,10 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
                     ),
                     AnimatedSwitcher(
                       duration: const Duration(milliseconds: 300),
-                      child: c.isExpanded.value
-                          ? _fareBreakdown()
-                          : const SizedBox.shrink(),
+                      child:
+                          c.isExpanded.value
+                              ? _fareBreakdown()
+                              : const SizedBox.shrink(),
                     ),
                   ],
                 ),
@@ -822,21 +899,26 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               CustomTextFields.textWithImage(
-                onTap: c.otp.value.isNotEmpty
-                    ? null
-                    : () {
-                        AppButtons.showCancelRideBottomSheet(
-                          context,
-                          onConfirmCancel: (String selectedReason) {
-                            c.driverSearchController.cancelRide(
-                              bookingId:
-                                  c.driverSearchController.carBooking.value!.bookingId,
-                              selectedReason: selectedReason,
-                              context: context,
-                            );
-                          },
-                        );
-                      },
+                onTap:
+                    c.otp.value.isNotEmpty
+                        ? null
+                        : () {
+                          AppButtons.showCancelRideBottomSheet(
+                            context,
+                            onConfirmCancel: (String selectedReason) {
+                              c.driverSearchController.cancelRide(
+                                bookingId:
+                                    c
+                                        .driverSearchController
+                                        .carBooking
+                                        .value!
+                                        .bookingId,
+                                selectedReason: selectedReason,
+                                context: context,
+                              );
+                            },
+                          );
+                        },
                 text: c.otp.value.isNotEmpty ? 'Ratings' : ' Cancel Ride',
                 fontWeight: FontWeight.w500,
                 colors: AppColors.cancelRideColor,
@@ -913,27 +995,31 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
           buttonColor: AppColors.commonWhite,
           textColor: AppColors.cancelRideColor,
           isLoading: c.driverSearchController.isCancelLoading.value,
-          onTap: c.driverSearchController.isCancelLoading.value
-              ? null
-              : () {
-                  AppButtons.showCancelRideBottomSheet(
-                    context,
-                    onConfirmCancel: (String selectedReason) {
-                      c.driverSearchController.cancelRide(
-                        bookingId:
-                            c.driverSearchController.carBooking.value!.bookingId,
-                        selectedReason: selectedReason,
-                        context: context,
-                      );
-                    },
-                  );
-                },
+          onTap:
+              c.driverSearchController.isCancelLoading.value
+                  ? null
+                  : () {
+                    AppButtons.showCancelRideBottomSheet(
+                      context,
+                      onConfirmCancel: (String selectedReason) {
+                        c.driverSearchController.cancelRide(
+                          bookingId:
+                              c
+                                  .driverSearchController
+                                  .carBooking
+                                  .value!
+                                  .bookingId,
+                          selectedReason: selectedReason,
+                          context: context,
+                        );
+                      },
+                    );
+                  },
           text: 'Cancel Ride',
         ),
       ],
     );
   }
-
 
   Widget _fareBreakdown() {
     return Container(
@@ -974,6 +1060,7 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
       ],
     );
   }
+
   Widget _noDriverFoundUI() {
     return Center(
       child: Column(
@@ -1001,29 +1088,31 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
             textColor: Colors.white,
             text: "Try Again",
             isLoading: c.driverSearchController.isRetryLoading.value,
-            onTap: c.driverSearchController.isRetryLoading.value
-                ? null
-                : () async {
-                    c.isWaitingForDriver.value = true;
-                    c.noDriverFound.value = false;
+            onTap:
+                c.driverSearchController.isRetryLoading.value
+                    ? null
+                    : () async {
+                      c.isWaitingForDriver.value = true;
+                      c.noDriverFound.value = false;
 
-                    final allData = c.driverSearchController.carBooking.value;
-                    final result = await c.driverSearchController.sendDriverRequest(
-                      carType: widget.carType,
-                      pickupLatitude: allData?.fromLatitude ?? 0.0,
-                      pickupLongitude: allData?.fromLongitude ?? 0.0,
-                      dropLatitude: allData?.toLatitude ?? 0.0,
-                      dropLongitude: allData?.toLongitude ?? 0.0,
-                      bookingId: allData?.bookingId.toString() ?? '',
-                      context: context,
-                    );
+                      final allData = c.driverSearchController.carBooking.value;
+                      final result = await c.driverSearchController
+                          .sendDriverRequest(
+                            carType: widget.carType,
+                            pickupLatitude: allData?.fromLatitude ?? 0.0,
+                            pickupLongitude: allData?.fromLongitude ?? 0.0,
+                            dropLatitude: allData?.toLatitude ?? 0.0,
+                            dropLongitude: allData?.toLongitude ?? 0.0,
+                            bookingId: allData?.bookingId.toString() ?? '',
+                            context: context,
+                          );
 
-                    if (!mounted) return;
+                      if (!mounted) return;
 
-                    if (result == 'success') {
-                      c.startDriverSearchTimer();
-                    }
-                  },
+                      if (result == 'success') {
+                        c.startDriverSearchTimer();
+                      }
+                    },
           ),
           const SizedBox(height: 15),
           SizedBox(
@@ -2889,25 +2978,3 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen> with AutomaticK
 //   }
 // }
 //
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

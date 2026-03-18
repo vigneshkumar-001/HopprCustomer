@@ -242,7 +242,7 @@ class PackageController extends GetxController {
           if (context != null) {
             AppToasts.customToast(context, failure.message);
           } else {
-            AppToasts.showError(failure.message);
+            AppToasts.showError(context!,failure.message);
           }
           return null;
         }, (success) => success.message);
@@ -266,7 +266,7 @@ class PackageController extends GetxController {
           if (context != null) {
             AppToasts.customToast(context, failure.message);
           } else {
-            AppToasts.showError(failure.message);
+            AppToasts.showError(context!,failure.message);
           }
           AppLogger.log.e("Failure: $failure");
 
@@ -287,6 +287,7 @@ class PackageController extends GetxController {
 
   Future<CouponResponse?> applyCoupon({
     required String code,
+    required BuildContext context,
     required String bookingId,
     required String actionType,
   }) async {
@@ -303,13 +304,13 @@ class PackageController extends GetxController {
         (failure) {
           isLoading.value = false;
           AppLogger.log.e("Failed: ${failure.message}");
-          AppToasts.showError(failure.message);
+          AppToasts.showError(context,failure.message);
           return null; // <-- always return a consistent type
         },
         (response) {
           isLoading.value = false;
           AppLogger.log.i("Success: ${response.message}");
-          AppToasts.showSuccess(response.message ?? 'Coupon applied');
+          AppToasts.showSuccess(context,response.message ?? 'Coupon applied');
           return response; // <-- return proper CouponResponse
         },
       );

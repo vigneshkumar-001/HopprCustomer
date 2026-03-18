@@ -701,7 +701,7 @@ class ApiDataSource extends BaseApiDataSource {
           return Right(UserSubmitResponse.fromJson(response.data));
         } else {
           return Left(
-            ServerFailure(response.data['message'] ?? "Login failed"),
+              ServerFailure(response.data['message'] ?? "Profile update failed")
           );
         }
       } else if (response is Response) {

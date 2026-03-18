@@ -654,7 +654,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                       String? sosNumber = prefs.getString('sosNumber');
 
                       if (sosNumber == null || sosNumber.trim().isEmpty) {
-                        AppToasts.showError('SOS number not set');
+                        AppToasts.showError(context,'SOS number not set');
                         return;
                       }
 
@@ -668,7 +668,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                       final normalized = hasPlus ? '+$digitsOnly' : digitsOnly;
 
                       if (normalized.isEmpty) {
-                        AppToasts.showError('Invalid SOS number');
+                        AppToasts.showError(context,'Invalid SOS number');
                         return;
                       }
 
@@ -682,10 +682,10 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                       );
 
                       if (!ok) {
-                        AppToasts.showError('Could not open dialer');
+                        AppToasts.showError(context,'Could not open dialer');
                       }
                     } catch (e) {
-                      AppToasts.showError('Failed to start call');
+                      AppToasts.showError(context,'Failed to start call');
                     }
                   },
 

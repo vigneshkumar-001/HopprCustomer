@@ -198,7 +198,7 @@ class _WalletPaymentScreensState extends State<WalletPaymentScreens> {
 
         // Show toast/snackbar/dialog with message
         AppLogger.log.e('❌ Payment failed: $message');
-        AppToasts.showError(message); // or your own UI alert handler
+        AppToasts.showError(context,message); // or your own UI alert handler
 
         return null; // Don’t throw; handle gracefully
       }
@@ -352,7 +352,7 @@ class _WalletPaymentScreensState extends State<WalletPaymentScreens> {
           );
 
           if (result != null && result["status"] == "success") {
-            AppToasts.showSuccess('Payment Successful');
+            AppToasts.showSuccess(context,'Payment Successful');
             AppLogger.log.i("Payment Successful: ${result["transaction_id"]}");
 
             Navigator.pushAndRemoveUntil(
@@ -363,21 +363,21 @@ class _WalletPaymentScreensState extends State<WalletPaymentScreens> {
               (route) => false,
             );
           } else {
-            AppToasts.showError("Payment failed or cancelled");
+            AppToasts.showError(context,"Payment failed or cancelled");
           }
         } else {
           final errorMsg = data['message'] ?? "Failed to initialize payment";
-          AppToasts.showError(errorMsg);
+          AppToasts.showError(context,errorMsg);
         }
       } else {
         final errorMsg = data['message'] ?? "Failed to initialize payment";
-        AppToasts.showError(errorMsg);
+        AppToasts.showError(context,errorMsg);
         AppLogger.log.e(
           'Failed to initialize Flutterwave payment: ${response.body}',
         );
       }
     } catch (e) {
-      AppToasts.showError(e.toString());
+      AppToasts.showError(context,e.toString());
       AppLogger.log.e("Error during Flutterwave payment: $e");
     } finally {
       setState(() => flutterWaveLoading = false);
@@ -1036,21 +1036,21 @@ class _WalletPaymentScreensState extends State<WalletPaymentScreens> {
               );
             });
           } else {
-            AppToasts.showError("Payment failed or cancelled");
+            AppToasts.showError(context,"Payment failed or cancelled");
           }
         } else {
           final errorMsg = data['message'] ?? "Failed to initialize payment";
-          AppToasts.showError(errorMsg);
+          AppToasts.showError(context,errorMsg);
         }
       } else {
         final errorMsg = data['message'] ?? "Failed to initialize payment";
-        AppToasts.showError(errorMsg);
+        AppToasts.showError(context,errorMsg);
         AppLogger.log.e(
           'Failed to initialize Flutterwave payment: ${response.body}',
         );
       }
     } catch (e) {
-      AppToasts.showError(e.toString());
+      AppToasts.showError(context,e.toString());
       AppLogger.log.e("Error during Flutterwave payment: $e");
     } finally {
       setState(() => payStackLoading = false);

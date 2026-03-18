@@ -949,7 +949,7 @@ class _SharedScreensState extends State<SharedScreens>
                       String? sosNumber = prefs.getString('sosNumber');
 
                       if (sosNumber == null || sosNumber.trim().isEmpty) {
-                        AppToasts.showError('SOS number not set');
+                        AppToasts.showError(context, 'SOS number not set');
                         return;
                       }
 
@@ -962,7 +962,7 @@ class _SharedScreensState extends State<SharedScreens>
                       final normalized = hasPlus ? '+$digitsOnly' : digitsOnly;
 
                       if (normalized.isEmpty) {
-                        AppToasts.showError('Invalid SOS number');
+                        AppToasts.showError(context, 'Invalid SOS number');
                         return;
                       }
 
@@ -973,10 +973,10 @@ class _SharedScreensState extends State<SharedScreens>
                       );
 
                       if (!ok) {
-                        AppToasts.showError('Could not open dialer');
+                        AppToasts.showError(context, 'Could not open dialer');
                       }
                     } catch (e) {
-                      AppToasts.showError('Failed to start call');
+                      AppToasts.showError(context, 'Failed to start call');
                     }
                   },
                   child: Container(
@@ -1198,6 +1198,7 @@ class _SharedScreensState extends State<SharedScreens>
                                         var rawNumber = CUSTOMERPHONE.trim();
                                         if (rawNumber.isEmpty) {
                                           AppToasts.showError(
+                                            context,
                                             'Number Not set ',
                                           );
                                           return;
@@ -1216,7 +1217,10 @@ class _SharedScreensState extends State<SharedScreens>
                                                 : digitsOnly;
 
                                         if (normalized.isEmpty) {
-                                          AppToasts.showError('Invalid number');
+                                          AppToasts.showError(
+                                            context,
+                                            'Invalid number',
+                                          );
                                           return;
                                         }
 
@@ -1232,11 +1236,13 @@ class _SharedScreensState extends State<SharedScreens>
 
                                         if (!ok) {
                                           AppToasts.showError(
+                                            context,
                                             'Could not open dialer',
                                           );
                                         }
                                       } catch (e) {
                                         AppToasts.showError(
+                                          context,
                                           'Failed to start call',
                                         );
                                       }

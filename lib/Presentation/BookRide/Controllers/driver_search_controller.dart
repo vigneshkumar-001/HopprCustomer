@@ -149,7 +149,7 @@ class DriverSearchController extends GetxController {
       return results.fold(
         (failure) {
           isLoading.value = false;
-          AppToasts.showError(failure.message);
+          AppToasts.showError(context,failure.message);
           return failure.message;
         },
         (response) {
@@ -211,7 +211,7 @@ class DriverSearchController extends GetxController {
       return results.fold(
         (failure) {
           isLoading.value = false;
-          AppToasts.showError(failure.message);
+          AppToasts.showError(context,failure.message);
           return failure.message;
         },
         (response) {
@@ -271,7 +271,7 @@ class DriverSearchController extends GetxController {
       return results.fold(
         (failure) {
           isRetryLoading.value = false;
-          AppToasts.showError(failure.message);
+          AppToasts.showError(context,failure.message);
           return null;
         },
         (response) {
@@ -305,7 +305,7 @@ class DriverSearchController extends GetxController {
         (failure) {
           isCancelLoading.value = false;
           AppLogger.log.e(failure.message);
-          AppToasts.showError(failure.message, title: 'Cancellation Failed');
+          AppToasts.showError(context,failure.message, title: 'Cancellation Failed');
           return failure.message;
         },
         (response) {
@@ -339,7 +339,7 @@ class DriverSearchController extends GetxController {
         (failure) {
           isLoading.value = false;
           AppLogger.log.e(failure.message);
-          AppToasts.showError(failure.message);
+          AppToasts.showError(context,failure.message);
           // Navigator.pushReplacement(
           //   context,
           //   MaterialPageRoute(
