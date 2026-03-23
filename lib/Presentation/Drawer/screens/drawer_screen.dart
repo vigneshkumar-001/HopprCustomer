@@ -10,6 +10,7 @@ import 'package:hopper/Presentation/Drawer/screens/notification_screens.dart';
 import 'package:hopper/Presentation/Drawer/screens/ride_and_package_history_screen.dart';
 import 'package:hopper/Presentation/Drawer/screens/settings_screen.dart';
 import 'package:hopper/Presentation/OnBoarding/Widgets/custom_bottomnavigation.dart';
+import 'package:hopper/Presentation/CustomerSupport/screens/customer_support_list_screen.dart';
 import 'package:hopper/Presentation/wallet/screens/wallet_screens.dart';
 import 'package:hopper/TutorialService_widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -142,13 +143,19 @@ class _DrawerScreenState extends State<DrawerScreen> {
                             color: AppColors.dividerColor.withOpacity(0.1),
                             thickness: 1.5,
                           ),
-                          // const SizedBox(height: 30),
-                          // CustomTextFields.textWithStyles700('Help'),
-                          // const SizedBox(height: 20),
-                          // Divider(
-                          //   color: AppColors.dividerColor.withOpacity(0.1),
-                          //   thickness: 1.5,
-                          // ),
+
+                          const SizedBox(height: 30),
+                          InkWell(
+                            onTap: () {
+                              Get.to(() => const CustomerSupportListScreen());
+                            },
+                            child: CustomTextFields.textWithStyles700('Support'),
+                          ),
+                          const SizedBox(height: 20),
+                          Divider(
+                            color: AppColors.dividerColor.withOpacity(0.1),
+                            thickness: 1.5,
+                          ),
                           const SizedBox(height: 30),
                           InkWell(
                             onTap: () {

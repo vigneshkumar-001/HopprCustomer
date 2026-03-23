@@ -3,6 +3,7 @@
 import 'dart:async';
 import 'package:get/get.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:hopper/Core/Utility/app_toasts.dart';
 
 class NetworkController extends GetxController {
   var isConnected = true.obs;
@@ -48,22 +49,11 @@ class NetworkController extends GetxController {
     await checkConnectionNow();
 
     if (isConnected.value) {
-      Get.closeAllSnackbars();
-      Get.snackbar(
-        "Online",
-        "You're back online!",
-        snackPosition: SnackPosition.TOP,
-        backgroundColor: Get.theme.colorScheme.secondary,
-        colorText: Get.theme.colorScheme.onSecondary,
-      );
+      AppToasts.showSuccessGlobal("You're back online!");
     } else {
-      Get.closeAllSnackbars();
-      Get.snackbar(
-        "Still offline",
+      AppToasts.showErrorGlobal(
         "Please check your internet connection.",
-        snackPosition: SnackPosition.TOP,
-        backgroundColor: Get.theme.colorScheme.error,
-        colorText: Get.theme.colorScheme.onError,
+        title: "Still offline",
       );
     }
 

@@ -6,6 +6,7 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:get/get.dart';
 import 'package:hopper/Core/Consents/app_logger.dart';
+import 'package:hopper/Core/Utility/app_toasts.dart';
 import 'package:hopper/Presentation/Authentication/controller/otp_controller.dart';
 import 'package:hopper/Presentation/OnBoarding/Screens/chat_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -149,10 +150,9 @@ class FirebaseService {
 
     AppLogger.log.i('Notification permission: ${settings.authorizationStatus}');
     if (settings.authorizationStatus == AuthorizationStatus.denied) {
-      Get.snackbar(
-        'Notifications Disabled',
+      AppToasts.showInfoGlobal(
         'Enable notifications in device settings.',
-        snackPosition: SnackPosition.BOTTOM,
+        title: 'Notifications Disabled',
       );
     }
   }

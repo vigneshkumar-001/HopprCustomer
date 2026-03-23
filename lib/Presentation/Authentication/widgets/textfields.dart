@@ -419,6 +419,8 @@ FontWeight fontWeight = FontWeight.w500,
   static textWithStylesSmall(
     String text, {
     int? maxLines,
+    TextOverflow overflow = TextOverflow.ellipsis,
+    bool softWrap = true,
     String? text1,
     TextAlign textAlign = TextAlign.start,
     FontWeight? fontWeight,
@@ -426,7 +428,8 @@ FontWeight fontWeight = FontWeight.w500,
     Color? colors = Colors.black45,
   }) {
     return Text(
-      overflow: TextOverflow.ellipsis,
+      softWrap: softWrap,
+      overflow: overflow,
       maxLines: maxLines,
       textAlign: textAlign,
       text + (text1 ?? ''),

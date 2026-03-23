@@ -50,13 +50,7 @@ class AuthController extends GetxController {
       );
       results.fold(
         (failure) {
-          // Get.snackbar(
-          //   "Error",
-          //   failure.message,
-          //   snackPosition: SnackPosition.TOP,
-          //   backgroundColor: Get.theme.colorScheme.secondary,
-          //   colorText: Get.theme.colorScheme.onSecondary,
-          // );
+          // AppToasts.showErrorGlobal(failure.message, title: "Error");
           isLoading.value = false;
         },
         (response) {
@@ -88,13 +82,7 @@ class AuthController extends GetxController {
       final results = await apiDataSource.getAppSettings();
       results.fold(
         (failure) {
-          // Get.snackbar(
-          //   "Error",
-          //   failure.message,
-          //   snackPosition: SnackPosition.TOP,
-          //   backgroundColor: Get.theme.colorScheme.secondary,
-          //   colorText: Get.theme.colorScheme.onSecondary,
-          // );
+          // AppToasts.showErrorGlobal(failure.message, title: "Error");
           isLoading.value = false;
         },
         (response) async {

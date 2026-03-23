@@ -47,13 +47,7 @@ class PackageController extends GetxController {
 
       return results.fold(
         (failure) {
-          Get.snackbar(
-            "Error",
-            failure.message,
-            snackPosition: SnackPosition.TOP,
-            backgroundColor: AppColors.errorRed,
-            colorText: Get.theme.colorScheme.onSecondary,
-          );
+          AppToasts.showErrorGlobal(failure.message, title: "Error");
 
           isButtonLoading.value = false;
           return failure.message;
@@ -100,22 +94,16 @@ class PackageController extends GetxController {
             'userId': response.data.customerId,
           };
 
-          // Log the data
-          AppLogger.log.i("📤 Join booking data: $bookingData");
+           // Log the data
+           AppLogger.log.i("📤 Join booking data: $bookingData");
+           socketService.joinBookingRoom(
+             bookingId: response.data.bookingId.toString(),
+             payload: bookingData,
+           );
 
-          if (socketService.connected) {
-            socketService.emit('join-booking', bookingData);
-            AppLogger.log.i("✅ Socket already connected, emitted join-booking");
-          } else {
-            socketService.onConnect(() {
-              AppLogger.log.i("✅ Socket connected, emitting join-booking");
-              socketService.emit('join-booking', bookingData);
-            });
-          }
-
-          isLoading.value = false;
-          packageDetails.value = response;
-          AppLogger.log.i("Package Details  == ${packageDetails.value}");
+           isLoading.value = false;
+           packageDetails.value = response;
+           AppLogger.log.i("Package Details  == ${packageDetails.value}");
           return response.data.toString();
         },
       );

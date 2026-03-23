@@ -75,13 +75,54 @@ class _PaymentScreenState extends State<PaymentScreen> {
   }
 
   String _receiptSummary(String paymentMethod, {String? transactionId}) {
-    return 'Hoppr Ride Receipt\nBooking ID: \nAmount: \nPayment: ';
+    final booking = (widget.bookingId ?? '').trim();
+    final amount =
+        (widget.amount != null) ? widget.amount!.toStringAsFixed(2) : '';
+    final driverName = (widget.driverName ?? '').trim();
+    final tx = (transactionId ?? '').trim();
+
+    final now = DateTime.now();
+    final two = (int v) => v.toString().padLeft(2, '0');
+    final dateStr =
+        '${now.year}-${two(now.month)}-${two(now.day)} ${two(now.hour)}:${two(now.minute)}';
+
+    final b = StringBuffer();
+    b.writeln('Hoppr Receipt');
+    b.writeln('Date: $dateStr');
+    b.writeln('Booking ID: ${booking.isEmpty ? '-' : booking}');
+    b.writeln('Amount: ${amount.isEmpty ? '-' : amount}');
+    b.writeln('Payment: $paymentMethod');
+    if (tx.isNotEmpty) b.writeln('Transaction: $tx');
+    if (driverName.isNotEmpty) b.writeln('Driver: $driverName');
+    return b.toString().trim();
   }
 
-  Future<void> _saveReceiptSummary(String summary) async {
-    final file = File('${Directory.systemTemp.path}${Platform.pathSeparator}hoppr_receipt_${widget.bookingId ?? 'ride'}.txt');
+  Future<File> _writeReceiptFile(String summary) async {
+    final safeBooking =
+        (widget.bookingId ?? 'ride').replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
+    final ts = DateTime.now()
+        .toIso8601String()
+        .replaceAll(':', '-')
+        .replaceAll('.', '-');
+    final file = File(
+      '${Directory.systemTemp.path}${Platform.pathSeparator}hoppr_receipt_${safeBooking}_$ts.txt',
+    );
     await file.writeAsString(summary);
-    AppToasts.showSuccess(context,'Summary saved: ${file.path}');
+    return file;
+  }
+
+  Future<void> _exportReceipt(String summary) async {
+    try {
+      final file = await _writeReceiptFile(summary);
+      await Share.shareXFiles(
+        <XFile>[XFile(file.path)],
+        subject: 'Hoppr receipt',
+        text: 'Hoppr receipt',
+      );
+    } catch (_) {
+      if (!mounted) return;
+      AppToasts.showError(context, 'Failed to export receipt');
+    }
   }
 
   Future<void> _showPaymentSuccessSheet({required String paymentMethod, String? transactionId}) async {
@@ -124,7 +165,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
               ]),
               const SizedBox(height: 10),
               Row(children: [
-                Expanded(child: AppButtons.button(onTap: () async => _saveReceiptSummary(summary), text: 'Save Summary', buttonColor: Colors.white, textColor: Colors.black, hasBorder: true, borderColor: const Color(0xFFD0D5DD))),
+                Expanded(child: AppButtons.button(onTap: () async => _exportReceipt(summary), text: 'Download', buttonColor: Colors.white, textColor: Colors.black, hasBorder: true, borderColor: const Color(0xFFD0D5DD))),
                 const SizedBox(width: 10),
                 Expanded(child: AppButtons.button(onTap: () => Navigator.pop(sheetContext), text: 'Continue', buttonColor: AppColors.commonBlack)),
               ]),

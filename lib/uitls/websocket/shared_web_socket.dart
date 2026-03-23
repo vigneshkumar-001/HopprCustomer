@@ -8,7 +8,7 @@ class RideShareSocketService {
 
   RideShareSocketService._internal();
 
-  late IO.Socket _socket;
+  IO.Socket? _socket;
   bool _initialized = false;
 
   String? _userId;
@@ -73,7 +73,7 @@ class RideShareSocketService {
 
       AppLogger.log.i("🔄 [RIDE] Listeners rebound, rooms rejoined");
     });
-    _socket.onError((err) => AppLogger.log.e("❗ General socket error: $err"));
+    _socket?.onError((err) => AppLogger.log.e("❗ General socket error: $err"));
 
     _socket!.onDisconnect((_) {
       AppLogger.log.e("❌ [RIDE] Disconnected from $url");
@@ -144,9 +144,9 @@ class RideShareSocketService {
   // ---------------------------------------------------------
   // Emit & Listen
   // ---------------------------------------------------------
-  void onConnect(Function() callback) => _socket.onConnect((_) => callback());
+  void onConnect(Function() callback) => _socket?.onConnect((_) => callback());
   void onReconnect(Function() callback) =>
-      _socket.onReconnect((_) => callback());
+      _socket?.onReconnect((_) => callback());
   void on(String event, Function(dynamic data) callback) {
     _callbacks[event] = callback;
     _socket?.on(event, callback);
@@ -155,7 +155,7 @@ class RideShareSocketService {
   void onAck(String event, Function(dynamic data, Function? ack) callback) {
     _callbacks[event] = (data) => callback(data, null);
 
-    _socket.on(event, (dynamic incoming) {
+    _socket?.on(event, (dynamic incoming) {
       if (incoming is List && incoming.length == 2 && incoming[1] is Function) {
         final payload = incoming[0];
         final ackFn = incoming[1] as Function;
@@ -166,7 +166,7 @@ class RideShareSocketService {
     });
   }
   void emitWithAck(String event, dynamic data, Function(dynamic)? ack) =>
-      _socket.emitWithAck(event, data, ack: ack);
+      _socket?.emitWithAck(event, data, ack: ack);
   void emit(String event, dynamic data) {
     _socket?.emit(event, data);
   }
@@ -181,6 +181,7 @@ class RideShareSocketService {
   // ---------------------------------------------------------
   void dispose() {
     _socket?.dispose();
+    _socket = null;
     _initialized = false;
     _userId = null;
     _bookingId = null;

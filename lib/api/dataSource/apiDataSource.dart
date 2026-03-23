@@ -19,6 +19,7 @@ import 'package:hopper/Presentation/OnBoarding/models/chat_history_response.dart
 import 'package:hopper/Presentation/OnBoarding/models/confrom_package_response.dart';
 import 'package:hopper/Presentation/OnBoarding/models/coupen_response.dart';
 import 'package:hopper/Presentation/OnBoarding/models/package_details_response.dart';
+import 'package:hopper/Presentation/CustomerSupport/models/customer_support_models.dart';
 import 'package:hopper/Presentation/wallet/model/get_wallet_balance_response.dart';
 import 'package:hopper/Presentation/wallet/model/transaction_response.dart';
 import 'package:hopper/Presentation/wallet/model/wallet_response.dart';
@@ -30,6 +31,12 @@ import '../../Presentation/OnBoarding/models/user_image_models.dart';
 import '../repository/failure.dart';
 import 'package:dio/dio.dart';
 import 'package:dartz/dartz.dart';
+
+typedef SupportCommonDetailsResult =
+    Either<Failure, SupportCommonDetailsResponse>;
+typedef SupportMyTicketsResult = Either<Failure, SupportMyTicketsResponse>;
+typedef SupportCreateTicketResult =
+    Either<Failure, SupportCreateTicketResponse>;
 
 abstract class BaseApiDataSource {
   Future<Either<Failure, LoginResponse>> mobileNumberLogin(
@@ -232,6 +239,7 @@ class ApiDataSource extends BaseApiDataSource {
       return Left(ServerFailure('Something went wrong'));
     }
   }
+
   Future<Either<Failure, SendDriverRequestModels>> sendDriverRequest({
     required double pickupLatitude,
     required double pickupLongitude,
@@ -503,11 +511,144 @@ class ApiDataSource extends BaseApiDataSource {
         return Left(ServerFailure((responseData['message'] ?? '').toString()));
       } else {
         return Left(
-          ServerFailure((responseData['message'] ?? "Unknown error").toString()),
+          ServerFailure(
+            (responseData['message'] ?? "Unknown error").toString(),
+          ),
         );
       }
     } catch (e, st) {
       AppLogger.log.e('userProfileUpload error: $e\n$st');
+      return Left(ServerFailure('Something went wrong'));
+    }
+  }
+
+  // ------------------------------------------------------------
+  // Support
+  // ------------------------------------------------------------
+
+  Future<SupportCommonDetailsResult> getSupportCommonDetails() async {
+    try {
+      final url = ApiConsents.supportCommonDetails;
+      final response = await Request.sendGetRequest(url, {}, 'GET', true);
+
+      if (response is! Response) {
+        return Left(ServerFailure('Unexpected response from server'));
+      }
+
+      if (response.statusCode != 200) {
+        final msg =
+            (response.data is Map<String, dynamic>)
+                ? (response.data['message'] ?? '').toString()
+                : '';
+        return Left(
+          ServerFailure(msg.isEmpty ? 'Failed to load support details' : msg),
+        );
+      }
+
+      final data = response.data;
+      if (data is! Map<String, dynamic>) {
+        return Left(ServerFailure('Invalid response format'));
+      }
+
+      final parsed = SupportCommonDetailsResponse.fromJson(data);
+      if (!parsed.success || parsed.data == null) {
+        return Left(ServerFailure((data['message'] ?? 'Failed').toString()));
+      }
+
+      return Right(parsed);
+    } catch (e, st) {
+      AppLogger.log.e("getSupportCommonDetails error: $e\n$st");
+      return Left(ServerFailure('Something went wrong'));
+    }
+  }
+
+  Future<SupportMyTicketsResult> getMySupportTickets() async {
+    try {
+      final url = ApiConsents.supportMyTickets;
+      final response = await Request.sendGetRequest(url, {}, 'GET', true);
+
+      if (response is! Response) {
+        return Left(ServerFailure('Unexpected response from server'));
+      }
+
+      if (response.statusCode != 200) {
+        final msg =
+            (response.data is Map<String, dynamic>)
+                ? (response.data['message'] ?? '').toString()
+                : '';
+        return Left(
+          ServerFailure(msg.isEmpty ? 'Failed to load tickets' : msg),
+        );
+      }
+
+      final data = response.data;
+      if (data is! Map<String, dynamic>) {
+        return Left(ServerFailure('Invalid response format'));
+      }
+
+      final parsed = SupportMyTicketsResponse.fromJson(data);
+      if (!parsed.success) {
+        return Left(ServerFailure((data['message'] ?? 'Failed').toString()));
+      }
+      return Right(parsed);
+    } catch (e, st) {
+      AppLogger.log.e("getMySupportTickets error: $e\n$st");
+      return Left(ServerFailure('Something went wrong'));
+    }
+  }
+
+  Future<SupportCreateTicketResult> createSupportTicket({
+    required String categoryId,
+    required String subcategoryId,
+    required String priority,
+    required String subject,
+    required String detailedDescription,
+    required List<String> attachments,
+  }) async {
+    try {
+      final url = ApiConsents.supportCustomerTickets;
+      final payload = <String, dynamic>{
+        "categoryId": categoryId,
+        "subcategoryId": subcategoryId,
+        "priority": priority,
+        "subject": subject,
+        "detailedDescription": detailedDescription,
+        "attachments": attachments,
+      };
+
+      final response = await Request.sendRequest(url, payload, 'Post', true);
+
+      if (response is DioException) {
+        return Left(ServerFailure(response.message ?? 'Network error'));
+      }
+
+      if (response is! Response) {
+        return Left(ServerFailure('Unexpected response from server'));
+      }
+
+      final status = response.statusCode ?? 0;
+      if (status != 200 && status != 201) {
+        final msg =
+            (response.data is Map<String, dynamic>)
+                ? (response.data['message'] ?? '').toString()
+                : '';
+        return Left(
+          ServerFailure(msg.isEmpty ? 'Failed to create ticket' : msg),
+        );
+      }
+
+      final data = response.data;
+      if (data is! Map<String, dynamic>) {
+        return Left(ServerFailure('Invalid response format'));
+      }
+
+      final parsed = SupportCreateTicketResponse.fromJson(data);
+      if (!parsed.success) {
+        return Left(ServerFailure((data['message'] ?? 'Failed').toString()));
+      }
+      return Right(parsed);
+    } catch (e, st) {
+      AppLogger.log.e("createSupportTicket error: $e\n$st");
       return Left(ServerFailure('Something went wrong'));
     }
   }
@@ -701,7 +842,7 @@ class ApiDataSource extends BaseApiDataSource {
           return Right(UserSubmitResponse.fromJson(response.data));
         } else {
           return Left(
-              ServerFailure(response.data['message'] ?? "Profile update failed")
+            ServerFailure(response.data['message'] ?? "Profile update failed"),
           );
         }
       } else if (response is Response) {
@@ -918,7 +1059,8 @@ class ApiDataSource extends BaseApiDataSource {
         final data = response.data as Map<String, dynamic>;
         final rawSuccess = data['success'] ?? data['status'];
         final success =
-            rawSuccess == true || rawSuccess?.toString().toLowerCase() == 'true';
+            rawSuccess == true ||
+            rawSuccess?.toString().toLowerCase() == 'true';
         if (success) {
           return Right(UserSubmitResponse.fromJson(response.data));
         } else {
@@ -1009,4 +1151,3 @@ class ApiDataSource extends BaseApiDataSource {
     }
   }
 }
-

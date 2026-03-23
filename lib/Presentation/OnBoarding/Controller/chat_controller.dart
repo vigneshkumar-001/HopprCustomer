@@ -32,7 +32,7 @@
 //       results.fold(
 //             (failure) {
 //           isLoading.value = false;
-//           Get.snackbar('Error', failure.message);
+//           // AppToasts.showErrorGlobal(failure.message, title: 'Error');
 //         },
 //             (response) {
 //           isLoading.value = false;
@@ -56,7 +56,7 @@
 //       );
 //     } catch (_) {
 //       isLoading.value = false;
-//       Get.snackbar('Error', 'An unexpected error occurred');
+//       // AppToasts.showErrorGlobal('An unexpected error occurred', title: 'Error');
 //     }
 //   }
 // }
@@ -64,6 +64,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import 'package:hopper/Core/Utility/app_toasts.dart';
 import 'package:hopper/Presentation/OnBoarding/models/chat_history_response.dart';
 import 'package:hopper/api/dataSource/apiDataSource.dart';
 
@@ -95,7 +96,7 @@ class ChatController extends GetxController {
       results.fold(
             (failure) {
           isLoading.value = false;
-          Get.snackbar('Error', failure.message);
+          AppToasts.showErrorGlobal(failure.message, title: 'Error');
         },
             (response) {
           isLoading.value = false;
@@ -120,7 +121,7 @@ class ChatController extends GetxController {
       );
     } catch (_) {
       isLoading.value = false;
-      Get.snackbar('Error', 'An unexpected error occurred');
+      AppToasts.showErrorGlobal('An unexpected error occurred', title: 'Error');
     }
   }
 }

@@ -4,6 +4,7 @@ import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Core/Utility/app_buttons.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Core/Utility/app_loader.dart';
+import 'package:hopper/Core/Utility/app_toasts.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:hopper/Presentation/BookRide/Controllers/driver_search_controller.dart';
 import 'package:hopper/Presentation/BookRide/Models/shared_driver_search_response.dart';
@@ -460,16 +461,9 @@ class _RideShareScreenState extends State<RideShareScreen> {
                                                       maxSeatCount) {
                                                     selectedSeats.add(apiSeat);
                                                   } else {
-                                                    Get.closeAllSnackbars();
-                                                    Get.snackbar(
-                                                      'Limit Reached',
+                                                    AppToasts.showInfoGlobal(
                                                       'Maximum $maxSeatCount seats can be selected',
-                                                      snackPosition:
-                                                          SnackPosition.TOP,
-                                                      backgroundColor:
-                                                          AppColors.commonBlack,
-                                                      colorText:
-                                                          AppColors.commonWhite,
+                                                      title: 'Limit Reached',
                                                     );
                                                   }
                                                 }
@@ -518,16 +512,9 @@ class _RideShareScreenState extends State<RideShareScreen> {
                                                       maxSeatCount) {
                                                     selectedSeats.add(apiSeat);
                                                   } else {
-                                                    Get.closeAllSnackbars();
-                                                    Get.snackbar(
-                                                      'Limit Reached',
+                                                    AppToasts.showInfoGlobal(
                                                       'Maximum $maxSeatCount seats can be selected',
-                                                      snackPosition:
-                                                          SnackPosition.TOP,
-                                                      backgroundColor:
-                                                          AppColors.commonBlack,
-                                                      colorText:
-                                                          AppColors.commonWhite,
+                                                      title: 'Limit Reached',
                                                     );
                                                   }
                                                 }
@@ -570,16 +557,9 @@ class _RideShareScreenState extends State<RideShareScreen> {
                                                       maxSeatCount) {
                                                     selectedSeats.add(apiSeat);
                                                   } else {
-                                                    Get.closeAllSnackbars();
-                                                    Get.snackbar(
-                                                      'Limit Reached',
+                                                    AppToasts.showInfoGlobal(
                                                       'Maximum $maxSeatCount seats can be selected',
-                                                      snackPosition:
-                                                          SnackPosition.TOP,
-                                                      backgroundColor:
-                                                          AppColors.commonBlack,
-                                                      colorText:
-                                                          AppColors.commonWhite,
+                                                      title: 'Limit Reached',
                                                     );
                                                   }
                                                 }
@@ -664,13 +644,9 @@ class _RideShareScreenState extends State<RideShareScreen> {
 
                   onTap: () async {
                     if (selectedSeats.isEmpty) {
-                      Get.closeAllSnackbars();
-                      Get.snackbar(
-                        'Info',
+                      AppToasts.showInfoGlobal(
                         'Please select at least one seat.',
-                        snackPosition: SnackPosition.TOP,
-                        backgroundColor: AppColors.commonBlack,
-                        colorText: AppColors.commonWhite,
+                        title: 'Info',
                       );
                       return;
                     }

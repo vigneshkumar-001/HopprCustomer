@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -11,6 +13,15 @@ class SharedMap extends StatefulWidget {
   final Set<Polyline> polylines;
   final bool myLocationEnabled;
   final bool fitToBounds;
+  final double initialZoom;
+  final MinMaxZoomPreference minMaxZoomPreference;
+  final bool compassEnabled;
+  final bool rotateGesturesEnabled;
+  final bool tiltGesturesEnabled;
+  final Set<Factory<OneSequenceGestureRecognizer>> gestureRecognizers;
+  final ValueChanged<CameraPosition>? onCameraMove;
+  final VoidCallback? onCameraMoveStarted;
+  final ValueChanged<LatLng>? onTap;
 
   const SharedMap({
     super.key,
@@ -20,6 +31,15 @@ class SharedMap extends StatefulWidget {
     this.polylines = const <Polyline>{},
     this.myLocationEnabled = true,
     this.fitToBounds = true,
+    this.initialZoom = 14.9,
+    this.minMaxZoomPreference = const MinMaxZoomPreference(11.0, 17.0),
+    this.compassEnabled = true,
+    this.rotateGesturesEnabled = false,
+    this.tiltGesturesEnabled = false,
+    this.gestureRecognizers = const <Factory<OneSequenceGestureRecognizer>>{},
+    this.onCameraMove,
+    this.onCameraMoveStarted,
+    this.onTap,
   });
 
   @override
@@ -32,6 +52,34 @@ class SharedMapState extends State<SharedMap>
   late AnimationController _pulseController;
   bool _cameraInitialized = false;
   String? _mapStyle;
+  DateTime _lastFitAt = DateTime.fromMillisecondsSinceEpoch(0);
+  static const double _tinyBoundsThresholdMeters = 260.0;
+  static const double _tinyBoundsCapZoom = 16.4;
+
+  double _haversineMeters(LatLng a, LatLng b) {
+    const r = 6371000.0; // meters
+    final dLat = (b.latitude - a.latitude) * math.pi / 180.0;
+    final dLng = (b.longitude - a.longitude) * math.pi / 180.0;
+    final lat1 = a.latitude * math.pi / 180.0;
+    final lat2 = b.latitude * math.pi / 180.0;
+
+    final h =
+        math.sin(dLat / 2) * math.sin(dLat / 2) +
+        math.cos(lat1) * math.cos(lat2) * math.sin(dLng / 2) * math.sin(dLng / 2);
+    return 2 * r * math.asin(math.min(1.0, math.sqrt(h)));
+  }
+
+  bool _isTinyBounds(LatLngBounds b) {
+    final d = _haversineMeters(b.southwest, b.northeast);
+    return d.isFinite && d < _tinyBoundsThresholdMeters;
+  }
+
+  double _safeZoomForTinyBounds() {
+    final maxZ = widget.minMaxZoomPreference.maxZoom ?? 21.0;
+    final minZ = widget.minMaxZoomPreference.minZoom ?? 3.0;
+    final z = math.min(maxZ, _tinyBoundsCapZoom);
+    return math.max(minZ, z);
+  }
 
   @override
   void initState() {
@@ -68,6 +116,128 @@ class SharedMapState extends State<SharedMap>
     super.dispose();
   }
 
+  @override
+  void didUpdateWidget(covariant SharedMap oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!widget.fitToBounds) return;
+    if (_mapController == null) return;
+
+    // Refit only when pickup/drop markers change (ignore driver marker churn)
+    final oldPickup = _markerPosition(oldWidget.markers, 'pickup');
+    final oldDrop = _markerPosition(oldWidget.markers, 'drop');
+    final newPickup = _markerPosition(widget.markers, 'pickup');
+    final newDrop = _markerPosition(widget.markers, 'drop');
+
+    if (newPickup != null &&
+        newDrop != null &&
+        (oldPickup == null ||
+            oldDrop == null ||
+            oldPickup != newPickup ||
+            oldDrop != newDrop)) {
+      final now = DateTime.now();
+      if (now.difference(_lastFitAt) >= const Duration(milliseconds: 600)) {
+        _lastFitAt = now;
+        fitPointsBounds(<LatLng>[newPickup, newDrop], padding: 150);
+      }
+    }
+  }
+
+  LatLng? _markerPosition(Set<Marker> set, String id) {
+    for (final m in set) {
+      if (m.markerId.value == id) return m.position;
+    }
+    return null;
+  }
+
+  Future<void> _safeMoveToBounds(LatLngBounds b, {double padding = 130}) async {
+    if (_mapController == null) return;
+
+    if (_isTinyBounds(b)) {
+      final mid = LatLng(
+        (b.northeast.latitude + b.southwest.latitude) / 2,
+        (b.northeast.longitude + b.southwest.longitude) / 2,
+      );
+      try {
+        await _mapController!.animateCamera(
+          CameraUpdate.newCameraPosition(
+            CameraPosition(target: mid, zoom: _safeZoomForTinyBounds()),
+          ),
+        );
+      } catch (_) {}
+      return;
+    }
+    try {
+      await _mapController!.animateCamera(
+        CameraUpdate.newLatLngBounds(b, padding),
+      );
+    } catch (_) {
+      await Future.delayed(const Duration(milliseconds: 300));
+      try {
+        await _mapController!.animateCamera(
+          CameraUpdate.newLatLngBounds(b, padding),
+        );
+      } catch (_) {
+        final mid = LatLng(
+          (b.northeast.latitude + b.southwest.latitude) / 2,
+          (b.northeast.longitude + b.southwest.longitude) / 2,
+        );
+        _mapController!.moveCamera(
+          CameraUpdate.newCameraPosition(
+            CameraPosition(target: mid, zoom: 13.8),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> animateTo({
+    required LatLng target,
+    double? zoom,
+    double bearing = 0,
+    double tilt = 0,
+  }) async {
+    if (_mapController == null) return;
+    try {
+      await _mapController!.animateCamera(
+        CameraUpdate.newCameraPosition(
+          CameraPosition(
+            target: target,
+            zoom: zoom ?? widget.initialZoom,
+            bearing: bearing,
+            tilt: tilt,
+          ),
+        ),
+      );
+    } catch (_) {}
+  }
+
+  Future<void> fitPointsBounds(
+    List<LatLng> points, {
+    double padding = 130,
+  }) async {
+    if (_mapController == null) return;
+    if (points.length < 2) return;
+
+    double minLat = points.first.latitude;
+    double maxLat = points.first.latitude;
+    double minLng = points.first.longitude;
+    double maxLng = points.first.longitude;
+
+    for (final p in points.skip(1)) {
+      minLat = math.min(minLat, p.latitude);
+      maxLat = math.max(maxLat, p.latitude);
+      minLng = math.min(minLng, p.longitude);
+      maxLng = math.max(maxLng, p.longitude);
+    }
+
+    final bounds = LatLngBounds(
+      southwest: LatLng(minLat, minLng),
+      northeast: LatLng(maxLat, maxLng),
+    );
+
+    await _safeMoveToBounds(bounds, padding: padding);
+  }
+
   void _onMapCreated(GoogleMapController controller) {
     _mapController = controller;
 
@@ -79,17 +249,24 @@ class SharedMapState extends State<SharedMap>
       _cameraInitialized = true;
 
       if (widget.fitToBounds && widget.markers.length >= 2) {
-        final bounds = _boundsFromMarkers(widget.markers);
-        _mapController!.moveCamera(CameraUpdate.newLatLngBounds(bounds, 60));
+        final pickup = _markerPosition(widget.markers, 'pickup');
+        final drop = _markerPosition(widget.markers, 'drop');
+        if (pickup != null && drop != null) {
+          fitPointsBounds(<LatLng>[pickup, drop], padding: 150);
+        } else {
+          final bounds = _boundsFromMarkers(widget.markers);
+          _safeMoveToBounds(bounds, padding: 150);
+        }
       } else {
         _mapController!.moveCamera(
           CameraUpdate.newCameraPosition(
-            CameraPosition(target: widget.initialPosition, zoom: 15),
+            CameraPosition(target: widget.initialPosition, zoom: widget.initialZoom),
           ),
         );
       }
     }
   }
+
   Future<void> fitPolylineBounds(List<LatLng> pts, {double padding = 80}) async {
     if (_mapController == null) return;
     if (pts.length < 2) return;
@@ -111,9 +288,7 @@ class SharedMapState extends State<SharedMap>
       northeast: LatLng(maxLat, maxLng),
     );
 
-    await _mapController!.animateCamera(
-      CameraUpdate.newLatLngBounds(bounds, padding),
-    );
+    await _safeMoveToBounds(bounds, padding: padding);
   }
 
 
@@ -170,7 +345,7 @@ class SharedMapState extends State<SharedMap>
     if (_mapController == null || widget.pickupPosition == null) return;
     await _mapController!.animateCamera(
       CameraUpdate.newCameraPosition(
-        CameraPosition(target: widget.pickupPosition!, zoom: 17),
+        CameraPosition(target: widget.pickupPosition!, zoom: _safeZoomForTinyBounds()),
       ),
     );
   }
@@ -179,9 +354,7 @@ class SharedMapState extends State<SharedMap>
   Future<void> fitRouteBounds() async {
     if (_mapController == null || widget.markers.length < 2) return;
     final bounds = _boundsFromMarkers(widget.markers);
-    await _mapController!.animateCamera(
-      CameraUpdate.newLatLngBounds(bounds, 60),
-    );
+    await _safeMoveToBounds(bounds, padding: 150);
   }
 
   @override
@@ -189,19 +362,27 @@ class SharedMapState extends State<SharedMap>
     return GoogleMap(
       initialCameraPosition: CameraPosition(
         target: widget.initialPosition,
-        zoom: 15,
+        zoom: widget.initialZoom,
       ),
       onMapCreated: _onMapCreated,
       markers: widget.markers,
       polylines: widget.polylines,
       circles: _buildPickupCircles(),
       myLocationEnabled: widget.myLocationEnabled,
+      buildingsEnabled: false,
+      indoorViewEnabled: false,
       myLocationButtonEnabled: false,
       zoomControlsEnabled: false,
-      compassEnabled: false,
-      tiltGesturesEnabled: false,
+      compassEnabled: widget.compassEnabled,
+      rotateGesturesEnabled: widget.rotateGesturesEnabled,
+      tiltGesturesEnabled: widget.tiltGesturesEnabled,
       mapToolbarEnabled: false,
       trafficEnabled: false,
+      minMaxZoomPreference: widget.minMaxZoomPreference,
+      gestureRecognizers: widget.gestureRecognizers,
+      onCameraMove: widget.onCameraMove,
+      onCameraMoveStarted: widget.onCameraMoveStarted,
+      onTap: widget.onTap,
     );
   }
 }

@@ -132,6 +132,7 @@ import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Core/Utility/app_buttons.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Core/Utility/app_loader.dart';
+import 'package:hopper/Core/Utility/app_toasts.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:hopper/Presentation/wallet/controller/wallet_controller.dart';
 import 'package:get/get.dart';
@@ -306,20 +307,26 @@ class _AddMoneyScreenState extends State<AddMoneyScreen> {
                         controller.isLoading.value
                             ? null
                             : () async {
-                              final text = _amountController.text.trim();
-
-                              if (text.isEmpty) {
-                                Get.snackbar("Error", "Please enter an amount");
-                                return;
-                              }
-
-                              final double? amount = double.tryParse(text);
-                              if (amount == null) {
-                                Get.snackbar("Error", "Invalid amount entered");
-                                return;
-                              }
-                              Get.to(
-                                    () => WalletPaymentScreens(
+                               final text = _amountController.text.trim();
+ 
+                               if (text.isEmpty) {
+                                 AppToasts.showErrorGlobal(
+                                   "Please enter an amount",
+                                   title: "Error",
+                                 );
+                                 return;
+                               }
+ 
+                               final double? amount = double.tryParse(text);
+                               if (amount == null) {
+                                 AppToasts.showErrorGlobal(
+                                   "Invalid amount entered",
+                                   title: "Error",
+                                 );
+                                 return;
+                               }
+                               Get.to(
+                                     () => WalletPaymentScreens(
 
                                   clientSecret: '',
                                   publishableKey: '',

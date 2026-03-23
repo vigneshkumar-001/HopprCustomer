@@ -7,11 +7,13 @@ import 'package:hopper/Core/Consents/app_texts.dart';
 import 'package:hopper/Core/Utility/app_buttons.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
+import 'package:hopper/Presentation/OnBoarding/models/recent_location_model.dart';
 import 'package:hopper/api/repository/api_consents.dart';
 import 'package:http/http.dart' as http;
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:hopper/uitls/map/google_map.dart'; // MapScreen
+import 'package:shared_preferences/shared_preferences.dart';
 
 class CommonLocationSearch extends StatefulWidget {
   final String? type;
@@ -39,6 +41,9 @@ class _CommonLocationSearchState extends State<CommonLocationSearch> {
   final List<dynamic> _searchResults = [];
   bool _showInfoMessage = false;
 
+  final List<RecentLocation> _recentLocations = <RecentLocation>[];
+  bool _loadingRecents = false;
+
   // NEW: performance helpers
   Timer? _debounce;
   bool _isLoading = false;
@@ -54,6 +59,36 @@ class _CommonLocationSearchState extends State<CommonLocationSearch> {
     }
     _initOrigin(); // get location once
     _resetSessionToken(); // new session token
+    _loadRecentLocations();
+  }
+
+  Future<void> _loadRecentLocations() async {
+    try {
+      setState(() => _loadingRecents = true);
+      final prefs = await SharedPreferences.getInstance();
+      final recentList = prefs.getStringList('recent_locations') ?? const [];
+      final decoded = recentList
+          .map((jsonStr) {
+            final json = jsonDecode(jsonStr) as Map<String, dynamic>;
+            return RecentLocation.fromJson(json);
+          })
+          .where((e) => e.description.trim().isNotEmpty)
+          .toList();
+
+      if (!mounted) return;
+      setState(() {
+        _recentLocations
+          ..clear()
+          ..addAll(decoded);
+        _loadingRecents = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _recentLocations.clear();
+        _loadingRecents = false;
+      });
+    }
   }
 
   // Generate a lightweight session token (avoids pulling in uuid pkg)
@@ -188,6 +223,7 @@ class _CommonLocationSearchState extends State<CommonLocationSearch> {
                 (_) => MapScreen(
                   searchQuery: placeName,
                   location: LatLng(lat, lng),
+                  type: widget.type ?? '',
                   initialAddress: widget.initialAddress,
                   initialLandmark: widget.initialLandmark,
                   initialName: widget.initialName,
@@ -197,7 +233,17 @@ class _CommonLocationSearchState extends State<CommonLocationSearch> {
         );
 
         if (!mounted) return;
-        if (result != null && result['_selectedAddress'] != null) {
+        if (result != null && result['mapAddress'] != null) {
+          Navigator.pop(context, {
+            'mapAddress': result['mapAddress'],
+            'location': result['location'],
+            'address': result['address'],
+            'landmark': result['landmark'],
+            'name': result['name'],
+            'phone': result['phone'],
+          });
+          return;
+        } else if (result != null && result['_selectedAddress'] != null) {
           setState(() => _searchController.text = result['_selectedAddress']);
         }
 
@@ -209,6 +255,36 @@ class _CommonLocationSearchState extends State<CommonLocationSearch> {
       }
     } catch (_) {
       // ignore; you can show a snackbar if you want
+    }
+  }
+
+  Future<void> _openRecentLocation(RecentLocation recent) async {
+    final result = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder:
+            (_) => MapScreen(
+              searchQuery: recent.description,
+              location: LatLng(recent.lat, recent.lng),
+              type: widget.type ?? '',
+              initialAddress: widget.initialAddress,
+              initialLandmark: widget.initialLandmark,
+              initialName: widget.initialName,
+              initialPhone: widget.initialPhone,
+            ),
+      ),
+    );
+
+    if (!mounted) return;
+    if (result != null && result['mapAddress'] != null) {
+      Navigator.pop(context, {
+        'mapAddress': result['mapAddress'],
+        'location': result['location'],
+        'address': result['address'],
+        'landmark': result['landmark'],
+        'name': result['name'],
+        'phone': result['phone'],
+      });
     }
   }
 
@@ -257,8 +333,62 @@ class _CommonLocationSearchState extends State<CommonLocationSearch> {
     });
   }
 
+  Widget _buildRecentsList() {
+    if (_loadingRecents) {
+      return const Center(
+        child: SizedBox(
+          height: 22,
+          width: 22,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+
+    if (_recentLocations.isEmpty) return const SizedBox.shrink();
+
+    return ListView.builder(
+      itemCount: _recentLocations.length,
+      itemBuilder: (context, index) {
+        final recent = _recentLocations[index];
+        return ListTile(
+          leading: const Icon(Icons.history_rounded),
+          title: Text(
+            recent.description,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+          ),
+          onTap: () => _openRecentLocation(recent),
+        );
+      },
+    );
+  }
+
+  Widget _buildPredictionsList() {
+    return ListView.builder(
+      itemCount: _searchResults.length,
+      itemBuilder: (context, index) {
+        final place = _searchResults[index];
+        return ListTile(
+          leading: const Icon(Icons.location_on_outlined),
+          title: Text(
+            place['description'] ?? '',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+          ),
+          onTap: () {
+            _getPlaceDetailsAndNavigate(place['place_id'], place['description']);
+          },
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final showRecents =
+        _searchController.text.trim().isEmpty && _searchResults.isEmpty;
     return Scaffold(
       body: SafeArea(
         child: Column(
@@ -362,32 +492,7 @@ class _CommonLocationSearchState extends State<CommonLocationSearch> {
 
             // Predictions list (autocomplete only — instant)
             Expanded(
-              child: ListView.builder(
-                itemCount: _searchResults.length,
-                itemBuilder: (context, index) {
-                  final place = _searchResults[index];
-                  return ListTile(
-                    leading: const Icon(Icons.location_on_outlined),
-                    title: Text(
-                      place['description'] ?? '',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    // Distance removed from immediate list to keep it fast.
-                    // You can compute on-demand after user taps.
-                    onTap: () {
-                      _getPlaceDetailsAndNavigate(
-                        place['place_id'],
-                        place['description'],
-                      );
-                    },
-                  );
-                },
-              ),
+              child: showRecents ? _buildRecentsList() : _buildPredictionsList(),
             ),
 
             AppButtons.button(

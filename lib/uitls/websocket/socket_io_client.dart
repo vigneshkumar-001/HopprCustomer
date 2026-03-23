@@ -7,11 +7,12 @@ class SocketService {
 
   late IO.Socket _socket;
   bool _initialized = false;
-  bool get connected => _socket.connected;
+  bool get connected => _initialized && _socket.connected;
 
   // 🔹 Dynamic state storage
   String? _userId;
   final Map<String, String> _joinedRooms = {};
+  final Map<String, Map<String, dynamic>> _bookingRoomPayloads = {};
 
   SocketService._internal();
 
@@ -42,10 +43,15 @@ class SocketService {
       // Re-register user dynamically
       if (_userId != null) registerUser(_userId!);
 
-      // Re-join all previous rooms
-      _joinedRooms.forEach((bookingId, driverId) {
-        joinBooking(bookingId: bookingId, driverId: driverId);
-      });
+      // Re-join booking rooms (without tracking)
+      for (final payload in _bookingRoomPayloads.values) {
+        emit('join-booking', payload);
+      }
+
+      // Resume driver tracking
+      for (final driverId in _joinedRooms.values) {
+        emit('track-driver', {'driverId': driverId});
+      }
     });
 
     _socket.onDisconnect((_) => AppLogger.log.e("❌ Disconnected from $url"));
@@ -68,16 +74,36 @@ class SocketService {
   // 🔹 Join a booking / tracking dynamically
   void joinBooking({required String bookingId, required String driverId}) {
     _joinedRooms[bookingId] = driverId;
-    emit('join-booking', {'bookingId': bookingId});
+    joinBookingRoom(bookingId: bookingId);
     emit('track-driver', {'driverId': driverId});
+  }
+
+  // 🔹 Join booking room (no driver tracking)
+  void joinBookingRoom({
+    required String bookingId,
+    Map<String, dynamic>? payload,
+    bool force = false,
+  }) {
+    if (!force && _bookingRoomPayloads.containsKey(bookingId)) return;
+    _bookingRoomPayloads[bookingId] = payload ?? <String, dynamic>{'bookingId': bookingId};
+    if (connected) {
+      emit('join-booking', _bookingRoomPayloads[bookingId]);
+    }
+  }
+
+  void leaveBookingRoom(String bookingId) {
+    if (_bookingRoomPayloads.containsKey(bookingId)) {
+      emit('leave-booking', {'bookingId': bookingId});
+      _bookingRoomPayloads.remove(bookingId);
+    }
   }
 
   // 🔹 Leave booking
   void leaveBooking(String bookingId) {
     if (_joinedRooms.containsKey(bookingId)) {
-      emit('leave-booking', {'bookingId': bookingId});
       _joinedRooms.remove(bookingId);
     }
+    leaveBookingRoom(bookingId);
   }
 
   // 🔹 Event handling
@@ -95,6 +121,7 @@ class SocketService {
     _socket.dispose();
     _initialized = false;
     _joinedRooms.clear();
+    _bookingRoomPayloads.clear();
     _userId = null;
   }
 }

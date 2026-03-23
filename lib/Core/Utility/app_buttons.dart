@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
+import 'package:hopper/Core/Utility/app_toasts.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:get/get.dart';
 import 'package:hopper/Presentation/BookRide/Controllers/driver_search_controller.dart';
@@ -319,26 +320,28 @@ class AppButtons {
                             ),
                           ),
                           SizedBox(width: 20),
-                          Expanded(
-                            child: GetX<DriverSearchController>(
-                              init: Get.isRegistered<DriverSearchController>()
-                                  ? Get.find<DriverSearchController>()
-                                  : Get.put(DriverSearchController()),
-                              builder: (driverSearchController) {
-                                final isLoading =
-                                    driverSearchController.isLoading.value;
-                                return AppButtons.button(
-                                  isLoading: isLoading,
-                                  onTap: isLoading
-                                      ? null
-                                      : () {
-                                          if (selectedReason != null) {
-                                            onConfirmCancel(selectedReason!);
-                                          } else {
-                                            Get.snackbar(
-                                              'Info',
-                                              'Please Select a reason before proceeding',
-                                            );
+                            Expanded(
+                              child: GetX<DriverSearchController>(
+                                init: Get.isRegistered<DriverSearchController>()
+                                    ? Get.find<DriverSearchController>()
+                                    : Get.put(DriverSearchController()),
+                                builder: (driverSearchController) {
+                                  final isLoading =
+                                      driverSearchController.isCancelLoading.value;
+                                  return AppButtons.button(
+                                    isLoading: isLoading,
+                                    onTap: isLoading
+                                        ? null
+                                        : () {
+                                           if (selectedReason != null) {
+                                             // Close sheet first; show loading on the underlying screen button.
+                                             Get.back();
+                                             onConfirmCancel(selectedReason!);
+                                           } else {
+                                              AppToasts.showInfoGlobal(
+                                                'Please Select a reason before proceeding',
+                                                title: 'Info',
+                                              );
                                           }
                                         },
                                   text: "Cancel Ride",
@@ -362,9 +365,13 @@ class AppButtons {
 
   static void showPackageCancelBottomSheet(
     BuildContext context, {
-    required Function(String selectedReason) onConfirmCancel,
+    required Future<String?> Function(String selectedReason) onConfirmCancel,
   }) {
     String? selectedReason;
+    final DriverSearchController driverSearchController =
+        Get.isRegistered<DriverSearchController>()
+            ? Get.find<DriverSearchController>()
+            : Get.put(DriverSearchController());
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -592,22 +599,34 @@ class AppButtons {
                           ),
                           SizedBox(width: 10),
                           Expanded(
-                            child: AppButtons.button(
-                              buttonColor: AppColors.cancelRideColor,
-                              size: 210,
-                              onTap: () {
-                                if (selectedReason != null) {
-                                  onConfirmCancel(selectedReason!);
-                                  Get.back();
-                                } else {
-                                  Get.snackbar(
-                                    'Info',
-                                    'Please Select a reason before proceeding',
-                                  );
-                                }
-                              },
-                              text: "Confirm Cancellation",
-                            ),
+                            child: Obx(() {
+                              final isLoading =
+                                  driverSearchController.isCancelLoading.value;
+                              return AppButtons.button(
+                                buttonColor: AppColors.cancelRideColor,
+                                size: 210,
+                                isLoading: isLoading,
+                                onTap:
+                                    isLoading
+                                        ? null
+                                        : () async {
+                                          if (selectedReason != null) {
+                                            final res = await onConfirmCancel(
+                                              selectedReason!,
+                                            );
+                                            final ok =
+                                                (res ?? '').trim().isEmpty;
+                                            if (ok) Get.back();
+                                          } else {
+                                            AppToasts.showInfoGlobal(
+                                              'Please Select a reason before proceeding',
+                                              title: 'Info',
+                                            );
+                                          }
+                                        },
+                                text: "Confirm Cancellation",
+                              );
+                            }),
                           ),
                         ],
                       ),

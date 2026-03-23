@@ -10,6 +10,7 @@ import 'package:hopper/Presentation/BookRide/Controllers/order_confrim_controlle
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:hopper/Presentation/CustomerSupport/screens/customer_support_list_screen.dart';
 
 import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Core/Utility/app_buttons.dart';
@@ -74,6 +75,7 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
   final TextEditingController _startController = TextEditingController();
   final TextEditingController _destController = TextEditingController();
   bool _hasNavigatedToPayment = false;
+  bool _hasNavigatedHomeOnCancel = false;
   static const MethodChannel _screenChannel = MethodChannel(
     'ride_screen_control',
   );
@@ -113,6 +115,27 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
       c.bindContext(context);
       c.startDriverSearchTimer(); // âœ… now timer will always update UI
     });
+  }
+
+  Future<void> _handleCancelRide({
+    required String bookingId,
+    required String selectedReason,
+  }) async {
+    if (bookingId.trim().isEmpty) return;
+
+    final res = await c.driverSearchController.cancelRide(
+      bookingId: bookingId,
+      selectedReason: selectedReason,
+      context: context,
+    );
+
+    if (!mounted) return;
+
+    final ok = (res ?? '').trim().isEmpty;
+    if (!ok) return;
+
+    c.cancelReason.value = selectedReason;
+    c.isTripCancelled.value = true;
   }
 
   @override
@@ -162,6 +185,8 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                     tiltGesturesEnabled: false,
 
                     myLocationEnabled: true,
+                    buildingsEnabled: false,
+                    indoorViewEnabled: false,
                     myLocationButtonEnabled: false,
                     zoomControlsEnabled: false,
 
@@ -272,6 +297,22 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                 }),
               ),
 
+              // OTP overlay (black card on map)
+              Positioned(
+                top: 148,
+                left: 16,
+                right: 16,
+                child: Obx(() {
+                  if (c.otp.value.isEmpty ||
+                      c.driverStartedRide.value ||
+                      c.destinationReached.value ||
+                      c.isTripCancelled.value) {
+                    return const SizedBox.shrink();
+                  }
+                  return _otpMapCard();
+                }),
+              ),
+
               // locate / fit-route toggle
               Positioned(
                 top: 350,
@@ -303,7 +344,7 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                   builder: (context, scrollController) {
                     return Obx(() {
                       final sheetStateKey =
-                          '${c.isDriverConfirmed.value}-${c.isWaitingForDriver.value}-${c.noDriverFound.value}';
+                          '${c.isDriverConfirmed.value}-${c.isWaitingForDriver.value}-${c.noDriverFound.value}-${c.isTripCancelled.value}';
                       return AnimatedSwitcher(
                         duration: const Duration(milliseconds: 220),
                         child: Container(
@@ -332,14 +373,17 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                               ),
                               const SizedBox(height: 12),
 
-                              if (!c.isDriverConfirmed.value &&
-                                  c.isWaitingForDriver.value)
-                                _waitingForDriverUI()
-                              else if (!c.isDriverConfirmed.value &&
-                                  c.noDriverFound.value)
-                                _noDriverFoundUI()
-                              else
-                                _rideConfirmedUI(),
+                               if (!c.isDriverConfirmed.value &&
+                                   c.isTripCancelled.value)
+                                 _cancelledUI()
+                               else if (!c.isDriverConfirmed.value &&
+                                   c.isWaitingForDriver.value)
+                                 _waitingForDriverUI()
+                               else if (!c.isDriverConfirmed.value &&
+                                   c.noDriverFound.value)
+                                 _noDriverFoundUI()
+                               else
+                                 _rideConfirmedUI(),
 
                               const SizedBox(height: 20),
                             ],
@@ -362,39 +406,7 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
   Widget _rideConfirmedUI() {
     return Obx(() {
       if (c.isTripCancelled.value) {
-        Future.microtask(() async {
-          await Future.delayed(const Duration(seconds: 3));
-          if (mounted) {
-            Get.offAll(() => CommonBottomNavigation(initialIndex: 0));
-          }
-        });
-
-        return Container(
-          padding: const EdgeInsets.all(10),
-          margin: const EdgeInsets.all(8),
-          decoration: BoxDecoration(
-            color: Colors.red.shade50,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: Colors.red.shade200),
-          ),
-          child: Row(
-            children: [
-              const Icon(Icons.cancel, color: Colors.red),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  c.cancelReason.value.isEmpty
-                      ? "Your trip has been cancelled"
-                      : c.cancelReason.value,
-                  style: const TextStyle(
-                    color: Colors.red,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        );
+        return _cancelledUI();
       }
 
       if (c.destinationReached.value && !_hasNavigatedToPayment) {
@@ -433,6 +445,8 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
               rightImagePath: AppImages.clrTick,
             ),
           ),
+          const SizedBox(height: 6),
+          Center(child: _rideTypePill(shared: false)),
           const SizedBox(height: 12),
           _rideStatusTimeline(),
           if (c.otp.value.isNotEmpty &&
@@ -576,6 +590,46 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
     });
   }
 
+  Widget _cancelledUI() {
+    if (!_hasNavigatedHomeOnCancel) {
+      _hasNavigatedHomeOnCancel = true;
+      Future.microtask(() async {
+        await Future.delayed(const Duration(seconds: 3));
+        if (!mounted) return;
+        Get.offAll(() => CommonBottomNavigation(initialIndex: 0));
+      });
+    }
+
+    return Obx(() {
+      return Container(
+        padding: const EdgeInsets.all(10),
+        margin: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: Colors.red.shade50,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.red.shade200),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.cancel, color: Colors.red),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                c.cancelReason.value.isEmpty
+                    ? "Your trip has been cancelled"
+                    : c.cancelReason.value,
+                style: const TextStyle(
+                  color: Colors.red,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    });
+  }
+
   Widget _etaChip() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -602,6 +656,31 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _rideTypePill({required bool shared}) {
+    final icon = shared ? Icons.group_rounded : Icons.person_rounded;
+    final label = shared ? 'Shared ride' : 'Solo ride';
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.06),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: Colors.black.withOpacity(0.06)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 16, color: Colors.black87),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800),
           ),
         ],
       ),
@@ -785,6 +864,68 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
     );
   }
 
+  Widget _otpMapCard() {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.black,
+        borderRadius: BorderRadius.circular(14),
+        boxShadow: const [
+          BoxShadow(
+            color: Colors.black26,
+            blurRadius: 10,
+            offset: Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Ride OTP',
+                  style: TextStyle(
+                    color: Colors.white70,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  c.otp.value,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 22,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 2.5,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          InkWell(
+            onTap: () async {
+              await Clipboard.setData(ClipboardData(text: c.otp.value));
+              AppToasts.showSuccess(context, 'OTP copied');
+            },
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Icon(Icons.copy_rounded, size: 18, color: Colors.black),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _fareBox() {
     return Obx(
       () => Container(
@@ -827,12 +968,12 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                               ),
                               decoration: BoxDecoration(
                                 borderRadius: BorderRadius.circular(6),
-                                color: AppColors.userChatContainerColor,
+                                color: Colors.black,
                               ),
                               child: CustomTextFields.textWithStyles600(
                                 'OTP - ${c.otp.value}',
-                                fontSize: 16,
-                                color: AppColors.commonWhite,
+                                fontSize: 14,
+                                color: Colors.white,
                               ),
                             ),
                       ],
@@ -880,8 +1021,17 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
   }
 
   Widget _supportShareRow() {
-    return Obx(
-      () => Container(
+    return Obx(() {
+      final isCancelling = c.driverSearchController.isCancelLoading.value;
+      final canCancel =
+          !isCancelling &&
+          !c.driverStartedRide.value &&
+          !c.destinationReached.value;
+
+      final id =
+          c.driverSearchController.carBooking.value?.bookingId ?? c.bookingId;
+
+      return Container(
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(12),
@@ -900,54 +1050,51 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
             children: [
               CustomTextFields.textWithImage(
                 onTap:
-                    c.otp.value.isNotEmpty
-                        ? null
-                        : () {
+                    canCancel
+                        ? () {
                           AppButtons.showCancelRideBottomSheet(
                             context,
                             onConfirmCancel: (String selectedReason) {
-                              c.driverSearchController.cancelRide(
-                                bookingId:
-                                    c
-                                        .driverSearchController
-                                        .carBooking
-                                        .value!
-                                        .bookingId,
+                              if (id.trim().isEmpty) return;
+                              _handleCancelRide(
+                                bookingId: id,
                                 selectedReason: selectedReason,
-                                context: context,
                               );
                             },
                           );
-                        },
-                text: c.otp.value.isNotEmpty ? 'Ratings' : ' Cancel Ride',
+                        }
+                        : null,
+                text: isCancelling ? 'Cancelling...' : 'Cancel Ride',
                 fontWeight: FontWeight.w500,
-                colors: AppColors.cancelRideColor,
-                imagePath: c.otp.value.isNotEmpty ? null : AppImages.cancel,
+                colors:
+                    canCancel
+                        ? AppColors.cancelRideColor
+                        : AppColors.cancelRideColor.withOpacity(0.55),
+                imagePath: AppImages.cancel,
               ),
               const SizedBox(width: 10),
-              SizedBox(
-                height: 24,
-                child: VerticalDivider(color: Colors.grey, thickness: 1),
-              ),
-              const SizedBox(width: 10),
-              CustomTextFields.textWithImage(
-                onTap: () {},
-                text: 'Support',
-                fontWeight: FontWeight.w500,
-                colors: AppColors.cancelRideColor,
-                imagePath: AppImages.support,
-              ),
-              const SizedBox(width: 10),
-              SizedBox(
+              const SizedBox(
                 height: 24,
                 child: VerticalDivider(color: Colors.grey, thickness: 1),
               ),
               const SizedBox(width: 10),
               CustomTextFields.textWithImage(
                 onTap: () {
-                  final id =
-                      c.driverSearchController.carBooking.value?.bookingId ??
-                      c.bookingId;
+                  Get.to(() => CustomerSupportListScreen(bookingId: id));
+                },
+                text: 'Support',
+                fontWeight: FontWeight.w500,
+                colors: AppColors.cancelRideColor,
+                imagePath: AppImages.support,
+              ),
+              const SizedBox(width: 10),
+              const SizedBox(
+                height: 24,
+                child: VerticalDivider(color: Colors.grey, thickness: 1),
+              ),
+              const SizedBox(width: 10),
+              CustomTextFields.textWithImage(
+                onTap: () {
                   final url =
                       "https://hoppr-admin-e7bebfb9fb05.herokuapp.com/ride-tracker/$id";
                   Share.share(url);
@@ -955,13 +1102,13 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                 text: 'Share',
                 fontWeight: FontWeight.w500,
                 colors: AppColors.cancelRideColor,
-                imagePath: AppImages.support,
+                imagePath: AppImages.share,
               ),
             ],
           ),
         ),
-      ),
-    );
+      );
+    });
   }
 
   Widget _waitingForDriverUI() {
@@ -989,34 +1136,34 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
         const SizedBox(height: 20),
         _addressBox(),
         const SizedBox(height: 20),
-        AppButtons.button(
-          hasBorder: true,
-          borderColor: AppColors.commonBlack.withOpacity(0.2),
-          buttonColor: AppColors.commonWhite,
-          textColor: AppColors.cancelRideColor,
-          isLoading: c.driverSearchController.isCancelLoading.value,
-          onTap:
-              c.driverSearchController.isCancelLoading.value
-                  ? null
-                  : () {
-                    AppButtons.showCancelRideBottomSheet(
-                      context,
-                      onConfirmCancel: (String selectedReason) {
-                        c.driverSearchController.cancelRide(
-                          bookingId:
-                              c
-                                  .driverSearchController
-                                  .carBooking
-                                  .value!
-                                  .bookingId,
-                          selectedReason: selectedReason,
-                          context: context,
-                        );
-                      },
-                    );
-                  },
-          text: 'Cancel Ride',
-        ),
+        Obx(() {
+          final loading = c.driverSearchController.isCancelLoading.value;
+          return AppButtons.button(
+            hasBorder: true,
+            borderColor: AppColors.commonBlack.withOpacity(0.2),
+            buttonColor: AppColors.commonWhite,
+            textColor: AppColors.cancelRideColor,
+            isLoading: loading,
+            onTap:
+                loading
+                    ? null
+                    : () {
+                      AppButtons.showCancelRideBottomSheet(
+                        context,
+                        onConfirmCancel: (String selectedReason) async {
+                          final id =
+                              c.driverSearchController.carBooking.value?.bookingId ??
+                              c.bookingId;
+                          await _handleCancelRide(
+                            bookingId: id,
+                            selectedReason: selectedReason,
+                          );
+                        },
+                      );
+                    },
+            text: 'Cancel Ride',
+          );
+        }),
       ],
     );
   }

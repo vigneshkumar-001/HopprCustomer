@@ -178,7 +178,11 @@ class HomeMapController extends GetxController {
     if (customerId.isEmpty) return;
 
     socketService.initSocket(ApiConsents.baseUrl);
-    // rideShareSocket.initSocket(ApiConsents.sharedBaseUrl);
+
+    // Shared-ride socket: connect from Home itself (not only after booking confirm)
+    // so the shared flow feels instant.
+    rideShareSocket.initSocket(ApiConsents.sharedBaseUrl);
+    rideShareSocket.registerUser(customerId);
 
     socketService.onConnect(() {
       socketService.registerUser(customerId);

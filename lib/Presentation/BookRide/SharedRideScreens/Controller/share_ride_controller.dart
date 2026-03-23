@@ -66,7 +66,10 @@ class ShareRideController extends GetxController {
           }
 
 
-          rideShareSocket.initSocket(ApiConsents.sharedBaseUrl);
+          // Socket is expected to be connected from Home; fallback connect if needed.
+          if (!rideShareSocket.connected) {
+            rideShareSocket.initSocket(ApiConsents.sharedBaseUrl);
+          }
 
 
           rideShareSocket.registerUser(customerId, bookingId: bookingId);

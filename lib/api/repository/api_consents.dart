@@ -52,6 +52,12 @@ class ApiConsents {
 
   static final String userImageUpload = '$baseUrl/api/upload/image';
 
+  // Support
+  static final String supportCustomerTickets =
+      '$baseUrl/api/support/customer/tickets';
+  static final String supportCommonDetails = '$baseUrl/api/support/common-details';
+  static final String supportMyTickets = '$baseUrl/api/support/my/tickets';
+
   static String driverSearch({
     required double pickupLat,
     required double pickupLng,

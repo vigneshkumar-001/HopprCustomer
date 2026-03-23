@@ -161,22 +161,16 @@ class DriverSearchController extends GetxController {
             'userId': response.data.customerId,
           };
 
-          // Log the data
-          AppLogger.log.i("📤 Join booking data: $bookingData");
-
-          if (socketService.connected) {
-            socketService.emit('join-booking', bookingData);
-            AppLogger.log.i("✅ Socket already connected, emitted join-booking");
-          } else {
-            socketService.onConnect(() {
-              AppLogger.log.i("✅ Socket connected, emitting join-booking");
-              socketService.emit('join-booking', bookingData);
-            });
-          }
+           // Log the data
+           AppLogger.log.i("📤 Join booking data: $bookingData");
+           socketService.joinBookingRoom(
+             bookingId: response.data.bookingId.toString(),
+             payload: bookingData,
+           );
 
 
-          AppLogger.log.i(response.data);
-          return null;
+           AppLogger.log.i(response.data);
+           return null;
         },
       );
     } catch (e) {
@@ -223,21 +217,15 @@ class DriverSearchController extends GetxController {
             'userId': response.data?.customerId,
           };
 
-          AppLogger.log.i("📤 Join booking data: $bookingData");
-
-          if (socketService.connected) {
-            socketService.emit('join-booking', bookingData);
-            AppLogger.log.i("✅ Socket already connected, emitted join-booking");
-          } else {
-            socketService.onConnect(() {
-              AppLogger.log.i("✅ Socket connected, emitting join-booking");
-              socketService.emit('join-booking', bookingData);
-            });
-          }
+           AppLogger.log.i("📤 Join booking data: $bookingData");
+           final bookingId = (response.data?.bookingId ?? '').toString().trim();
+           if (bookingId.isNotEmpty) {
+             socketService.joinBookingRoom(bookingId: bookingId, payload: bookingData);
+           }
 
 
-          AppLogger.log.i(response.data);
-          return null;
+           AppLogger.log.i(response.data);
+           return null;
         },
       );
     } catch (e) {
@@ -312,6 +300,10 @@ class DriverSearchController extends GetxController {
           isCancelLoading.value = false;
           sendDriverRequestData.value = response.data;
           AppLogger.log.i(response.data);
+          final msg = response.message.trim();
+          AppToasts.showSuccessGlobal(
+            msg.isEmpty ? 'Booking cancelled' : msg,
+          );
           return '';
         },
       );

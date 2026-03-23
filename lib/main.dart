@@ -8,6 +8,7 @@ import 'package:flutter_screenutil/flutter_screenutil.dart';
 
 import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Core/Firebase/firebase_service.dart';
+import 'package:hopper/Core/Utility/app_toasts.dart';
 import 'package:hopper/init_controller.dart';
 import 'package:hopper/Presentation/Authentication/screens/splash_screens.dart';
 import 'package:hopper/Core/Consents/app_logger.dart';
@@ -58,6 +59,7 @@ class MyApp extends StatelessWidget {
       builder: (context, child) {
         return GetMaterialApp(
           debugShowCheckedModeBanner: false,
+          scaffoldMessengerKey: AppToasts.messengerKey,
           theme: ThemeData(
             scaffoldBackgroundColor: AppColors.commonWhite,
             textSelectionTheme: const TextSelectionThemeData(

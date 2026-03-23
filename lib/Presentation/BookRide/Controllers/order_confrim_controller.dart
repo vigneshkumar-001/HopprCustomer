@@ -284,7 +284,7 @@ class OrderConfirmController extends GetxController
   }
 
   void onCameraMove(CameraPosition pos) {
-    currentZoomLevel = pos.zoom;
+    currentZoomLevel = pos.zoom.clamp(11.0, 17.0).toDouble();
   }
 
   // âœ… call from UI when user touches map
@@ -309,7 +309,7 @@ class OrderConfirmController extends GetxController
         CameraUpdate.newCameraPosition(
           CameraPosition(
             target: latLng,
-            zoom: 17.0,
+            zoom: currentZoomLevel,
             bearing: _mapBearingNorth,
             tilt: _mapTilt,
           ),
@@ -342,7 +342,7 @@ class OrderConfirmController extends GetxController
         CameraUpdate.newCameraPosition(
           CameraPosition(
             target: target,
-            zoom: 17.0,
+            zoom: currentZoomLevel,
             bearing: _mapBearingNorth,
             tilt: _mapTilt,
           ),
@@ -372,7 +372,7 @@ class OrderConfirmController extends GetxController
         CameraUpdate.newCameraPosition(
           CameraPosition(
             target: driverPos,
-            zoom: 17.0,
+            zoom: currentZoomLevel,
             bearing: _mapBearingNorth,
             tilt: _mapTilt,
           ),
@@ -412,12 +412,12 @@ class OrderConfirmController extends GetxController
 
     pickupPinIcon = await _bitmapFromAssetSized(
       AppImages.circleStart,
-      widthDp: 36,
+      widthDp: 30,
       dpr: dpr,
     );
     dropPinIcon = await _bitmapFromAssetSized(
       AppImages.rectangleDest,
-      widthDp: 36,
+      widthDp: 30,
       dpr: dpr,
     );
   }
@@ -562,6 +562,13 @@ class OrderConfirmController extends GetxController
 
       final bool driverAccepted = data['driver_accept_status'] == true;
 
+      final driverLoc = data['driverLocation'] ?? {};
+      final driverLat = _toDouble(driverLoc['latitude']);
+      final driverLng = _toDouble(driverLoc['longitude']);
+
+      final bool hasDriver =
+          driverAccepted || driverId.trim().isNotEmpty || (driverLat != null && driverLng != null);
+
       final String plate = (vehicle['plateNumber'] ?? '').toString();
       final String profile = _firstImageUrl(data['profilePic'] ?? vehicle['profilePic']);
       final photos = _firstImageUrl(data['carExteriorPhotos'] ?? vehicle['carExteriorPhotos']);
@@ -587,16 +594,22 @@ class OrderConfirmController extends GetxController
       plateNumber.value = plate;
       driverName.value = '$driverFullName ⭐️ $rating';
       carDetails.value = '$color - $brand';
-      isDriverConfirmed.value = driverAccepted;
+      isDriverConfirmed.value = hasDriver;
       customerPhone.value = customerPhoneStr;
       cartypeFromServer.value = vehicleType;
       amount.value = amt;
       profilePic.value = profile;
       carExteriorPhotos.value = photos;
 
-      final driverLoc = data['driverLocation'] ?? {};
-      final driverLat = _toDouble(driverLoc['latitude']);
-      final driverLng = _toDouble(driverLoc['longitude']);
+      // Ensure we are tracking the right booking/driver for this ride.
+      final eventBookingId = (data['bookingId'] ?? '').toString().trim();
+      final joinBookingId = eventBookingId.isNotEmpty ? eventBookingId : '';
+      if (joinBookingId.isNotEmpty && driverId.trim().isNotEmpty) {
+        socketService.joinBooking(
+          bookingId: joinBookingId,
+          driverId: driverId.trim(),
+        );
+      }
 
       _seedStaticMarkers(forceRecreate: true);
 
@@ -785,7 +798,18 @@ class OrderConfirmController extends GetxController
 
     socketService.on('otp-generated', (data) {
       if (isClosed) return;
-      otp.value = (data['otpCode'] ?? '').toString();
+      final code = (data['otpCode'] ?? '').toString().trim();
+      if (code.isEmpty) return;
+
+      otp.value = code;
+
+      // Fallback: OTP only comes after booking is confirmed.
+      if (!isDriverConfirmed.value) {
+        isDriverConfirmed.value = true;
+      }
+      if (isWaitingForDriver.value) {
+        isWaitingForDriver.value = false;
+      }
     });
 
     socketService.on('ride-started', (data) async {
@@ -832,7 +856,8 @@ class OrderConfirmController extends GetxController
       if (isClosed) return;
       if (data != null && data['status'] == true) {
         isTripCancelled.value = true;
-        cancelReason.value = (data['reason'] ?? "Trip cancelled").toString();
+        cancelReason.value =
+            (data['message'] ?? data['reason'] ?? "Trip cancelled").toString();
       }
     });
 
@@ -840,7 +865,8 @@ class OrderConfirmController extends GetxController
       if (isClosed) return;
       if (data != null && data['status'] == true) {
         isTripCancelled.value = true;
-        cancelReason.value = (data['reason'] ?? "Trip cancelled").toString();
+        cancelReason.value =
+            (data['message'] ?? data['reason'] ?? "Trip cancelled").toString();
       }
     });
   }
@@ -946,6 +972,55 @@ class OrderConfirmController extends GetxController
     if (driverArrived.value) return 2;
     if (isDriverConfirmed.value) return 1;
     return 0;
+  }
+
+  void _updateEtaChipFallbackFromPositions() {
+    if (!isDriverConfirmed.value) return;
+    if (etaChipText.value.isNotEmpty) return;
+
+    final hasMetrics =
+        pickupDurationMin.value > 0 ||
+        dropDurationMin.value > 0 ||
+        tripDurationMin.value > 0 ||
+        pickupDistanceMeters.value > 0.0 ||
+        dropDistanceMeters.value > 0.0;
+    if (hasMetrics) return;
+
+    final driverPos = _emaPos ?? _displayPos;
+    final target = driverStartedRide.value ? customerToLatLng : customerLatLng;
+    if (driverPos == null || target == null) return;
+
+    final meters = Geolocator.distanceBetween(
+      driverPos.latitude,
+      driverPos.longitude,
+      target.latitude,
+      target.longitude,
+    );
+    if (meters <= 0) return;
+
+    final int mins =
+        ((meters / (7.2 * 60.0)).ceil()).clamp(1, 999).toInt();
+    final dist = _formatDistanceKm(meters);
+
+    if (destinationReached.value) {
+      etaChipText.value = 'Arrived at destination';
+      return;
+    }
+
+    if (!driverStartedRide.value) {
+      final arriving = driverArrived.value || meters <= 120 || mins <= 1;
+      etaChipText.value =
+          arriving
+              ? 'Arriving at pickup | $dist'
+              : '${_formatEtaDuration(mins)} away | $dist';
+      nearDestination.value = false;
+      return;
+    }
+
+    final near = meters <= 400 || mins <= 2;
+    nearDestination.value = near;
+    etaChipText.value =
+        near ? 'Near destination | $dist' : '${_formatEtaDuration(mins)} to drop | $dist';
   }
 
   void _seedStaticMarkers({required bool forceRecreate}) {
@@ -1116,6 +1191,9 @@ class OrderConfirmController extends GetxController
     if (now.difference(_lastCameraMoveAt) < _cameraInterval) return;
     _lastCameraMoveAt = now;
 
+    // If server doesn't send ride metrics, compute a fallback ETA+distance so the top chip still shows.
+    _updateEtaChipFallbackFromPositions();
+
     // 1) Pre-ride: follow driver with pickup awareness, without fit-bounds jitter.
     if (!driverStartedRide.value && customerLatLng != null) {
       final followMeters = Geolocator.distanceBetween(
@@ -1235,6 +1313,32 @@ class OrderConfirmController extends GetxController
     if (points.length < 2) return;
 
     final b = _boundsFrom(points);
+    final diag = Geolocator.distanceBetween(
+      b.southwest.latitude,
+      b.southwest.longitude,
+      b.northeast.latitude,
+      b.northeast.longitude,
+    );
+    if (diag.isFinite && diag < 260) {
+      final mid = LatLng(
+        (b.northeast.latitude + b.southwest.latitude) / 2,
+        (b.northeast.longitude + b.southwest.longitude) / 2,
+      );
+      final z = math.min(14.9, currentZoomLevel);
+      try {
+        mapController!.animateCamera(
+          CameraUpdate.newCameraPosition(
+            CameraPosition(
+              target: mid,
+              zoom: z,
+              bearing: _mapBearingNorth,
+              tilt: _mapTilt,
+            ),
+          ),
+        );
+      } catch (_) {}
+      return;
+    }
     try {
       mapController!.animateCamera(CameraUpdate.newLatLngBounds(b, padding));
     } catch (_) {
