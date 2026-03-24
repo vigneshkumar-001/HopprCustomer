@@ -2,6 +2,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
@@ -16,10 +17,36 @@ import 'package:hopper/Presentation/BookRide/Screens/search_screen.dart';
 import 'package:hopper/Presentation/Drawer/screens/drawer_screen.dart';
 import 'package:hopper/Presentation/OnBoarding/Widgets/custom_bottomnavigation.dart';
 import 'package:hopper/Presentation/OnBoarding/Widgets/package_contoiner.dart';
+import 'package:hopper/Presentation/OnBoarding/Screens/package_map_confrim_screen.dart';
+import 'package:hopper/Presentation/OnBoarding/models/address_models.dart';
 import 'package:hopper/api/dataSource/apiDataSource.dart';
 import 'package:hopper/uitls/netWorkHandling/network_handling_screen.dart';
 
 import '../Controller/home_map_controller.dart';
+
+bool _isParcelActiveBooking(ActiveBookingData ride) {
+  final bookingType = ride.bookingType.trim().toLowerCase();
+  if (bookingType.isNotEmpty) return bookingType == 'parcel';
+
+  // Fallback for older API: bike was only used for parcel flow in the app.
+  final rideType = ride.rideType.trim().toLowerCase();
+  return rideType == 'bike';
+}
+
+AddressModel _activeBookingToAddress({
+  required ActiveBookingData ride,
+  required bool pickup,
+}) {
+  return AddressModel(
+    name: pickup ? 'Sender' : 'Receiver',
+    phone: '',
+    address: pickup ? ride.pickupAddress : ride.dropAddress,
+    landmark: '',
+    mapAddress: pickup ? ride.pickupAddress : ride.dropAddress,
+    latitude: pickup ? ride.fromLatitude : ride.toLatitude,
+    longitude: pickup ? ride.fromLongitude : ride.toLongitude,
+  );
+}
 
 class HomeScreens extends StatefulWidget {
   const HomeScreens({super.key});
@@ -62,6 +89,12 @@ class _HomeScreensState extends State<HomeScreens>
     WidgetsBinding.instance.addObserver(this);
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
+      // Safety: ensure no stale focus from previous auth screens causes keyboard insets animation.
+      FocusManager.instance.primaryFocus?.unfocus();
+      try {
+        await SystemChannels.textInput.invokeMethod('TextInput.hide');
+      } catch (_) {}
+
       await mapC.start();
       await _loadActiveRide();
       _measureSheet();
@@ -282,6 +315,21 @@ class _HomeScreensState extends State<HomeScreens>
     final ride = _activeRide;
     if (ride == null) return;
 
+    if (_isParcelActiveBooking(ride)) {
+      await Get.to(
+        () => PackageMapConfirmScreen(
+          bookingId: ride.bookingId,
+          discountCode: '',
+          senderData: _activeBookingToAddress(ride: ride, pickup: true),
+          receiverData: _activeBookingToAddress(ride: ride, pickup: false),
+        ),
+      );
+
+      if (!mounted) return;
+      await _loadActiveRide();
+      return;
+    }
+
     final vehicle = ride.vehicle;
     final carType =
         vehicle?.carType.trim().isNotEmpty == true
@@ -319,7 +367,7 @@ class _HomeScreensState extends State<HomeScreens>
     );
 
     if (!mounted) return;
-    await _loadActiveRide();
+      await _loadActiveRide();
   }
 
   Widget _activeRideCard(double topPad) {
@@ -1514,6 +1562,21 @@ class _HomeScreensState extends State<HomeScreens>
   Future<void> _resumeActiveRide() async {
     final ride = _activeRide;
     if (ride == null) return;
+
+    if (_isParcelActiveBooking(ride)) {
+      await Get.to(
+        () => PackageMapConfirmScreen(
+          bookingId: ride.bookingId,
+          discountCode: '',
+          senderData: _activeBookingToAddress(ride: ride, pickup: true),
+          receiverData: _activeBookingToAddress(ride: ride, pickup: false),
+        ),
+      );
+
+      if (!mounted) return;
+      await _loadActiveRide();
+      return;
+    }
 
     final vehicle = ride.vehicle;
     final carType =

@@ -6,6 +6,7 @@ import 'package:hopper/Core/Utility/app_toasts.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import 'package:dotted_line/dotted_line.dart';
+import 'package:flutter/services.dart';
 
 import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Core/Consents/app_logger.dart';
@@ -17,13 +18,12 @@ import 'package:hopper/Presentation/Drawer/screens/ride_and_package_history_scre
 import 'package:hopper/Presentation/OnBoarding/Controller/package_controller.dart';
 import 'package:hopper/Presentation/OnBoarding/Screens/confirmation_screen.dart';
 import 'package:hopper/Presentation/OnBoarding/Widgets/package_contoiner.dart';
+import 'package:hopper/Presentation/OnBoarding/utils/saved_addresses_store.dart';
 import 'package:get/get.dart';
 import 'package:hopper/Presentation/OnBoarding/models/address_models.dart';
 import 'package:hopper/uitls/map/google_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:hopper/uitls/map/search_loaction.dart';
-
-import '../../../uitls/websocket/socket_io_client.dart' show SocketService;
 
 class PackageScreens extends StatefulWidget {
   const PackageScreens({super.key});
@@ -39,6 +39,7 @@ class _PackageScreensState extends State<PackageScreens> {
       TextEditingController();
   final TextEditingController packageDeliveryInstructionController =
       TextEditingController();
+  final SavedAddressesStore _savedAddressesStore = const SavedAddressesStore();
   bool isSendSelected = true;
   String selectedAddress = 'Collect from';
   bool senderSelected = false;
@@ -58,6 +59,7 @@ class _PackageScreensState extends State<PackageScreens> {
   String recipientName = '';
   String recipientPhone = '';
   int selectedIndex = 0;
+  String? weightError;
 
   String capitalizeFirstLetter(String name) {
     if (name.isEmpty) return '';
@@ -71,7 +73,220 @@ class _PackageScreensState extends State<PackageScreens> {
   @override
   void initState() {
     super.initState();
+    packageWeightController.addListener(_validateWeight);
     WidgetsBinding.instance.addPostFrameCallback((_) => _calculateLineHeight());
+  }
+
+  @override
+  void dispose() {
+    packageWeightController.removeListener(_validateWeight);
+    packageWeightController.dispose();
+    packageDescriptionController.dispose();
+    packageDeliveryInstructionController.dispose();
+    super.dispose();
+  }
+
+  String? _weightValidationError(String raw) {
+    final text = raw.trim();
+    if (text.isEmpty) return 'Please enter package weight';
+    final value = double.tryParse(text);
+    if (value == null) return 'Enter a valid number';
+    if (value <= 0) return 'Weight must be greater than 0';
+    return null;
+  }
+
+  void _validateWeight() {
+    final error = _weightValidationError(packageWeightController.text);
+    if (!mounted || error == weightError) return;
+    setState(() => weightError = error);
+  }
+
+  TextInputFormatter get _weightInputFormatter {
+    final regex = RegExp(r'^\d*\.?\d{0,2}$');
+    return TextInputFormatter.withFunction((oldValue, newValue) {
+      if (newValue.text.isEmpty) return newValue;
+      return regex.hasMatch(newValue.text) ? newValue : oldValue;
+    });
+  }
+
+  bool _isTooCloseToOther(AddressModel other, AddressModel candidate) {
+    return isWithin1Km(
+      other.latitude,
+      other.longitude,
+      candidate.latitude,
+      candidate.longitude,
+    );
+  }
+
+  Future<void> _applyPickupAddress(AddressModel address) async {
+    final other = isSendSelected ? receiverData : senderData;
+    if (other != null && _isTooCloseToOther(other, address)) {
+      if (mounted) {
+        AppToasts.customToast(
+          context,
+          "Pickup and drop locations cannot be the same or within 1km.",
+        );
+      }
+      return;
+    }
+
+    setState(() {
+      if (isSendSelected) {
+        senderData = address;
+      } else {
+        receiverData = address;
+      }
+    });
+
+    WidgetsBinding.instance.addPostFrameCallback((_) => _calculateLineHeight());
+  }
+
+  Future<void> _applyDropAddress(AddressModel address) async {
+    final other = isSendSelected ? senderData : receiverData;
+    if (other != null && _isTooCloseToOther(other, address)) {
+      if (mounted) {
+        AppToasts.customToast(
+          context,
+          "Pickup and drop locations cannot be the same or within 1km.",
+        );
+      }
+      return;
+    }
+
+    setState(() {
+      if (isSendSelected) {
+        receiverData = address;
+      } else {
+        senderData = address;
+      }
+    });
+
+    WidgetsBinding.instance.addPostFrameCallback((_) => _calculateLineHeight());
+  }
+
+  Future<void> _openMapForPickup(AddressModel? initial) async {
+    final result = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder:
+            (_) => MapScreen(
+              cameFromPackage: true,
+              searchQuery: initial?.mapAddress ?? '',
+              initialAddress: initial?.address,
+              initialLandmark: initial?.landmark,
+              initialName: initial?.name,
+              initialPhone: initial?.phone,
+              location:
+                  initial != null
+                      ? LatLng(initial.latitude, initial.longitude)
+                      : null,
+            ),
+      ),
+    );
+
+    if (result == null) return;
+    final loc = result['location'];
+    final address = AddressModel(
+      name: result['name'],
+      phone: result['phone'],
+      address: result['address'],
+      landmark: result['landmark'],
+      mapAddress: result['mapAddress'],
+      latitude: loc.latitude,
+      longitude: loc.longitude,
+    );
+    final saveToSavedAddresses = result['saveToSavedAddresses'] == true;
+    final label = (result['addressLabel'] ?? '').toString().trim();
+    if (saveToSavedAddresses) {
+      await _savedAddressesStore.markUsed(
+        address,
+        label: label.isEmpty ? null : label,
+      );
+    }
+    await _applyPickupAddress(address);
+  }
+
+  Future<void> _openMapForDrop(AddressModel? initial) async {
+    final result = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder:
+            (_) => MapScreen(
+              type: 'receiver',
+              cameFromPackage: true,
+              searchQuery: initial?.mapAddress ?? '',
+              initialAddress: initial?.address,
+              initialLandmark: initial?.landmark,
+              initialName: initial?.name,
+              initialPhone: initial?.phone,
+              location:
+                  initial != null
+                      ? LatLng(initial.latitude, initial.longitude)
+                      : null,
+            ),
+      ),
+    );
+
+    if (result == null) return;
+    final loc = result['location'];
+    final address = AddressModel(
+      name: result['name'],
+      phone: result['phone'],
+      address: result['address'],
+      landmark: result['landmark'],
+      mapAddress: result['mapAddress'],
+      latitude: loc.latitude,
+      longitude: loc.longitude,
+    );
+    final saveToSavedAddresses = result['saveToSavedAddresses'] == true;
+    final label = (result['addressLabel'] ?? '').toString().trim();
+    if (saveToSavedAddresses) {
+      await _savedAddressesStore.markUsed(
+        address,
+        label: label.isEmpty ? null : label,
+      );
+    }
+    await _applyDropAddress(address);
+  }
+
+  Future<void> _openSearchForPickup() async {
+    final result = await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const CommonLocationSearch()),
+    );
+    if (result == null) return;
+    final loc = result['location'];
+    final address = AddressModel(
+      name: result['name'],
+      phone: result['phone'],
+      address: result['address'],
+      landmark: result['landmark'],
+      mapAddress: result['mapAddress'],
+      latitude: loc.latitude,
+      longitude: loc.longitude,
+    );
+    await _applyPickupAddress(address);
+  }
+
+  Future<void> _openSearchForDrop() async {
+    final result = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => const CommonLocationSearch(type: 'receiver'),
+      ),
+    );
+    if (result == null) return;
+    final loc = result['location'];
+    final address = AddressModel(
+      name: result['name'],
+      phone: result['phone'],
+      address: result['address'],
+      landmark: result['landmark'],
+      mapAddress: result['mapAddress'],
+      latitude: loc.latitude,
+      longitude: loc.longitude,
+    );
+    await _applyDropAddress(address);
   }
 
   List<String> parcelTypes = [
@@ -141,7 +356,11 @@ class _PackageScreensState extends State<PackageScreens> {
                           right: 0,
                           child: InkWell(
                             onTap: () {
-                              Get.to(() => const RideAndPackageHistoryScreen(initialTabIndex: 1)); // 1 = Package
+                              Get.to(
+                                () => const RideAndPackageHistoryScreen(
+                                  initialTabIndex: 1,
+                                ),
+                              ); // 1 = Package
                             },
                             child: Image.asset(
                               AppImages.history,
@@ -176,131 +395,11 @@ class _PackageScreensState extends State<PackageScreens> {
                               key: _senderKey,
                               child: PackageContainer.customPlainContainers(
                                 onEditTap: () async {
-                                  final result = await Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder:
-                                          (_) => MapScreen(
-                                            cameFromPackage: true,
-                                            searchQuery:
-                                                pickUpData?.mapAddress ?? '',
-                                            initialAddress: pickUpData?.address,
-                                            initialLandmark:
-                                                pickUpData?.landmark,
-                                            initialName: pickUpData?.name,
-                                            initialPhone: pickUpData?.phone,
-                                            location:
-                                                pickUpData != null
-                                                    ? LatLng(
-                                                      pickUpData.latitude,
-                                                      pickUpData.longitude,
-                                                    )
-                                                    : null,
-                                          ),
-                                    ),
-                                  );
-
-                                  if (result != null) {
-                                    final loc = result['location'];
-                                    if (receiverData != null &&
-                                        isWithin1Km(
-                                          receiverData!.latitude,
-                                          receiverData!.longitude,
-                                          loc.latitude,
-                                          loc.longitude,
-                                        )) {
-                                      AppToasts.customToast(
-                                        context,
-                                        "Pickup and drop locations cannot be the same or within 1km.",
-                                      );
-                                      return;
-                                    }
-
-                                    setState(() {
-                                      if (isSendSelected) {
-                                        senderData = AddressModel(
-                                          name: result['name'],
-                                          phone: result['phone'],
-                                          address: result['address'],
-                                          landmark: result['landmark'],
-                                          mapAddress: result['mapAddress'],
-                                          latitude: loc.latitude,
-                                          longitude: loc.longitude,
-                                        );
-                                      } else {
-                                        receiverData = AddressModel(
-                                          name: result['name'],
-                                          phone: result['phone'],
-                                          address: result['address'],
-                                          landmark: result['landmark'],
-                                          mapAddress: result['mapAddress'],
-                                          latitude: loc.latitude,
-                                          longitude: loc.longitude,
-                                        );
-                                      }
-                                    });
-
-                                    WidgetsBinding.instance
-                                        .addPostFrameCallback((_) {
-                                          _calculateLineHeight();
-                                        });
-                                  }
+                                  await _openMapForPickup(pickUpData);
                                 },
 
                                 onTap: () async {
-                                  final result = await Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder:
-                                          (_) => const CommonLocationSearch(),
-                                    ),
-                                  );
-
-                                  if (result != null) {
-                                    final loc = result['location'];
-                                    if (receiverData != null &&
-                                        isWithin1Km(
-                                          receiverData!.latitude,
-                                          receiverData!.longitude,
-                                          loc.latitude,
-                                          loc.longitude,
-                                        )) {
-                                      AppToasts.customToast(
-                                        context,
-                                        "Pickup and drop locations cannot be the same or within 1km.",
-                                      );
-                                      return;
-                                    }
-
-                                    setState(() {
-                                      if (isSendSelected) {
-                                        senderData = AddressModel(
-                                          name: result['name'],
-                                          phone: result['phone'],
-                                          address: result['address'],
-                                          landmark: result['landmark'],
-                                          mapAddress: result['mapAddress'],
-                                          latitude: loc.latitude,
-                                          longitude: loc.longitude,
-                                        );
-                                      } else {
-                                        receiverData = AddressModel(
-                                          name: result['name'],
-                                          phone: result['phone'],
-                                          address: result['address'],
-                                          landmark: result['landmark'],
-                                          mapAddress: result['mapAddress'],
-                                          latitude: loc.latitude,
-                                          longitude: loc.longitude,
-                                        );
-                                      }
-                                    });
-
-                                    WidgetsBinding.instance
-                                        .addPostFrameCallback((_) {
-                                          _calculateLineHeight();
-                                        });
-                                  }
+                                  await _openSearchForPickup();
                                 },
                                 onClear:
                                     pickUpData != null
@@ -340,135 +439,11 @@ class _PackageScreensState extends State<PackageScreens> {
                               key: _receiverKey,
                               child: PackageContainer.customPlainContainers(
                                 onEditTap: () async {
-                                  final result = await Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder:
-                                          (_) => MapScreen(
-                                            type: 'receiver',
-                                            cameFromPackage: true,
-                                            searchQuery:
-                                                dropOffData?.mapAddress ?? '',
-                                            initialAddress:
-                                                dropOffData?.address,
-                                            initialLandmark:
-                                                dropOffData?.landmark,
-                                            initialName: dropOffData?.name,
-                                            initialPhone: dropOffData?.phone,
-                                            location:
-                                                dropOffData != null
-                                                    ? LatLng(
-                                                      dropOffData.latitude,
-                                                      dropOffData.longitude,
-                                                    )
-                                                    : null,
-                                          ),
-                                    ),
-                                  );
-
-                                  if (result != null) {
-                                    final loc = result['location'];
-                                    if (senderData != null &&
-                                        isWithin1Km(
-                                          senderData!.latitude,
-                                          senderData!.longitude,
-                                          loc.latitude,
-                                          loc.longitude,
-                                        )) {
-                                      AppToasts.customToast(
-                                        context,
-                                        "Pickup and drop locations cannot be the same or within 1km.",
-                                      );
-                                      return;
-                                    }
-
-                                    setState(() {
-                                      if (isSendSelected) {
-                                        receiverData = AddressModel(
-                                          name: result['name'],
-                                          phone: result['phone'],
-                                          address: result['address'],
-                                          landmark: result['landmark'],
-                                          mapAddress: result['mapAddress'],
-                                          latitude: loc.latitude,
-                                          longitude: loc.longitude,
-                                        );
-                                      } else {
-                                        senderData = AddressModel(
-                                          name: result['name'],
-                                          phone: result['phone'],
-                                          address: result['address'],
-                                          landmark: result['landmark'],
-                                          mapAddress: result['mapAddress'],
-                                          latitude: loc.latitude,
-                                          longitude: loc.longitude,
-                                        );
-                                      }
-                                    });
-
-                                    WidgetsBinding.instance
-                                        .addPostFrameCallback((_) {
-                                          _calculateLineHeight();
-                                        });
-                                  }
+                                  await _openMapForDrop(dropOffData);
                                 },
 
                                 onTap: () async {
-                                  final result = await Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder:
-                                          (_) => const CommonLocationSearch(
-                                            type: 'receiver',
-                                          ),
-                                    ),
-                                  );
-
-                                  if (result != null) {
-                                    final loc = result['location'];
-                                    if (senderData != null &&
-                                        isWithin1Km(
-                                          senderData!.latitude,
-                                          senderData!.longitude,
-                                          loc.latitude,
-                                          loc.longitude,
-                                        )) {
-                                      AppToasts.customToast(
-                                        context,
-                                        "Pickup and drop locations cannot be the same or within 1km.",
-                                      );
-                                      return;
-                                    }
-
-                                    setState(() {
-                                      if (isSendSelected) {
-                                        receiverData = AddressModel(
-                                          name: result['name'],
-                                          phone: result['phone'],
-                                          address: result['address'],
-                                          landmark: result['landmark'],
-                                          mapAddress: result['mapAddress'],
-                                          latitude: loc.latitude,
-                                          longitude: loc.longitude,
-                                        );
-                                      } else {
-                                        senderData = AddressModel(
-                                          name: result['name'],
-                                          phone: result['phone'],
-                                          address: result['address'],
-                                          landmark: result['landmark'],
-                                          mapAddress: result['mapAddress'],
-                                          latitude: loc.latitude,
-                                          longitude: loc.longitude,
-                                        );
-                                      }
-                                    });
-
-                                    WidgetsBinding.instance
-                                        .addPostFrameCallback((_) {
-                                          _calculateLineHeight();
-                                        });
-                                  }
+                                  await _openSearchForDrop();
                                 },
                                 onClear:
                                     dropOffData != null
@@ -603,11 +578,25 @@ class _PackageScreensState extends State<PackageScreens> {
                       const SizedBox(height: 16),
 
                       CustomTextFields.textAndField(
-                        type: TextInputType.number,
+                        type: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
                         controller: packageWeightController,
                         tittle: 'Package weight',
-                        hintText: 'Eg., 10kg , 20kg',
+                        hintText: 'Eg., 10 (kg)',
+                        inputFormatters: [_weightInputFormatter],
                       ),
+                      if (weightError != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 5),
+                          child: Text(
+                            weightError!,
+                            style: const TextStyle(
+                              color: Colors.red,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
                       const SizedBox(height: 12),
                       CustomTextFields.textAndField(
                         controller: packageDescriptionController,
@@ -801,6 +790,10 @@ class _PackageScreensState extends State<PackageScreens> {
                   if (packageController.isLoading.value) {
                     return SizedBox.shrink();
                   }
+                  final canCheckout =
+                      (selectedParcel != null) &&
+                      (_weightValidationError(packageWeightController.text) ==
+                          null);
                   return SafeArea(
                     child: Padding(
                       padding: EdgeInsets.symmetric(
@@ -808,46 +801,63 @@ class _PackageScreensState extends State<PackageScreens> {
                         vertical: 10,
                       ),
                       child: AppButtons.button(
-                        onTap: () async {
-                          final String weight = packageWeightController.text;
-                          final String deliveryInstruction =
-                              packageDeliveryInstructionController.text;
-                          final String description =
-                              packageDescriptionController.text;
-                          setState(() {
-                            parcelError = selectedParcel == null;
-                          });
-                          if (parcelError) return;
-                          final results = await packageController
-                              .packageAddressDetails(
-                                description: description,
-                                deliveryInstruction: deliveryInstruction,
-                                weight: weight,
-                                selectedParcel: selectedParcel!,
-                                senderData: senderData!,
-                                receiverData: receiverData!,
-                              );
-                          AppLogger.log.i(
-                            "Sender Data: ${senderData?.latitude}",
-                          );
-                          AppLogger.log.i("Receiver Data: $receiverData");
-                          AppLogger.log.i("Selected Parcel: $selectedParcel");
-                          AppLogger.log.i("  results: $results");
-                          results != null
-                              ? Navigator.push(
-                                context,
-                                MaterialPageRoute(
-                                  builder:
-                                      (_) => ConfirmationScreen(
-                                        parcelType: selectedParcel,
-                                        sender: senderData!,
-                                        receiver: receiverData!,
-                                      ),
-                                ),
-                              )
-                              : null;
-                        },
+                        onTap:
+                            canCheckout
+                                ? () async {
+                                  final String weight =
+                                      packageWeightController.text;
+                                  final String deliveryInstruction =
+                                      packageDeliveryInstructionController.text;
+                                  final String description =
+                                      packageDescriptionController.text;
+                                  _validateWeight();
+                                  setState(() {
+                                    parcelError = selectedParcel == null;
+                                  });
+                                  if (parcelError ||
+                                      _weightValidationError(weight) != null) {
+                                    return;
+                                  }
+                                  final results = await packageController
+                                      .packageAddressDetails(
+                                        description: description,
+                                        deliveryInstruction:
+                                            deliveryInstruction,
+                                        weight: weight,
+                                        selectedParcel: selectedParcel!,
+                                        senderData: senderData!,
+                                        receiverData: receiverData!,
+                                      );
+                                  AppLogger.log.i(
+                                    "Sender Data: ${senderData?.latitude}",
+                                  );
+                                  AppLogger.log.i(
+                                    "Receiver Data: $receiverData",
+                                  );
+                                  AppLogger.log.i(
+                                    "Selected Parcel: $selectedParcel",
+                                  );
+                                  AppLogger.log.i("  results: $results");
+                                  results != null
+                                      ? Navigator.push(
+                                        context,
+                                        MaterialPageRoute(
+                                          builder:
+                                              (_) => ConfirmationScreen(
+                                                parcelType: selectedParcel,
+                                                sender: senderData!,
+                                                receiver: receiverData!,
+                                              ),
+                                        ),
+                                      )
+                                      : null;
+                                }
+                                : null,
                         text: 'Checkout',
+                        buttonColor:
+                            canCheckout
+                                ? AppColors.commonBlack
+                                : AppColors.commonBlack.withOpacity(0.4),
                       ),
                     ),
                   );

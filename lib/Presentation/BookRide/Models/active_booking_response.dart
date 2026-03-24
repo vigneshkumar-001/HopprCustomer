@@ -28,7 +28,10 @@ class ActiveBookingData {
   final String driverName;
   final String driverPhone;
   final String driverProfilePic;
+  final String bookingType;
   final String rideType;
+  final bool sharedBooking;
+  final String driverServiceMode;
   final double amount;
   final String pickupAddress;
   final String dropAddress;
@@ -54,7 +57,10 @@ class ActiveBookingData {
     required this.driverName,
     required this.driverPhone,
     required this.driverProfilePic,
+    required this.bookingType,
     required this.rideType,
+    required this.sharedBooking,
+    required this.driverServiceMode,
     required this.amount,
     required this.pickupAddress,
     required this.dropAddress,
@@ -82,7 +88,10 @@ class ActiveBookingData {
       driverName: (json['driverName'] ?? '').toString(),
       driverPhone: (json['driverPhone'] ?? '').toString(),
       driverProfilePic: (json['driverProfilePic'] ?? '').toString(),
+      bookingType: (json['bookingType'] ?? '').toString(),
       rideType: (json['rideType'] ?? '').toString(),
+      sharedBooking: json['sharedBooking'] == true,
+      driverServiceMode: (json['driverServiceMode'] ?? '').toString(),
       amount: (json['amount'] is num)
           ? (json['amount'] as num).toDouble()
           : double.tryParse((json['amount'] ?? '').toString()) ?? 0.0,

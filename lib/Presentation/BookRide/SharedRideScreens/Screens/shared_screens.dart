@@ -187,11 +187,11 @@ class _SharedScreensState extends State<SharedScreens>
     return fromController;
   }
 
-  Future<void> _handleCancelRide(String selectedReason) async {
+  Future<String?> _handleCancelRide(String selectedReason) async {
     final bookingId = _effectiveBookingId();
     if (bookingId.isEmpty) {
       AppToasts.showError(context, 'Booking id missing. Please try again.');
-      return;
+      return 'Booking id missing';
     }
 
     final res = await driverSearchController.cancelRide(
@@ -200,10 +200,10 @@ class _SharedScreensState extends State<SharedScreens>
       context: context,
     );
 
-    if (!mounted) return;
+    if (!mounted) return res;
 
     final ok = (res ?? '').trim().isEmpty;
-    if (!ok) return;
+    if (!ok) return res;
 
     setState(() {
       isTripCancelled = true;
@@ -212,10 +212,11 @@ class _SharedScreensState extends State<SharedScreens>
 
     // give a short confirmation, then go home
     await Future.delayed(const Duration(seconds: 2));
-    if (!mounted) return;
-    if (_didExitToHome) return;
+    if (!mounted) return res;
+    if (_didExitToHome) return res;
     _didExitToHome = true;
     Get.offAll(() => const HomeScreens());
+    return '';
   }
 
   int get _timelineIndex {
@@ -1592,7 +1593,7 @@ class _SharedScreensState extends State<SharedScreens>
                     pickupPosition: driverStartedRide ? null : _customerPickupLatLng,
                     markers: _markers,
                     polylines: _polylines,
-                    myLocationEnabled: true,
+                    myLocationEnabled: false,
                     fitToBounds: false,
                     initialZoom: _currentZoomLevel,
                     minMaxZoomPreference: const MinMaxZoomPreference(11.0, 17.0),
@@ -2535,7 +2536,7 @@ class _SharedScreensState extends State<SharedScreens>
                                                               String
                                                               selectedReason,
                                                             ) {
-                                                              _handleCancelRide(
+                                                              return _handleCancelRide(
                                                                 selectedReason,
                                                               );
                                                             },
@@ -2716,13 +2717,13 @@ class _SharedScreensState extends State<SharedScreens>
                     loading
                         ? null
                         : () {
-                          AppButtons.showCancelRideBottomSheet(
-                            context,
-                            onConfirmCancel: (String selectedReason) {
-                              _handleCancelRide(selectedReason);
-                            },
-                          );
-                        },
+                           AppButtons.showCancelRideBottomSheet(
+                             context,
+                             onConfirmCancel: (String selectedReason) {
+                              return _handleCancelRide(selectedReason);
+                             },
+                           );
+                         },
             isLoading: driverSearchController.isCancelLoading.value,
             // show loader instead of text
             text: 'Cancel Ride',

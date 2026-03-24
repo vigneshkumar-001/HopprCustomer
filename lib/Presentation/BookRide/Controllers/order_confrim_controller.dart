@@ -95,6 +95,7 @@ class OrderConfirmController extends GetxController
   GoogleMapController? mapController;
   String? mapStyle;
   double currentZoomLevel = 14.9; // matched to driver-side live map zoom
+  static const double _minAutoFollowZoom = 15.8;
   BuildContext? _screenCtx;
   Timer? _searchTimer;
   final RxBool focusDriverOnNextTap = false.obs;
@@ -157,6 +158,11 @@ class OrderConfirmController extends GetxController
   LatLng? currentPosition;
   LatLng? customerLatLng; // pickup
   LatLng? customerToLatLng; // drop
+
+  bool _isRideStartedStatus(String status) {
+    final s = status.trim().toUpperCase();
+    return s == 'STARTED' || s == 'RIDE_STARTED' || s == 'TRIP_STARTED';
+  }
 
   // =================================================================
   //                  SMOOTH DRIVER ENGINE
@@ -318,15 +324,30 @@ class OrderConfirmController extends GetxController
     } catch (_) {}
   }
 
+  Future<void> zoomIn() async => _zoomBy(0.8);
+
+  Future<void> zoomOut() async => _zoomBy(-0.8);
+
+  Future<void> _zoomBy(double delta) async {
+    if (mapController == null) return;
+    final next =
+        (currentZoomLevel + delta).clamp(11.0, 17.0).toDouble();
+    _pauseAutoFollowUntil = DateTime.now().add(const Duration(seconds: 2));
+    try {
+      await mapController!.animateCamera(CameraUpdate.zoomTo(next));
+    } catch (_) {}
+  }
+
   Future<void> onLocateActionTap() async {
-    if (focusDriverOnNextTap.value) {
+    // UX: 1st tap -> focus the moving driver, 2nd tap -> fit bounds (driver↔pickup/drop)
+    if (!focusDriverOnNextTap.value) {
       await focusDriverLocation();
-      focusDriverOnNextTap.value = false;
+      focusDriverOnNextTap.value = true;
       return;
     }
 
     fitActiveRouteBounds();
-    focusDriverOnNextTap.value = true;
+    focusDriverOnNextTap.value = false;
   }
 
   Future<void> focusDriverLocation() async {
@@ -342,7 +363,7 @@ class OrderConfirmController extends GetxController
         CameraUpdate.newCameraPosition(
           CameraPosition(
             target: target,
-            zoom: currentZoomLevel,
+            zoom: math.max(currentZoomLevel, _minAutoFollowZoom),
             bearing: _mapBearingNorth,
             tilt: _mapTilt,
           ),
@@ -624,13 +645,11 @@ class OrderConfirmController extends GetxController
 
       _refreshPulseCircles();
 
-      final latestStatus = (data['latestStatus'] ?? data['status'] ?? '').toString().toUpperCase();
+      final latestStatus =
+          (data['latestStatus'] ?? data['status'] ?? '').toString().toUpperCase();
       _updateRideMetrics(data);
       latestRideStatus.value = latestStatus.isEmpty ? 'SEARCHING' : latestStatus;
-      final joinedRideStarted =
-          latestStatus == 'STARTED' ||
-          latestStatus == 'IN_PROGRESS' ||
-          latestStatus == 'ONGOING';
+      final joinedRideStarted = _isRideStartedStatus(latestStatus);
       final hasAssignedDriver =
           driverAccepted ||
           joinedRideStarted ||
@@ -652,6 +671,9 @@ class OrderConfirmController extends GetxController
         driverStartedRide.value = true;
         _seedStaticMarkers(forceRecreate: false);
       }
+
+      // Enforce correct marker visibility even if server status is noisy.
+      _seedStaticMarkers(forceRecreate: false);
 
       if (driverLat != null && driverLng != null) {
         if (driverStartedRide.value && customerToLatLng != null) {
@@ -704,10 +726,7 @@ class OrderConfirmController extends GetxController
       }
       final latestStatus = (data['latestStatus'] ?? '').toString().toUpperCase();
       _updateRideMetrics(data);
-      final derivedRideStarted =
-          latestStatus == 'STARTED' ||
-          latestStatus == 'IN_PROGRESS' ||
-          latestStatus == 'ONGOING';
+      final derivedRideStarted = _isRideStartedStatus(latestStatus);
 
       if (derivedRideStarted && !driverStartedRide.value) {
         driverStartedRide.value = true;
@@ -1032,9 +1051,25 @@ class OrderConfirmController extends GetxController
       _seededDropMarker = false;
     }
 
+    // Before ride starts: show ONLY pickup marker (hide destination).
+    if (!driverStartedRide.value) {
+      if (set.any((m) => m.markerId.value == 'drop_marker')) {
+        set.removeWhere((m) => m.markerId.value == 'drop_marker');
+        _seededDropMarker = false;
+      }
+    }
+
     if (!driverStartedRide.value && customerLatLng != null && !_seededPickupMarker) {
       set.add(Marker(markerId: const MarkerId('pickup_marker'), position: customerLatLng!, infoWindow: const InfoWindow(title: 'Pickup'), icon: pickupPinIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen), anchor: const Offset(0.5, 1.0), flat: true));
       _seededPickupMarker = true;
+    }
+
+    // After ride starts: show ONLY destination marker (hide pickup).
+    if (driverStartedRide.value) {
+      if (set.any((m) => m.markerId.value == 'pickup_marker')) {
+        set.removeWhere((m) => m.markerId.value == 'pickup_marker');
+        _seededPickupMarker = false;
+      }
     }
 
     if (driverStartedRide.value && customerToLatLng != null && !_seededDropMarker) {
@@ -1194,19 +1229,19 @@ class OrderConfirmController extends GetxController
     // If server doesn't send ride metrics, compute a fallback ETA+distance so the top chip still shows.
     _updateEtaChipFallbackFromPositions();
 
+    final lockedZoom =
+        (currentZoomLevel < _minAutoFollowZoom)
+            ? _minAutoFollowZoom
+            : currentZoomLevel;
+
     // 1) Pre-ride: follow driver with pickup awareness, without fit-bounds jitter.
     if (!driverStartedRide.value && customerLatLng != null) {
-      final followMeters = Geolocator.distanceBetween(
-        _emaPos!.latitude,
-        _emaPos!.longitude,
-        customerLatLng!.latitude,
-        customerLatLng!.longitude,
-      );
       final mid = LatLng(
         (_emaPos!.latitude + customerLatLng!.latitude) / 2,
         (_emaPos!.longitude + customerLatLng!.longitude) / 2,
       );
-      final z = _preferredZoomForDistance(followMeters).clamp(12.0, 14.9);
+      // Keep zoom stable so roads + vehicle icon remain clear (avoid zooming out).
+      final z = lockedZoom.clamp(_minAutoFollowZoom, 17.0);
       try {
         mapController!.moveCamera(
           CameraUpdate.newCameraPosition(
@@ -1224,17 +1259,7 @@ class OrderConfirmController extends GetxController
 
     // 2) Ride started: smoothly follow live driver.
     if (driverStartedRide.value) {
-      final target = customerToLatLng;
-      final followMeters =
-          (target == null)
-              ? 0.0
-              : Geolocator.distanceBetween(
-                _emaPos!.latitude,
-                _emaPos!.longitude,
-                target.latitude,
-                target.longitude,
-              );
-      final z = _preferredZoomForDistance(followMeters).clamp(12.0, 14.9);
+      final z = lockedZoom.clamp(_minAutoFollowZoom, 17.0);
       try {
         mapController!.moveCamera(
           CameraUpdate.newCameraPosition(
@@ -1251,7 +1276,7 @@ class OrderConfirmController extends GetxController
     }
 
     // 3) fallback: follow driver with a safe zoom clamp
-    final z = currentZoomLevel.clamp(12.0, 14.9);
+    final z = lockedZoom.clamp(_minAutoFollowZoom, 17.0);
     try {
       mapController!.moveCamera(
         CameraUpdate.newCameraPosition(
@@ -1500,15 +1525,6 @@ class OrderConfirmController extends GetxController
   // =================================================================
   //                         EXPOSED
   // =================================================================
-
-  double _preferredZoomForDistance(double meters) {
-    if (meters <= 80) return 14.9;
-    if (meters <= 180) return 14.9;
-    if (meters <= 350) return 14.4;
-    if (meters <= 700) return 13.9;
-    if (meters <= 1400) return 13.6;
-    return 13.4;
-  }
 
   List<LatLng> _simplifyPolyline(List<LatLng> points) {
     if (points.length <= 2) return points;

@@ -162,7 +162,7 @@ class AppButtons {
                         color: AppColors.commonWhite,
                       ),
                       Text(
-                        rightImagePathText.toString() ?? '',
+                        rightImagePathText?.toString() ?? '',
                         style: TextStyle(
                           fontFamily: "Roboto-normal",
                           fontSize: 20,
@@ -185,17 +185,24 @@ class AppButtons {
 
   static void showCancelRideBottomSheet(
     BuildContext context, {
-    required Function(String selectedReason) onConfirmCancel,
+    required Future<String?> Function(String selectedReason) onConfirmCancel,
   }) {
     String? selectedReason;
+    bool showSuccess = false;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
+      isDismissible: true,
+      enableDrag: true,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(25)),
       ),
       builder: (_) {
+        final DriverSearchController driverSearchController =
+            Get.isRegistered<DriverSearchController>()
+                ? Get.find<DriverSearchController>()
+                : Get.put(DriverSearchController());
         return StatefulBuilder(
           builder: (context, setState) {
             return DraggableScrollableSheet(
@@ -211,149 +218,276 @@ class AppButtons {
                     // ),
                   ),
                   padding: const EdgeInsets.all(20),
-                  child: Column(
-                    children: [
-                      Expanded(
-                        child: ListView(
-                          controller: scrollController,
-                          children: [
-                            // const SizedBox(height: 10),
-                            // Row(
-                            //   children: [
-                            //     Expanded(
-                            //       flex: 3,
-                            //       child: RichText(
-                            //         text: TextSpan(
-                            //           style: const TextStyle(
-                            //             color: Colors.black,
-                            //             fontSize: 15,
-                            //             fontWeight: FontWeight.w500,
-                            //           ),
-                            //           children: const [
-                            //             TextSpan(
-                            //               text: 'Oluwaseun Michael',
-                            //               style: TextStyle(
-                            //                 fontWeight: FontWeight.w600,
-                            //               ),
-                            //             ),
-                            //             TextSpan(
-                            //               text:
-                            //                   ' will reach in less than 5 mins',
-                            //             ),
-                            //           ],
-                            //         ),
-                            //       ),
-                            //     ),
-                            //     SizedBox(width: 30),
-                            //     Expanded(
-                            //       flex: 1,
-                            //       child: Image.asset(AppImages.confirmCar),
-                            //     ),
-                            //   ],
-                            // ),
-                            const SizedBox(height: 30),
-                            CustomTextFields.textWithStyles600(
-                              'Still want to cancel the ride? Please tell us why',
-                            ),
-                            SizedBox(height: 20),
-                            ...[
-                              'Driver denied pickup',
-                              'Driver demanded extra cash',
-                              'Selected wrong pickup',
-                              'My reason is not listed',
-                            ].map((reason) {
-                              final isSelected = selectedReason == reason;
-                              return Padding(
-                                padding: const EdgeInsets.only(bottom: 10),
+                  child: Obx(() {
+                    final isLoading =
+                        driverSearchController.isCancelLoading.value;
+                    final selected = (selectedReason ?? '').trim();
 
-                                child: InkWell(
-                                  onTap: () {
-                                    setState(() {
-                                      selectedReason = reason;
-                                    });
-                                  },
-                                  child: Container(
-                                    padding: EdgeInsets.symmetric(vertical: 15),
+                    if (showSuccess) {
+                      return Column(
+                        children: [
+                          Expanded(
+                            child: Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Container(
+                                    width: 64,
+                                    height: 64,
                                     decoration: BoxDecoration(
-                                      borderRadius: BorderRadius.circular(10),
-                                      color:
-                                          isSelected
-                                              ? AppColors.commonBlack
-                                              : AppColors.containerColor1,
+                                      color: Colors.green.withOpacity(0.12),
+                                      shape: BoxShape.circle,
                                     ),
-                                    child: Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 15,
+                                    child: const Icon(
+                                      Icons.check_circle_rounded,
+                                      color: Colors.green,
+                                      size: 34,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 14),
+                                  const Text(
+                                    'Ride cancelled',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w800,
+                                      color: AppColors.commonBlack,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 6),
+                                  if (selected.isNotEmpty)
+                                    Text(
+                                      'Reason: $selected',
+                                      textAlign: TextAlign.center,
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600,
+                                        color: AppColors.commonBlack
+                                            .withOpacity(0.65),
                                       ),
-                                      child: Row(
-                                        children: [
-                                          Text(
-                                            reason,
-                                            style: TextStyle(
-                                              color:
-                                                  isSelected
-                                                      ? AppColors.commonWhite
-                                                      : AppColors.commonBlack
-                                                          .withOpacity(0.6),
+                                    ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          SizedBox(
+                            width: double.infinity,
+                            child: AppButtons.button(
+                              onTap: () => Get.back(),
+                              text: 'Done',
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                        ],
+                      );
+                    }
+
+                    return Column(
+                      children: [
+                        Expanded(
+                          child: ListView(
+                            controller: scrollController,
+                            children: [
+                              const SizedBox(height: 10),
+                              Center(
+                                child: Container(
+                                  width: 42,
+                                  height: 4,
+                                  decoration: BoxDecoration(
+                                    color: Colors.grey.shade300,
+                                    borderRadius: BorderRadius.circular(999),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(height: 22),
+                              CustomTextFields.textWithStyles600(
+                                'Still want to cancel the ride? Please tell us why',
+                              ),
+                              const SizedBox(height: 12),
+                              AnimatedSwitcher(
+                                duration: const Duration(milliseconds: 180),
+                                child:
+                                    selected.isEmpty
+                                        ? const SizedBox.shrink()
+                                        : Container(
+                                          key: ValueKey(selected),
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 12,
+                                            vertical: 10,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFFF3F6FF),
+                                            borderRadius: BorderRadius.circular(
+                                              12,
+                                            ),
+                                            border: Border.all(
+                                              color: Colors.black
+                                                  .withOpacity(0.06),
                                             ),
                                           ),
-                                        ],
+                                          child: Row(
+                                            children: [
+                                              const Icon(
+                                                Icons.check_circle_rounded,
+                                                size: 18,
+                                                color: Colors.green,
+                                              ),
+                                              const SizedBox(width: 8),
+                                              Expanded(
+                                                child: Text(
+                                                  'Selected: $selected',
+                                                  maxLines: 2,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                  style: const TextStyle(
+                                                    fontSize: 12,
+                                                    fontWeight: FontWeight.w700,
+                                                    color: AppColors.commonBlack,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                              ),
+                              const SizedBox(height: 16),
+                              ...[
+                                'Driver denied pickup',
+                                'Driver demanded extra cash',
+                                'Selected wrong pickup',
+                                'My reason is not listed',
+                              ].map((reason) {
+                                final isSelected = selectedReason == reason;
+                                return Padding(
+                                  padding: const EdgeInsets.only(bottom: 10),
+                                  child: InkWell(
+                                    onTap:
+                                        isLoading
+                                            ? null
+                                            : () {
+                                              setState(() {
+                                                selectedReason = reason;
+                                              });
+                                            },
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        vertical: 15,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        borderRadius: BorderRadius.circular(10),
+                                        color:
+                                            isSelected
+                                                ? AppColors.commonBlack
+                                                : AppColors.containerColor1,
+                                      ),
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 15,
+                                        ),
+                                        child: Row(
+                                          children: [
+                                            Expanded(
+                                              child: Text(
+                                                reason,
+                                                style: TextStyle(
+                                                  color:
+                                                      isSelected
+                                                          ? AppColors.commonWhite
+                                                          : AppColors
+                                                              .commonBlack
+                                                              .withOpacity(0.6),
+                                                  fontWeight:
+                                                      isSelected
+                                                          ? FontWeight.w700
+                                                          : FontWeight.w500,
+                                                ),
+                                              ),
+                                            ),
+                                            if (isSelected)
+                                              const Icon(
+                                                Icons.check_rounded,
+                                                color: AppColors.commonWhite,
+                                                size: 18,
+                                              ),
+                                          ],
+                                        ),
                                       ),
                                     ),
                                   ),
+                                );
+                              }).toList(),
+                              if (isLoading) ...[
+                                const SizedBox(height: 4),
+                                Text(
+                                  'Cancelling…',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w700,
+                                    color:
+                                        AppColors.commonBlack.withOpacity(0.55),
+                                  ),
                                 ),
-                              );
-                            }).toList(),
+                              ],
+                            ],
+                          ),
+                        ),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: AppButtons.button(
+                                buttonColor: AppColors.containerColor1,
+                                textColor: AppColors.commonBlack,
+                                onTap: isLoading ? null : () => Get.back(),
+                                text: "Don't Cancel",
+                              ),
+                            ),
+                            const SizedBox(width: 20),
+                            Expanded(
+                              child: AppButtons.button(
+                                buttonColor: AppColors.cancelRideColor,
+                                isLoading: isLoading,
+                                onTap:
+                                    isLoading
+                                        ? null
+                                        : () async {
+                                          if ((selectedReason ?? '').isEmpty) {
+                                            AppToasts.showInfoGlobal(
+                                              'Please Select a reason before proceeding',
+                                              title: 'Info',
+                                            );
+                                            return;
+                                          }
+
+                                          final nav = Navigator.of(context);
+                                          final res = await onConfirmCancel(
+                                            selectedReason!,
+                                          );
+                                          final ok =
+                                              (res ?? '').trim().isEmpty;
+                                          if (!ok) return;
+
+                                          setState(() {
+                                            showSuccess = true;
+                                          });
+
+                                          Future.delayed(
+                                            const Duration(milliseconds: 900),
+                                            () {
+                                              if (nav.mounted && nav.canPop()) {
+                                                nav.pop();
+                                              }
+                                            },
+                                          );
+                                        },
+                                text: 'Cancel Ride',
+                              ),
+                            ),
                           ],
                         ),
-                      ),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: AppButtons.button(
-                              buttonColor: AppColors.containerColor1,
-                              textColor: AppColors.commonBlack,
-                              onTap: () {
-                                Get.back();
-                              },
-                              text: "Don't Cancel",
-                            ),
-                          ),
-                          SizedBox(width: 20),
-                            Expanded(
-                              child: GetX<DriverSearchController>(
-                                init: Get.isRegistered<DriverSearchController>()
-                                    ? Get.find<DriverSearchController>()
-                                    : Get.put(DriverSearchController()),
-                                builder: (driverSearchController) {
-                                  final isLoading =
-                                      driverSearchController.isCancelLoading.value;
-                                  return AppButtons.button(
-                                    isLoading: isLoading,
-                                    onTap: isLoading
-                                        ? null
-                                        : () {
-                                           if (selectedReason != null) {
-                                             // Close sheet first; show loading on the underlying screen button.
-                                             Get.back();
-                                             onConfirmCancel(selectedReason!);
-                                           } else {
-                                              AppToasts.showInfoGlobal(
-                                                'Please Select a reason before proceeding',
-                                                title: 'Info',
-                                              );
-                                          }
-                                        },
-                                  text: "Cancel Ride",
-                                );
-                              },
-                            ),
-                          ),
-                        ],
-                      ),
-                      SizedBox(height: 15),
-                    ],
-                  ),
+                        const SizedBox(height: 15),
+                      ],
+                    );
+                  }),
                 );
               },
             );
@@ -365,6 +499,16 @@ class AppButtons {
 
   static void showPackageCancelBottomSheet(
     BuildContext context, {
+    String? courierName,
+    String? orderId,
+    double? distanceMeters,
+    int? durationSeconds,
+    String? statusMessage,
+    String? policyTitle,
+    String? policyMessage,
+    double? totalPaid,
+    double? cancellationFee,
+    List<String>? reasons,
     required Future<String?> Function(String selectedReason) onConfirmCancel,
   }) {
     String? selectedReason;
@@ -382,6 +526,52 @@ class AppButtons {
       builder: (_) {
         return StatefulBuilder(
           builder: (context, setState) {
+            final courier = (courierName ?? '').toString().trim();
+            final safeCourier = courier.isEmpty ? 'Courier' : courier;
+            final safeOrderId = (orderId ?? '').toString().trim();
+            final dm = distanceMeters;
+            final km = (dm != null && dm.isFinite) ? (dm / 1000.0) : null;
+            final distText =
+                (km != null)
+                    ? '${km.toStringAsFixed(km >= 10 ? 0 : 1)} km away'
+                    : '';
+            final ds = durationSeconds;
+            final mins = (ds != null && ds >= 0) ? (ds / 60.0) : null;
+            final etaText = (mins != null) ? 'Time: ${mins.round()} min' : '';
+
+            final metaBits = <String>[
+              distText,
+              etaText,
+              if (safeOrderId.isNotEmpty) 'Order: PKG-$safeOrderId',
+            ].where((e) => e.trim().isNotEmpty).toList();
+            final metaLine = metaBits.join(' • ');
+
+            final r = reasons;
+            final sheetReasons =
+                (r == null || r.isEmpty)
+                    ? <String>[
+                      'Changed my mind',
+                      'Wrong pickup address',
+                      'Package not ready',
+                      'Found alternative delivery',
+                      'Other Reason',
+                    ]
+                    : r;
+
+            String money(num v) {
+              final d = v.toDouble();
+              final isInt = (d - d.roundToDouble()).abs() < 0.000001;
+              return isInt ? d.toStringAsFixed(0) : d.toStringAsFixed(2);
+            }
+
+            final tp = totalPaid;
+            final paid = (tp != null && tp.isFinite && tp >= 0) ? tp : null;
+            final cf = cancellationFee;
+            final fee = (cf != null && cf.isFinite && cf >= 0) ? cf : null;
+            final refund =
+                (paid != null && fee != null)
+                    ? (paid - fee).clamp(0.0, double.infinity)
+                    : null;
             return DraggableScrollableSheet(
               maxChildSize: 0.90,
               minChildSize: 0.85,
@@ -436,7 +626,9 @@ class AppButtons {
                                         ),
                                         SizedBox(height: 3),
                                         Text(
-                                          'Rajesh Kumar is on the way to your location',
+                                          (statusMessage ??
+                                                  '$safeCourier is on the way')
+                                              .toString(),
                                           style: TextStyle(
                                             fontSize: 13,
                                             color: Colors.black87,
@@ -446,7 +638,11 @@ class AppButtons {
                                         CustomTextFields.textWithStylesSmall(
                                           maxLines: 2,
                                           fontSize: 11,
-                                          '2.1 km away • ETA: 8 minutes • Order: PKG-2025-7841',
+                                          metaLine.isNotEmpty
+                                              ? metaLine
+                                              : (safeOrderId.isNotEmpty
+                                                  ? 'Order: PKG-$safeOrderId'
+                                                  : ''),
                                           colors: AppColors.blueLight,
                                         ),
                                       ],
@@ -461,13 +657,7 @@ class AppButtons {
                               'Why do you want to cancel?',
                             ),
                             const SizedBox(height: 5),
-                            ...[
-                              'Changed my mind',
-                              'Wrong pickup address',
-                              'Package not ready',
-                              'Found alternative delivery',
-                              'Other Reason',
-                            ].map((reason) {
+                            ...sheetReasons.map((reason) {
                               final isSelected = selectedReason == reason;
                               return Padding(
                                 padding: const EdgeInsets.only(bottom: 10),
@@ -545,7 +735,8 @@ class AppButtons {
                                       children: [
                                         CustomTextFields.textWithStyles600(
                                           fontSize: 14,
-                                          'Cancellation Policy',
+                                          (policyTitle ?? 'Cancellation Policy')
+                                              .toString(),
                                           color: AppColors.cancelRideColor,
                                         ),
                                         SizedBox(height: 3),
@@ -554,27 +745,38 @@ class AppButtons {
                                               .withOpacity(0.6),
                                           maxLines: 2,
                                           fontSize: 10,
-                                          'Since the courier is already en route, a cancellation fee of ₹25 applies.',
+                                          (policyMessage ??
+                                                  (fee == null
+                                                      ? 'Cancellation fee may apply.'
+                                                      : (fee > 0
+                                                          ? 'A cancellation fee of ₹${money(fee)} may apply.'
+                                                          : 'No cancellation fee applies.')))
+                                              .toString(),
                                         ),
                                         SizedBox(height: 5),
-                                        CustomTextFields.textWithStylesSmall(
-                                          fontWeight: FontWeight.w500,
-                                          colors: AppColors.commonBlack,
-                                          fontSize: 10,
-                                          '• Total paid: ₹73',
-                                        ),
-                                        CustomTextFields.textWithStylesSmall(
-                                          fontWeight: FontWeight.w500,
-                                          colors: AppColors.commonBlack,
-                                          fontSize: 10,
-                                          '• Cancellation fee: ₹25',
-                                        ),
-                                        CustomTextFields.textWithStylesSmall(
-                                          colors: AppColors.commonBlack,
-                                          fontWeight: FontWeight.w500,
-                                          fontSize: 10,
-                                          '• Refund amount: ₹48',
-                                        ),
+                                        if (paid != null)
+                                          CustomTextFields.textWithStylesSmall(
+                                            fontWeight: FontWeight.w500,
+                                            colors: AppColors.commonBlack,
+                                            fontSize: 10,
+                                            '• Total paid: ₹${money(paid)}',
+                                          ),
+                                        if (fee != null)
+                                          CustomTextFields.textWithStylesSmall(
+                                            fontWeight: FontWeight.w500,
+                                            colors: AppColors.commonBlack,
+                                            fontSize: 10,
+                                            fee > 0
+                                                ? '• Cancellation fee: ₹${money(fee)}'
+                                                : '• Cancellation fee: ₹0',
+                                          ),
+                                        if (refund != null)
+                                          CustomTextFields.textWithStylesSmall(
+                                            colors: AppColors.commonBlack,
+                                            fontWeight: FontWeight.w500,
+                                            fontSize: 10,
+                                            '• Refund amount: ₹${money(refund)}',
+                                          ),
                                       ],
                                     ),
                                   ),
@@ -595,7 +797,7 @@ class AppButtons {
                             onTap: () {
                               Get.back();
                             },
-                            text: "Cancel",
+                            text: "Close",
                           ),
                           SizedBox(width: 10),
                           Expanded(

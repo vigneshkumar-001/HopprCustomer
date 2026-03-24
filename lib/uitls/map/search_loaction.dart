@@ -7,7 +7,9 @@ import 'package:hopper/Core/Consents/app_texts.dart';
 import 'package:hopper/Core/Utility/app_buttons.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
+import 'package:hopper/Presentation/OnBoarding/models/address_models.dart';
 import 'package:hopper/Presentation/OnBoarding/models/recent_location_model.dart';
+import 'package:hopper/Presentation/OnBoarding/utils/saved_addresses_store.dart';
 import 'package:hopper/api/repository/api_consents.dart';
 import 'package:http/http.dart' as http;
 import 'package:geolocator/geolocator.dart';
@@ -44,6 +46,10 @@ class _CommonLocationSearchState extends State<CommonLocationSearch> {
   final List<RecentLocation> _recentLocations = <RecentLocation>[];
   bool _loadingRecents = false;
 
+  final SavedAddressesStore _savedAddressesStore = const SavedAddressesStore();
+  final List<SavedAddressEntry> _savedAddresses = <SavedAddressEntry>[];
+  bool _loadingSavedAddresses = false;
+
   // NEW: performance helpers
   Timer? _debounce;
   bool _isLoading = false;
@@ -60,6 +66,7 @@ class _CommonLocationSearchState extends State<CommonLocationSearch> {
     _initOrigin(); // get location once
     _resetSessionToken(); // new session token
     _loadRecentLocations();
+    _loadSavedAddresses();
   }
 
   Future<void> _loadRecentLocations() async {
@@ -67,13 +74,14 @@ class _CommonLocationSearchState extends State<CommonLocationSearch> {
       setState(() => _loadingRecents = true);
       final prefs = await SharedPreferences.getInstance();
       final recentList = prefs.getStringList('recent_locations') ?? const [];
-      final decoded = recentList
-          .map((jsonStr) {
-            final json = jsonDecode(jsonStr) as Map<String, dynamic>;
-            return RecentLocation.fromJson(json);
-          })
-          .where((e) => e.description.trim().isNotEmpty)
-          .toList();
+      final decoded =
+          recentList
+              .map((jsonStr) {
+                final json = jsonDecode(jsonStr) as Map<String, dynamic>;
+                return RecentLocation.fromJson(json);
+              })
+              .where((e) => e.description.trim().isNotEmpty)
+              .toList();
 
       if (!mounted) return;
       setState(() {
@@ -89,6 +97,78 @@ class _CommonLocationSearchState extends State<CommonLocationSearch> {
         _loadingRecents = false;
       });
     }
+  }
+
+  Future<void> _loadSavedAddresses() async {
+    try {
+      setState(() => _loadingSavedAddresses = true);
+      final items = await _savedAddressesStore.load();
+      if (!mounted) return;
+      setState(() {
+        _savedAddresses
+          ..clear()
+          ..addAll(_savedAddressesStore.normalized(items));
+        _loadingSavedAddresses = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _savedAddresses.clear();
+        _loadingSavedAddresses = false;
+      });
+    }
+  }
+
+  Future<void> _markSavedUsedFromResult(Map result) async {
+    try {
+      if (result['saveToSavedAddresses'] == false) return;
+      final loc = result['location'];
+      if (loc is! LatLng) return;
+
+      final address = AddressModel(
+        name: (result['name'] ?? '').toString(),
+        phone: (result['phone'] ?? '').toString(),
+        address: (result['address'] ?? '').toString(),
+        landmark: (result['landmark'] ?? '').toString(),
+        mapAddress: (result['mapAddress'] ?? '').toString(),
+        latitude: loc.latitude,
+        longitude: loc.longitude,
+      );
+
+      final label = (result['addressLabel'] ?? '').toString();
+      final updated = await _savedAddressesStore.markUsed(
+        address,
+        label: label.isEmpty ? null : label,
+      );
+      if (!mounted) return;
+      setState(() {
+        _savedAddresses
+          ..clear()
+          ..addAll(updated);
+      });
+    } catch (_) {
+      // ignore
+    }
+  }
+
+  Future<void> _selectSavedAddress(AddressModel address) async {
+    final updated = await _savedAddressesStore.markUsed(address);
+    if (mounted) {
+      setState(() {
+        _savedAddresses
+          ..clear()
+          ..addAll(updated);
+      });
+    }
+
+    Navigator.pop(context, {
+      'mapAddress': address.mapAddress,
+      'location': LatLng(address.latitude, address.longitude),
+      'address': address.address,
+      'landmark': address.landmark,
+      'name': address.name,
+      'phone': address.phone,
+    });
   }
 
   // Generate a lightweight session token (avoids pulling in uuid pkg)
@@ -234,6 +314,7 @@ class _CommonLocationSearchState extends State<CommonLocationSearch> {
 
         if (!mounted) return;
         if (result != null && result['mapAddress'] != null) {
+          await _markSavedUsedFromResult(result);
           Navigator.pop(context, {
             'mapAddress': result['mapAddress'],
             'location': result['location'],
@@ -277,6 +358,7 @@ class _CommonLocationSearchState extends State<CommonLocationSearch> {
 
     if (!mounted) return;
     if (result != null && result['mapAddress'] != null) {
+      await _markSavedUsedFromResult(result);
       Navigator.pop(context, {
         'mapAddress': result['mapAddress'],
         'location': result['location'],
@@ -295,6 +377,10 @@ class _CommonLocationSearchState extends State<CommonLocationSearch> {
         builder:
             (context) => MapScreen(
               searchQuery: '',
+              location:
+                  _origin != null
+                      ? LatLng(_origin!.latitude, _origin!.longitude)
+                      : null,
               type: widget.type ?? '',
               initialAddress: widget.initialAddress,
               initialLandmark: widget.initialLandmark,
@@ -306,6 +392,7 @@ class _CommonLocationSearchState extends State<CommonLocationSearch> {
 
     if (!mounted) return;
     if (result != null && result['mapAddress'] != null) {
+      await _markSavedUsedFromResult(result);
       Navigator.pop(context, {
         'mapAddress': result['mapAddress'],
         'location': result['location'],
@@ -320,6 +407,7 @@ class _CommonLocationSearchState extends State<CommonLocationSearch> {
   @override
   void dispose() {
     _debounce?.cancel();
+    _searchController.dispose();
     super.dispose();
   }
 
@@ -333,35 +421,148 @@ class _CommonLocationSearchState extends State<CommonLocationSearch> {
     });
   }
 
-  Widget _buildRecentsList() {
-    if (_loadingRecents) {
-      return const Center(
-        child: SizedBox(
-          height: 22,
-          width: 22,
-          child: CircularProgressIndicator(strokeWidth: 2),
+  Widget _buildSavedAndRecentsList() {
+    final children = <Widget>[];
+    // Always show Saved section when available. Hiding when only 1 entry exists
+    // makes users think "Saved address not working", especially on ride screens.
+    final showSaved = _savedAddresses.isNotEmpty;
+
+    if ((showSaved && _loadingSavedAddresses) || _loadingRecents) {
+      children.add(
+        const Padding(
+          padding: EdgeInsets.all(16),
+          child: Center(
+            child: SizedBox(
+              height: 22,
+              width: 22,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          ),
         ),
       );
     }
 
-    if (_recentLocations.isEmpty) return const SizedBox.shrink();
-
-    return ListView.builder(
-      itemCount: _recentLocations.length,
-      itemBuilder: (context, index) {
-        final recent = _recentLocations[index];
-        return ListTile(
-          leading: const Icon(Icons.history_rounded),
-          title: Text(
-            recent.description,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+    if (showSaved) {
+      children.add(
+        const Padding(
+          padding: EdgeInsets.fromLTRB(16, 6, 16, 6),
+          child: Text(
+            'Saved',
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
           ),
-          onTap: () => _openRecentLocation(recent),
+        ),
+      );
+
+      for (final entry in _savedAddresses) {
+        final subtitle =
+            '${entry.address.address}, ${entry.address.landmark}, ${entry.address.mapAddress}';
+        children.add(
+          Dismissible(
+            key: ValueKey(entry.id),
+            direction: DismissDirection.endToStart,
+            background: Container(
+              alignment: Alignment.centerRight,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              color: Colors.red,
+              child: const Icon(Icons.delete, color: Colors.white),
+            ),
+            confirmDismiss: (_) async {
+              final updated = await _savedAddressesStore.remove(entry.id);
+              if (!mounted) return false;
+              setState(() {
+                _savedAddresses
+                  ..clear()
+                  ..addAll(updated);
+              });
+              return true;
+            },
+            child: ListTile(
+              dense: true,
+              leading: Icon(
+                entry.label.toLowerCase() == 'home'
+                    ? Icons.home_outlined
+                    : entry.label.toLowerCase() == 'office'
+                    ? Icons.business_outlined
+                    : entry.label.toLowerCase() == 'work'
+                    ? Icons.work_outline
+                    : (entry.isFavorite ? Icons.star : Icons.place_outlined),
+                color: entry.isFavorite ? Colors.amber : Colors.grey,
+              ),
+              title: Text(
+                entry.label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              subtitle: Text(
+                subtitle,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: IconButton(
+                onPressed: () async {
+                  final updated = await _savedAddressesStore.toggleFavorite(
+                    entry.id,
+                  );
+                  if (!mounted) return;
+                  setState(() {
+                    _savedAddresses
+                      ..clear()
+                      ..addAll(updated);
+                  });
+                },
+                icon: Icon(
+                  entry.isFavorite ? Icons.star : Icons.star_border,
+                  color: entry.isFavorite ? Colors.amber : Colors.grey,
+                ),
+              ),
+              onTap: () => _selectSavedAddress(entry.address),
+            ),
+          ),
         );
-      },
-    );
+      }
+
+      if (_recentLocations.isNotEmpty) children.add(const Divider(height: 1));
+    }
+
+    if (_recentLocations.isNotEmpty) {
+      children.add(
+        const Padding(
+          padding: EdgeInsets.fromLTRB(16, 10, 16, 6),
+          child: Text(
+            'Recent searches',
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+          ),
+        ),
+      );
+
+      for (final recent in _recentLocations) {
+        children.add(
+          ListTile(
+            leading: const Icon(Icons.history_rounded),
+            title: Text(
+              recent.description,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+            ),
+            onTap: () => _openRecentLocation(recent),
+          ),
+        );
+      }
+    }
+
+    if (children.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.all(16),
+        child: Text('No saved or recent locations yet.'),
+      );
+    }
+
+    return ListView(children: children);
   }
 
   Widget _buildPredictionsList() {
@@ -378,7 +579,10 @@ class _CommonLocationSearchState extends State<CommonLocationSearch> {
             style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
           ),
           onTap: () {
-            _getPlaceDetailsAndNavigate(place['place_id'], place['description']);
+            _getPlaceDetailsAndNavigate(
+              place['place_id'],
+              place['description'],
+            );
           },
         );
       },
@@ -457,7 +661,7 @@ class _CommonLocationSearchState extends State<CommonLocationSearch> {
                             child:
                                 _isLoading
                                     ? LinearProgressIndicator(
-                                  borderRadius: BorderRadius.circular(15),
+                                      borderRadius: BorderRadius.circular(15),
                                       minHeight: 3,
                                       color: AppColors.commonBlack,
                                     )
@@ -492,7 +696,10 @@ class _CommonLocationSearchState extends State<CommonLocationSearch> {
 
             // Predictions list (autocomplete only — instant)
             Expanded(
-              child: showRecents ? _buildRecentsList() : _buildPredictionsList(),
+              child:
+                  showRecents
+                      ? _buildSavedAndRecentsList()
+                      : _buildPredictionsList(),
             ),
 
             AppButtons.button(

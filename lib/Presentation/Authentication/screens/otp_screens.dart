@@ -2,17 +2,18 @@ import 'dart:async';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Core/Consents/app_texts.dart';
 import 'package:hopper/Core/Utility/app_buttons.dart';
 import 'package:hopper/Core/Utility/app_loader.dart';
 import 'package:hopper/Presentation/Authentication/controller/otp_controller.dart';
+import 'package:hopper/Presentation/Authentication/controller/location_gate_controller.dart';
 import 'package:hopper/Presentation/Authentication/screens/permission_screens.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:hopper/Presentation/OnBoarding/Widgets/custom_bottomnavigation.dart';
 import 'package:pin_code_fields/pin_code_fields.dart';
 import 'package:get/get.dart';
-import 'package:geolocator/geolocator.dart';
 
 class OtpScreens extends StatefulWidget {
   final String? countyCode;
@@ -33,6 +34,31 @@ class _OtpScreensState extends State<OtpScreens> {
   late Timer _timer;
   int _start = 30;
   final OtpController otpController = Get.put(OtpController());
+
+  Future<void> _hideKeyboard() async {
+    FocusManager.instance.primaryFocus?.unfocus();
+    try {
+      await SystemChannels.textInput.invokeMethod('TextInput.hide');
+    } catch (_) {}
+  }
+
+  Future<void> _goNextAfterOtp() async {
+    await _hideKeyboard();
+    await Future.delayed(const Duration(milliseconds: 60));
+
+    final gate = Get.find<LocationGateController>();
+    await gate.checkNow();
+
+    if (!mounted) return;
+    final Widget next =
+        gate.isReady.value
+            ? const CommonBottomNavigation()
+            : const PermissionScreens();
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => next),
+    );
+  }
 
   @override
   void initState() {
@@ -155,16 +181,7 @@ class _OtpScreensState extends State<OtpScreens> {
                                           //   }
                                           // }
 
-                                          if (mounted) {
-                                            Navigator.pushReplacement(
-                                              context,
-                                              MaterialPageRoute(
-                                                builder:
-                                                    (context) =>
-                                                        PermissionScreens(),
-                                              ),
-                                            );
-                                          }
+                                          await _goNextAfterOtp();
                                         },
                                         onError: (error) {
                                           setState(() {
@@ -296,15 +313,7 @@ class _OtpScreensState extends State<OtpScreens> {
                               return;
                             } else {
                               otpController.otpVerify(
-                                onSuccess: () {
-                                  FocusScope.of(context).unfocus();
-                                  Navigator.pushReplacement(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder: (context) => PermissionScreens(),
-                                    ),
-                                  );
-                                },
+                                onSuccess: () async => _goNextAfterOtp(),
                                 onError: (error) {
                                   setState(() {
                                     otpError = error;

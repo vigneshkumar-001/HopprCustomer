@@ -1,5 +1,6 @@
 // common_bottom_navigation.dart
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Core/Utility/app_showcase_key.dart';
@@ -8,7 +9,6 @@ import 'package:hopper/Presentation/Drawer/screens/settings_screen.dart';
 import 'package:hopper/Presentation/OnBoarding/Screens/home_screens.dart';
  
 import 'package:hopper/Presentation/OnBoarding/Screens/package_screens.dart';
-import 'package:hopper/Presentation/OnBoarding/Screens/payment_screen.dart';
 import 'package:hopper/Presentation/wallet/screens/wallet_screens.dart';
 import 'package:hopper/TutorialService_widgets.dart';
 import 'package:hopper/uitls/netWorkHandling/network_handling_screen.dart';
@@ -27,13 +27,32 @@ class CommonBottomNavigationState extends State<CommonBottomNavigation> {
   /// Instance-scoped showcase keys (fixes duplicate GlobalKey crash)
   late final ShowcaseKeys showcaseKeys;
 
+  Future<void> _forceHideKeyboard() async {
+    FocusManager.instance.primaryFocus?.unfocus();
+    try {
+      await SystemChannels.textInput.invokeMethod('TextInput.hide');
+    } catch (_) {}
+  }
+
   @override
   void initState() {
     super.initState();
     showcaseKeys = ShowcaseKeys(); // <-- NEW: create per-instance keys
     _selectedIndex = widget.initialIndex;
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+
+      // Prevent "keyboard flash" on first Home load (which also breaks tutorial overlay positioning).
+      await _forceHideKeyboard();
+      await Future.delayed(const Duration(milliseconds: 180));
+      if (!mounted) return;
+      await _forceHideKeyboard();
+
+      if (!mounted) return;
+      if (MediaQuery.of(context).viewInsets.bottom > 0) return;
+      // Give one more frame for layout to stabilize before showing coach marks.
+      await Future.delayed(const Duration(milliseconds: 120));
       if (!mounted) return;
 
       TutorialService.showTutorial(context, keys: showcaseKeys);

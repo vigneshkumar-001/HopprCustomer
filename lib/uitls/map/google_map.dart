@@ -72,6 +72,14 @@ class _MapScreenState extends State<MapScreen>
 
   bool receiveWithOtp = true;
   List<String> parcelTypes = ['Home', 'Work', 'Other'];
+  static const List<String> _addressLabels = <String>[
+    'Home',
+    'Office',
+    'Work',
+    'Other',
+  ];
+  bool _saveToSavedAddresses = true;
+  String _addressLabel = 'Other';
 
   // ✅ added: debounce/guard for reverse geocode on drag
   bool _pendingReverse = false;
@@ -81,15 +89,20 @@ class _MapScreenState extends State<MapScreen>
   void initState() {
     super.initState();
     _searchController.text = widget.searchQuery;
+    _saveToSavedAddresses = widget.type == 'receiver';
+
+    // If caller already provides a location, render map immediately so the
+    // full-screen loader doesn't show on every open.
+    if (widget.location != null) {
+      _targetLocation = widget.location;
+      _cameraPosition = widget.location;
+      final label = widget.searchQuery.trim();
+      if (label.isNotEmpty) _selectedAddress = label;
+    }
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (widget.location != null) {
-        _updateLocation(
-          widget.location!,
-          widget.searchQuery.isNotEmpty
-              ? widget.searchQuery
-              : "Selected Location",
-        );
+        _reverseAndUpdate(widget.location!);
       } else if (widget.searchQuery.isNotEmpty) {
         _getLocationFromQuery(widget.searchQuery);
       } else {
@@ -232,19 +245,28 @@ class _MapScreenState extends State<MapScreen>
     try {
       if (!await _ensureLocationPermission()) return;
 
-      Position position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
-      );
-
-      final latLng = LatLng(position.latitude, position.longitude);
+      final lastKnown = await Geolocator.getLastKnownPosition();
 
       // 👇 show the map immediately
-      setState(() {
-        _targetLocation = latLng;
-      });
+      if (lastKnown != null && mounted && _targetLocation == null) {
+        final latLng = LatLng(lastKnown.latitude, lastKnown.longitude);
+        setState(() => _targetLocation = latLng);
+        _reverseAndUpdate(latLng);
+      }
 
-      // fetch address in background (no await so UI doesn't block)
-      _reverseAndUpdate(latLng);
+      Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high)
+          .then((position) {
+            final latLng = LatLng(position.latitude, position.longitude);
+            if (!mounted) return;
+            setState(() => _targetLocation = latLng);
+            _mapController?.animateCamera(
+              CameraUpdate.newLatLngZoom(latLng, 17),
+            );
+            _reverseAndUpdate(latLng);
+          })
+          .catchError((_) {
+            // ignore; last-known may already be shown
+          });
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(
@@ -457,112 +479,67 @@ class _MapScreenState extends State<MapScreen>
                       ),
                       const SizedBox(height: 12),
 
-                      // Dotted Line
-                      // SizedBox(
-                      //   height: 2,
-                      //   child: DottedLine(
-                      //     direction: Axis.horizontal,
-                      //     dashColor: AppColors.commonBlack.withOpacity(0.1),
-                      //     lineThickness: 1,
-                      //     dashLength: 5,
-                      //     dashGapLength: 4,
-                      //   ),
-                      // ),
-                      // const SizedBox(height: 15),
-                      //
-                      // GestureDetector(
-                      //   onTap: () {
-                      //     setModalState(() {
-                      //       receiveWithOtp = !receiveWithOtp;
-                      //     });
-                      //   },
-                      //   child: Row(
-                      //     crossAxisAlignment: CrossAxisAlignment.center,
-                      //     children: [
-                      //       Container(
-                      //         width: 22,
-                      //         height: 22,
-                      //         decoration: BoxDecoration(
-                      //           color: receiveWithOtp
-                      //               ? const Color(0xFF357AE9)
-                      //               : Colors.white,
-                      //           borderRadius: BorderRadius.circular(4),
-                      //           border: Border.all(
-                      //             color: receiveWithOtp
-                      //                 ? const Color(0xFF357AE9)
-                      //                 : Colors.grey.shade400,
-                      //             width: 2,
-                      //           ),
-                      //         ),
-                      //         child: receiveWithOtp
-                      //             ? const Icon(
-                      //           Icons.check,
-                      //           size: 16,
-                      //           color: Colors.white,
-                      //         )
-                      //             : null,
-                      //       ),
-                      //       const SizedBox(width: 10),
-                      //       Expanded(
-                      //         child: Text(
-                      //           'Add to saved address',
-                      //           style: TextStyle(
-                      //             fontWeight: FontWeight.bold,
-                      //             color: AppColors.commonBlack,
-                      //           ),
-                      //         ),
-                      //       ),
-                      //     ],
-                      //   ),
-                      // ),
-
-                      // const SizedBox(height: 20),
-                      //
-                      // // Parcel Type Grid
-                      // GridView.count(
-                      //   crossAxisCount: 3,
-                      //   crossAxisSpacing: 10,
-                      //   mainAxisSpacing: 10,
-                      //   childAspectRatio: 2.8,
-                      //   shrinkWrap: true,
-                      //   physics: const NeverScrollableScrollPhysics(),
-                      //   children: parcelTypes.map((title) {
-                      //     final isSelected = selectedParcel == title;
-                      //     return GestureDetector(
-                      //       onTap: () {
-                      //         setModalState(() {
-                      //           selectedParcel = isSelected ? null : title;
-                      //           AppLogger.log.i("Selected Parcel: $selectedParcel");
-                      //         });
-                      //       },
-                      //       child: Container(
-                      //         height: 40,
-                      //         alignment: Alignment.center,
-                      //         decoration: BoxDecoration(
-                      //           color: isSelected
-                      //               ? AppColors.addToAddress
-                      //               : AppColors.commonWhite,
-                      //           border: Border.all(
-                      //             color: isSelected
-                      //                 ? AppColors.addToAddress
-                      //                 : AppColors.containerColor,
-                      //             width: 1.5,
-                      //           ),
-                      //           borderRadius: BorderRadius.circular(10),
-                      //         ),
-                      //         child: Text(
-                      //           title,
-                      //           textAlign: TextAlign.center,
-                      //           style: TextStyle(
-                      //             fontWeight: FontWeight.bold,
-                      //             fontSize: 13,
-                      //             color: isSelected ? AppColors.commonWhite : Colors.black,
-                      //           ),
-                      //         ),
-                      //       ),
-                      //     );
-                      //   }).toList(),
-                      // ),
+                      Row(
+                        children: [
+                          Checkbox(
+                            value: _saveToSavedAddresses,
+                            onChanged: (v) {
+                              setModalState(() {
+                                _saveToSavedAddresses = v ?? true;
+                              });
+                            },
+                            activeColor: AppColors.commonBlack,
+                          ),
+                          const SizedBox(width: 6),
+                          const Expanded(
+                            child: Text(
+                              'Save this address',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w700,
+                                color: AppColors.commonBlack,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (_saveToSavedAddresses) ...[
+                        const SizedBox(height: 6),
+                        DropdownButtonFormField<String>(
+                          value: _addressLabel,
+                          items:
+                              _addressLabels
+                                  .map(
+                                    (e) => DropdownMenuItem<String>(
+                                      value: e,
+                                      child: Text(e),
+                                    ),
+                                  )
+                                  .toList(),
+                          onChanged: (v) {
+                            if (v == null) return;
+                            setModalState(() => _addressLabel = v);
+                          },
+                          decoration: InputDecoration(
+                            labelText: 'Save as',
+                            filled: true,
+                            fillColor: Colors.white,
+                            enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(8),
+                              borderSide: BorderSide(
+                                color: AppColors.containerColor,
+                                width: 1.5,
+                              ),
+                            ),
+                            focusedBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(8),
+                              borderSide: const BorderSide(
+                                color: Colors.black,
+                                width: 1.5,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                       const SizedBox(height: 25),
                       AppButtons.button(
                         onTap: () {
@@ -576,6 +553,8 @@ class _MapScreenState extends State<MapScreen>
                                 'landmark': landmarkController.text.trim(),
                                 'name': nameController.text.trim(),
                                 'phone': phoneController.text.trim(),
+                                'saveToSavedAddresses': _saveToSavedAddresses,
+                                'addressLabel': _addressLabel,
                               };
                               AppLogger.log.i(result);
                               // ✅ Reset flag before closing

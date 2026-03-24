@@ -7,7 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:hopper/Presentation/OnBoarding/Controller/package_controller.dart';
 import 'package:hopper/Presentation/OnBoarding/Screens/chat_screen.dart';
 import 'package:dotted_line/dotted_line.dart';
- 
+
 import 'package:hopper/Presentation/OnBoarding/Widgets/custom_bottomnavigation.dart';
 import 'package:hopper/Presentation/OnBoarding/Widgets/package_contoiner.dart';
 import 'package:hopper/Presentation/OnBoarding/models/address_models.dart';
@@ -48,7 +48,8 @@ class PackageMapConfirmScreen extends StatefulWidget {
       _PackageMapConfirmScreenState();
 }
 
-class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
+class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
+    with SingleTickerProviderStateMixin {
   bool isExpanded = false;
   GoogleMapController? _mapController;
   final socketService = SocketService();
@@ -89,11 +90,27 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
   LatLng? _currentDriverLatLng;
   bool isTripCancelled = false;
   String cancelReason = "";
+  String cancelTitle = "";
 
   double? _routeMeters;
   int? _routeSeconds;
   bool _routeMetricsFromSocket = false;
   DateTime _routeMetricsFromSocketAt = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _navigatedToPayment = false;
+  Timer? _paymentNavTimer;
+  String _vehicleType = '';
+
+  static const double _preferredInitialZoom = 16.4;
+  static const double _minFollowZoom = 15.8;
+
+  bool _isTruthy(dynamic v) {
+    if (v == null) return false;
+    if (v is bool) return v;
+    if (v is num) return v != 0;
+    final s = v.toString().trim().toLowerCase();
+    if (s.isEmpty) return false;
+    return s == 'true' || s == '1' || s == 'yes' || s == 'y';
+  }
 
   int? _parseInt(dynamic v) {
     if (v == null) return null;
@@ -102,9 +119,58 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
     return int.tryParse(v.toString());
   }
 
+  double? _toDouble(dynamic v) {
+    if (v == null) return null;
+    if (v is double) return v;
+    if (v is int) return v.toDouble();
+    if (v is num) return v.toDouble();
+    return double.tryParse(v.toString());
+  }
+
+  Map<String, dynamic> _asMap(dynamic v) {
+    if (v is Map<String, dynamic>) return v;
+    if (v is Map) return v.map((k, val) => MapEntry(k.toString(), val));
+    return const <String, dynamic>{};
+  }
+
+  String _extractCancelTitle(dynamic payload, {required String fallback}) {
+    final data = _asMap(payload);
+    final title = (data['title'] ?? '').toString().trim();
+    if (title.isNotEmpty) return title;
+
+    final cancelledBy =
+        (data['cancelledBy'] ?? data['canceledBy'] ?? '').toString().trim();
+    if (cancelledBy.isNotEmpty) {
+      final who = cancelledBy.toLowerCase();
+      if (who.contains('driver')) return 'Driver cancelled';
+      if (who.contains('customer') || who.contains('user')) {
+        return 'Booking cancelled';
+      }
+      return 'Cancelled';
+    }
+
+    return fallback;
+  }
+
+  String _extractCancelReason(dynamic payload, {required String fallback}) {
+    final data = _asMap(payload);
+    final v =
+        data['reason'] ??
+        data['message'] ??
+        data['cancelReason'] ??
+        data['cancellationReason'] ??
+        data['remarks'];
+    final s = (v ?? '').toString().trim();
+    return s.isNotEmpty ? s : fallback;
+  }
+
   Timer? _pulseTimer;
   double _pulsePhase = 0.0;
   LatLng? _pulseCenter;
+
+  late final AnimationController _searchingAnimController;
+  Timer? _searchingElapsedTimer;
+  int _searchingElapsedSeconds = 0;
 
   String _estimateText() {
     final a = _estimateStt1.trim();
@@ -117,7 +183,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
   String _shortPlace(String raw) {
     final s = raw.trim();
     if (s.isEmpty) return '';
-    final parts = s.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+    final parts =
+        s.split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
     if (parts.isEmpty) return '';
     if (parts.length >= 3) {
       // city, state/region
@@ -125,6 +192,136 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
     }
     if (parts.length >= 2) return '${parts[parts.length - 2]}, ${parts.last}';
     return parts.first;
+  }
+
+  void _navigateToPayment({required bool replace}) {
+    if (_navigatedToPayment) return;
+    _paymentNavTimer?.cancel();
+    _paymentNavTimer = null;
+
+    _navigatedToPayment = true;
+    final id = (BookingId.trim().isNotEmpty ? BookingId : widget.bookingId)
+        .trim();
+
+    final screen = PaymentScreen(
+      bookingId: id,
+      amount: Amount,
+      sender: widget.senderData,
+      receiver: widget.receiverData,
+      driverName: driverName,
+      driverProfilePic: ProfilePic,
+    );
+
+    if (replace) {
+      Get.off(() => screen);
+    } else {
+      Get.to(() => screen);
+    }
+  }
+
+  void _schedulePaymentNavigation({
+    required Duration delay,
+    required bool replace,
+  }) {
+    if (_navigatedToPayment) return;
+    _paymentNavTimer?.cancel();
+    _paymentNavTimer = Timer(delay, () {
+      if (!mounted) return;
+      _navigateToPayment(replace: replace);
+    });
+  }
+
+  bool _isDestinationReachedPayload(dynamic data) {
+    if (data == null) return false;
+    if (data is bool) return data;
+
+    if (data is String) {
+      final s = data.trim().toLowerCase();
+      if (s.isEmpty) return false;
+      if (s == 'false' || s == '0' || s == 'no' || s == 'n') return false;
+      // common server status strings
+      if (s.contains('reach') || s.contains('arriv')) return true;
+      if (s.contains('complete') || s.contains('delivered')) return true;
+      if (s.contains('success') || s.contains('ok')) return true;
+    }
+
+    final payload = _asMap(data);
+    final status = payload['status'];
+    if (_isTruthy(status)) return true;
+    if (status is String) {
+      final s = status.trim().toLowerCase();
+      if (s.contains('reach') || s.contains('arriv')) return true;
+      if (s.contains('complete') || s.contains('delivered')) return true;
+      if (s.contains('success') || s.contains('ok')) return true;
+    }
+
+    return _isTruthy(payload['destinationReached']) ||
+        _isTruthy(payload['driverReachedDestination']) ||
+        _isTruthy(payload['reached']);
+  }
+
+  Future<void> _loadCustomMarkerForVehicle(String vehicleType) async {
+    final t = vehicleType.trim().toLowerCase();
+    final isCar =
+        t.contains('car') ||
+        t.contains('sedan') ||
+        t.contains('suv') ||
+        t.contains('van');
+    final asset = isCar ? AppImages.carHop : AppImages.packageBike;
+
+    try {
+      final icon = await BitmapDescriptor.asset(
+        height: 60,
+        ImageConfiguration(size: Size(52, 52)),
+        asset,
+      );
+      if (!mounted) return;
+      setState(() => _carIcon = icon);
+      final pos = _currentDriverLatLng;
+      if (pos != null) _updateDriverMarker(pos, _lastBearing);
+    } catch (_) {}
+  }
+
+  Widget _buildPickupDeliveryStatusCard() {
+    final est = _estimateText();
+    final pickedUp = _isPackageCollected || _isInTransit || _isOutForDelivery;
+
+    if (_isOutForDelivery) {
+      return PackageContainer.pickUpFields(
+        title1: 'Ready',
+        imagePath: AppImages.clrHome,
+        title: 'Out for Delivery',
+        subTitle: est.isNotEmpty ? est : 'Delivering to destination',
+      );
+    }
+
+    if (pickedUp) {
+      return PackageContainer.pickUpFields(
+        title1: 'Ready',
+        imagePath: AppImages.box,
+        title: 'Picked Up',
+        subTitle:
+            _shortPlace(PickupAddress).isNotEmpty
+                ? 'From ${_shortPlace(PickupAddress)}'
+                : (est.isNotEmpty ? est : 'Package picked up'),
+      );
+    }
+
+    if (_isPackagePickup) {
+      return PackageContainer.pickUpFields(
+        title1: 'Ready',
+        imagePath: AppImages.box,
+        title: 'Package Pickup',
+        subTitle: est.isNotEmpty ? est : 'Ready for pickup',
+      );
+    }
+
+    return PackageContainer.pickUpFields(
+      title1: 'Ready',
+      imagePath: AppImages.box,
+      title: 'Pickup Pending',
+      subTitle: est.isNotEmpty ? est : 'Waiting for pickup',
+    );
   }
 
   Future<void> _seedPickupDropMarkers() async {
@@ -170,64 +367,59 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
     if (_mapController == null) return;
 
     try {
-      if (pickup != null && drop != null) {
-        final diag = Geolocator.distanceBetween(
-          pickup.latitude,
-          pickup.longitude,
-          drop.latitude,
-          drop.longitude,
-        );
-        final bounds = LatLngBounds(
-          southwest: LatLng(
-            math.min(pickup.latitude, drop.latitude),
-            math.min(pickup.longitude, drop.longitude),
-          ),
-          northeast: LatLng(
-            math.max(pickup.latitude, drop.latitude),
-            math.max(pickup.longitude, drop.longitude),
-          ),
-        );
-        if (diag.isFinite && diag < 260) {
-          final mid = LatLng(
-            (pickup.latitude + drop.latitude) / 2,
-            (pickup.longitude + drop.longitude) / 2,
-          );
-          await _mapController!.animateCamera(
-            CameraUpdate.newCameraPosition(
-              CameraPosition(
-                target: mid,
-                zoom: _currentZoomLevel.clamp(12.0, 16.6).toDouble(),
-              ),
-            ),
-          );
-        } else {
-          await _mapController!.animateCamera(
-            CameraUpdate.newLatLngBounds(bounds, 120),
-          );
-          final z = await _mapController?.getZoomLevel();
-          if (z != null && z > 16.6) {
-            final mid = LatLng(
-              (bounds.northeast.latitude + bounds.southwest.latitude) / 2,
-              (bounds.northeast.longitude + bounds.southwest.longitude) / 2,
-            );
-            await _mapController!.animateCamera(
-              CameraUpdate.newCameraPosition(
-                CameraPosition(target: mid, zoom: 16.6),
-              ),
-            );
-          }
-        }
-      } else {
-        final target = pickup ?? drop;
-        if (target != null) {
-          _mapController!.animateCamera(
-            CameraUpdate.newCameraPosition(
-              CameraPosition(target: target, zoom: _currentZoomLevel),
-            ),
-          );
-        }
-      }
+      final target = pickup ?? drop;
+      if (target == null) return;
+      final zoom = math.max(_currentZoomLevel, _preferredInitialZoom);
+      await _mapController!.animateCamera(
+        CameraUpdate.newCameraPosition(
+          CameraPosition(target: target, zoom: zoom, bearing: 0, tilt: 0),
+        ),
+      );
     } catch (_) {}
+  }
+
+  void _syncPhaseMarkers() {
+    final pickup = _customerLatLng;
+    final drop = _customerToLatLang;
+    final showPickup = !driverStartedRide && !destinationReached;
+
+    final next = <Marker>{
+      ..._markers.where(
+        (m) =>
+            m.markerId != const MarkerId("pickup_marker") &&
+            m.markerId != const MarkerId("drop_marker") &&
+            m.markerId != const MarkerId("driver_marker"),
+      ),
+    };
+
+    if (_driverMarker != null) next.add(_driverMarker!);
+
+    if (showPickup && pickup != null) {
+      next.add(
+        Marker(
+          markerId: const MarkerId("pickup_marker"),
+          position: pickup,
+          icon: BitmapDescriptor.defaultMarkerWithHue(
+            BitmapDescriptor.hueGreen,
+          ),
+          infoWindow: const InfoWindow(title: "Pickup"),
+        ),
+      );
+    }
+
+    if (drop != null) {
+      next.add(
+        Marker(
+          markerId: const MarkerId("drop_marker"),
+          position: drop,
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+          infoWindow: const InfoWindow(title: "Drop"),
+        ),
+      );
+    }
+
+    if (!mounted) return;
+    setState(() => _markers = next.toSet());
   }
 
   void _startPulseAnimation() {
@@ -329,7 +521,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
   }
 
   // ---------- camera follow (order_confirm style) ----------
-  double _currentZoomLevel = 16.0;
+  double _currentZoomLevel = _preferredInitialZoom;
   DateTime _pauseAutoFollowUntil = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastCameraMoveAt = DateTime.fromMillisecondsSinceEpoch(0);
   final Duration _cameraInterval = const Duration(milliseconds: 900);
@@ -348,11 +540,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
   String? _activePolyId;
 
   Future<void> _loadCustomMarker() async {
-    _carIcon = await BitmapDescriptor.asset(
-      height: 60,
-      ImageConfiguration(size: Size(52, 52)),
-      AppImages.packageBike,
-    );
+    await _loadCustomMarkerForVehicle(_vehicleType);
   }
 
   final GlobalKey _senderKey = GlobalKey();
@@ -398,23 +586,24 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
   }
 
   void _goToCurrentLocation() async {
-    Position position = await Geolocator.getCurrentPosition(
-      desiredAccuracy: LocationAccuracy.high,
-    );
+    try {
+      final position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+      );
+      final latLng = LatLng(position.latitude, position.longitude);
 
-    final latLng = LatLng(position.latitude, position.longitude);
-
-    _pauseAutoFollowUntil = DateTime.fromMillisecondsSinceEpoch(0);
-    _mapController?.animateCamera(
-      CameraUpdate.newCameraPosition(
-        CameraPosition(
-          target: latLng,
-          zoom: _currentZoomLevel,
-          bearing: 0,
-          tilt: 0,
+      _pauseAutoFollowUntil = DateTime.fromMillisecondsSinceEpoch(0);
+      _mapController?.animateCamera(
+        CameraUpdate.newCameraPosition(
+          CameraPosition(
+            target: latLng,
+            zoom: _currentZoomLevel,
+            bearing: 0,
+            tilt: 0,
+          ),
         ),
-      ),
-    );
+      );
+    } catch (_) {}
   }
 
   bool isWaitingForDriver = true;
@@ -443,6 +632,14 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
   @override
   void initState() {
     super.initState();
+    _searchingAnimController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1600),
+    )..repeat();
+    _searchingElapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() => _searchingElapsedSeconds += 1);
+    });
     _initLocation();
     _loadCustomMarker();
     initSocket();
@@ -478,7 +675,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
       final String driverFullName = (data['driverName'] ?? '').toString();
       final String customerPhone = (data['customerPhone'] ?? '').toString();
       final double rating =
-           double.tryParse(data['driverRating'].toString()) ?? 0.0;
+          double.tryParse(data['driverRating'].toString()) ?? 0.0;
       final String color = vehicle['color'] ?? '';
       final String model = vehicle['model'] ?? '';
       final String brand = vehicle['brand'] ?? '';
@@ -517,7 +714,9 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
       final fromLng =
           (customerLoc['fromLongitude'] is num)
               ? (customerLoc['fromLongitude'] as num).toDouble()
-              : double.tryParse((customerLoc['fromLongitude'] ?? '').toString());
+              : double.tryParse(
+                (customerLoc['fromLongitude'] ?? '').toString(),
+              );
       final toLat =
           (customerLoc['toLatitude'] is num)
               ? (customerLoc['toLatitude'] as num).toDouble()
@@ -535,6 +734,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
       }
 
       setState(() {
+        _vehicleType = type.toString();
         plateNumber = plate;
         driverName = '$driverFullName ⭐ $rating';
         carDetails = '$color - $brand';
@@ -556,13 +756,18 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
         MaxWeight = maxWeight;
         PickupAddress = pickupAddress;
         DropAddress = dropAddress;
-        Amount = (amount is num) ? amount.toDouble() : (double.tryParse((amount ?? '').toString()) ?? 0.0);
+        Amount =
+            (amount is num)
+                ? amount.toDouble()
+                : (double.tryParse((amount ?? '').toString()) ?? 0.0);
       });
 
       AppLogger.log.i("🚕 Joined booking data: $data");
       AppLogger.log.i("🚕 driverAccepted ==  $driverAccepted");
 
+      _loadCustomMarkerForVehicle(type.toString());
       _seedPickupDropMarkers();
+      _syncPhaseMarkers();
 
       // Start real-time tracking
       if (driverId.trim().isNotEmpty) {
@@ -577,7 +782,13 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
     socketService.on('driver-location', (data) {
       AppLogger.log.i('📦 driver-location-updated: $data');
 
-      final newDriverLatLng = LatLng(data['latitude'], data['longitude']);
+      final lat = _toDouble(data['latitude']);
+      final lng = _toDouble(data['longitude']);
+      if (lat == null || lng == null) {
+        AppLogger.log.e("Invalid driver-location payload: $data");
+        return;
+      }
+      final newDriverLatLng = LatLng(lat, lng);
 
       if (_currentDriverLatLng == null) {
         _currentDriverLatLng = newDriverLatLng;
@@ -621,7 +832,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
         _isPackageCollected = basePayload['packageCollected'] ?? false;
         _isInTransit = basePayload['inTransit'] ?? false;
         _isOutForDelivery = basePayload['outForDelivery'] ?? false;
-        _estimateStt1 = estimate['stt1'] ?? '';
+        _estimateStt1 = estimate[' '] ?? '';
         _estimateStt2 = estimate['stt2'] ?? '';
 
         // Prefer socket ETA metrics for display (prevents mismatch vs server values)
@@ -639,6 +850,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
 
       if (prevStarted != nextStarted) {
         _maybeUpdatePolyline(newDriverLatLng, force: true);
+        _syncPhaseMarkers();
       }
     });
 
@@ -665,56 +877,44 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
       if (!mounted) return;
       setState(() {}); // only for UI like info card updates
 
-      if (status &&
-          _currentDriverLatLng != null &&
-          _customerToLatLang != null) {
-        final dropMarker = Marker(
-          markerId: const MarkerId("drop_marker"),
-          position: _customerToLatLang!,
-          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
-          infoWindow: const InfoWindow(title: "Destination"),
-        );
-
-        setState(() {
-          _markers = {if (_driverMarker != null) _driverMarker!, dropMarker};
-        });
-
+      if (status) _syncPhaseMarkers();
+      if (status && _currentDriverLatLng != null) {
         _maybeUpdatePolyline(_currentDriverLatLng!, force: true);
       }
     });
     socketService.on('driver-reached-destination', (data) {
-      final status = data['status'];
-      if (status == true || status.toString() == 'status') {
-        if (!mounted) return;
-        setState(() {
-          destinationReached = true;
-        });
-        Future.delayed(const Duration(seconds: 2), () {
-          if (!mounted) return;
-          final id = (BookingId.trim().isNotEmpty ? BookingId : widget.bookingId).trim();
-          Get.to(
-            () => PaymentScreen(
-              bookingId: id,
-              amount: Amount,
-              sender: widget.senderData,
-              receiver: widget.receiverData,
-            ),
-          );
-        });
+      if (!_isDestinationReachedPayload(data)) return;
+      if (_navigatedToPayment || destinationReached) return;
 
-        AppLogger.log.i("driver_reached,$data");
-      }
+      final payload = _asMap(data);
+      final amount = _toDouble(payload['amount']);
+      if (amount != null && amount > 0) Amount = amount;
+
+      if (!mounted) return;
+      setState(() => destinationReached = true);
+      _syncPhaseMarkers();
+
+      _schedulePaymentNavigation(
+        delay: const Duration(milliseconds: 1200),
+        replace: true,
+      );
+
+      AppLogger.log.i("driver-reached-destination,$payload");
     });
     socketService.on('customer-cancelled', (data) async {
       AppLogger.log.i('customer-cancelled : $data');
 
-      if (data != null && data['status'] == true) {
+      final payload = _asMap(data);
+      if (payload.isNotEmpty && payload['status'] == true) {
         if (!mounted) return;
 
         setState(() {
           isTripCancelled = true;
-          cancelReason =
-              data['reason'] ?? "Driver had to cancel due to an emergency";
+          cancelTitle = _extractCancelTitle(
+            payload,
+            fallback: 'Booking cancelled',
+          );
+          cancelReason = _extractCancelReason(payload, fallback: 'Cancelled');
         });
 
         await Future.delayed(const Duration(seconds: 3));
@@ -725,13 +925,17 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
     socketService.on('driver-cancelled', (data) async {
       AppLogger.log.i('driver-cancelled : $data');
 
-      if (data != null && data['status'] == true) {
+      final payload = _asMap(data);
+      if (payload.isNotEmpty && payload['status'] == true) {
         if (!mounted) return;
 
         setState(() {
           isTripCancelled = true;
-          cancelReason =
-              data['reason'] ?? "Driver had to cancel due to an emergency";
+          cancelTitle = _extractCancelTitle(
+            payload,
+            fallback: 'Driver cancelled',
+          );
+          cancelReason = _extractCancelReason(payload, fallback: 'Cancelled');
         });
 
         await Future.delayed(const Duration(seconds: 3));
@@ -756,6 +960,15 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
 
     final bearing = math.atan2(y, x);
     return (bearing * 180 / math.pi + 360) % 360;
+  }
+
+  double _smoothBearing(double current, double target, {double alpha = 0.35}) {
+    final from = current % 360;
+    final to = target % 360;
+    var delta = to - from;
+    if (delta > 180) delta -= 360;
+    if (delta < -180) delta += 360;
+    return (from + delta * alpha + 360) % 360;
   }
 
   double _lerp(double start, double end, double t) {
@@ -848,6 +1061,32 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
     });
   }
 
+  List<LatLng> _decodeStepsPolyline(dynamic legs) {
+    try {
+      final leg0 =
+          (legs is List && legs.isNotEmpty) ? (legs.first as Map?) : null;
+      final steps = (leg0?['steps'] as List?) ?? const [];
+      if (steps.isEmpty) return const [];
+
+      final out = <LatLng>[];
+      for (final step in steps) {
+        final m = step as Map?;
+        final enc = (m?['polyline']?['points'] ?? '').toString();
+        if (enc.isEmpty) continue;
+        final pts = _decodePolyline(enc);
+        if (pts.isEmpty) continue;
+        if (out.isNotEmpty && out.last == pts.first) {
+          out.addAll(pts.skip(1));
+        } else {
+          out.addAll(pts);
+        }
+      }
+      return out;
+    } catch (_) {
+      return const [];
+    }
+  }
+
   Future<void> _drawPolylineFromDriverToCustomer({
     required LatLng driverLatLng,
     required LatLng customerLatLng,
@@ -855,15 +1094,16 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
     if (_isDrawingPolyline) return; // prevent multiple calls
     _isDrawingPolyline = true;
 
-    String apiKey = ApiConsents.googleMapApiKey;
+    try {
+      final apiKey = ApiConsents.googleMapApiKey;
 
-    final url =
-        'https://maps.googleapis.com/maps/api/directions/json?origin=${driverLatLng.latitude},${driverLatLng.longitude}&destination=${customerLatLng.latitude},${customerLatLng.longitude}&key=$apiKey';
+      final url =
+          'https://maps.googleapis.com/maps/api/directions/json?origin=${driverLatLng.latitude},${driverLatLng.longitude}&destination=${customerLatLng.latitude},${customerLatLng.longitude}&key=$apiKey';
 
-    final response = await http.get(Uri.parse(url));
-    final data = json.decode(response.body);
-    if (!mounted) return;
-    if (data['status'] == 'OK') {
+      final response = await http.get(Uri.parse(url));
+      final data = json.decode(response.body);
+      if (!mounted) return;
+      if (data['status'] == 'OK') {
       final legs = (data['routes']?[0]?['legs'] as List?) ?? const [];
       final leg0 = legs.isNotEmpty ? (legs.first as Map?) : null;
       final meters =
@@ -875,8 +1115,11 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
               ? (leg0?['duration']?['value'] as num).toInt()
               : null;
 
-      final encoded = data['routes'][0]['overview_polyline']['points'];
-      final points = _decodePolyline(encoded);
+      final stepPoints = _decodeStepsPolyline(legs);
+      final encoded =
+          (data['routes']?[0]?['overview_polyline']?['points'] ?? '').toString();
+      final points =
+          stepPoints.isNotEmpty ? stepPoints : _decodePolyline(encoded);
       if (!mounted) return;
       final socketFresh =
           _routeMetricsFromSocket &&
@@ -896,13 +1139,20 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
             points: points,
             color: Colors.black,
             width: 4,
+            jointType: JointType.round,
+            startCap: Cap.roundCap,
+            endCap: Cap.roundCap,
           ),
         };
       });
     } else {
-      print("❗ Error fetching directions: ${data['status']}");
+      AppLogger.log.e("Directions error: ${data['status']}");
     }
-    _isDrawingPolyline = false;
+    } catch (e) {
+      AppLogger.log.e("Directions exception: $e");
+    } finally {
+      _isDrawingPolyline = false;
+    }
   }
 
   List<LatLng> _decodePolyline(String encoded) {
@@ -968,13 +1218,17 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
     _lastCameraMoveAt = now;
 
     try {
+      final followZoom = math.max(_currentZoomLevel, _minFollowZoom);
+      // Always keep map North-up. Only the vehicle marker rotates.
+      const bearing = 0.0;
+      const tilt = 0.0;
       _mapController?.animateCamera(
         CameraUpdate.newCameraPosition(
           CameraPosition(
             target: target,
-            zoom: _currentZoomLevel,
-            bearing: 0,
-            tilt: 0,
+            zoom: followZoom,
+            bearing: bearing,
+            tilt: tilt,
           ),
         ),
       );
@@ -999,7 +1253,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
   }
 
   void _maybeUpdatePolyline(LatLng driverLatLng, {bool force = false}) {
-    final customerTarget = driverStartedRide ? _customerToLatLang : _customerLatLng;
+    final customerTarget =
+        driverStartedRide ? _customerToLatLang : _customerLatLng;
     if (customerTarget == null) return;
 
     final polyId = driverStartedRide ? "driver_to_drop" : "driver_to_pickup";
@@ -1032,7 +1287,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
 
     if (dist > _hardJumpMeters) {
       _currentDriverLatLng = to;
-      _lastBearing = _getBearing(from, to);
+      _lastBearing = _smoothBearing(_lastBearing, _getBearing(from, to), alpha: 0.6);
       _updateDriverMarker(to, _lastBearing);
       _maybeAutoFollow(to);
       _maybeUpdatePolyline(to, force: true);
@@ -1047,7 +1302,10 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
     _animateDriverSegment(from: from, to: to);
   }
 
-  Future<void> _animateDriverSegment({required LatLng from, required LatLng to}) async {
+  Future<void> _animateDriverSegment({
+    required LatLng from,
+    required LatLng to,
+  }) async {
     _isAnimatingDriver = true;
 
     final dist = Geolocator.distanceBetween(
@@ -1057,7 +1315,10 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
       to.longitude,
     );
     final steps = (6 + (dist / 10).clamp(0, 10)).round().clamp(8, 16);
-    final durationMs = (450 + (dist / 2).clamp(0, 650)).round().clamp(450, 1100);
+    final durationMs = (450 + (dist / 2).clamp(0, 650)).round().clamp(
+      450,
+      1100,
+    );
     final interval = Duration(milliseconds: (durationMs / steps).round());
 
     for (int i = 1; i <= steps; i++) {
@@ -1069,9 +1330,9 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
       final lng = _lerp(from.longitude, to.longitude, t);
       final pos = LatLng(lat, lng);
 
-      final bearing = _getBearing(from, pos);
-      _lastBearing = bearing;
-      _updateDriverMarker(pos, bearing);
+      final rawBearing = _getBearing(from, pos);
+      _lastBearing = _smoothBearing(_lastBearing, rawBearing);
+      _updateDriverMarker(pos, _lastBearing);
       _maybeAutoFollow(pos);
     }
 
@@ -1079,6 +1340,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
     _isAnimatingDriver = false;
 
     _maybeUpdatePolyline(to);
+    _syncPhaseMarkers();
 
     final pending = _pendingDriverTarget;
     if (pending != null) {
@@ -1103,6 +1365,9 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
     } catch (_) {}
 
     _pulseTimer?.cancel();
+    _paymentNavTimer?.cancel();
+    _searchingElapsedTimer?.cancel();
+    _searchingAnimController.dispose();
     _mapController?.dispose();
     super.dispose();
   }
@@ -1117,7 +1382,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
         child: Scaffold(
           body: Stack(
             children: [
-               SizedBox(
+              SizedBox(
                 height: 550,
                 width: double.infinity,
                 child: GoogleMap(
@@ -1136,7 +1401,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                   onTap: (_) => _onUserMapGesture(),
                   initialCameraPosition: CameraPosition(
                     target: _currentPosition ?? LatLng(9.9144908, 78.0970899),
-                    zoom: _currentZoomLevel,
+                    zoom: math.max(_currentZoomLevel, _preferredInitialZoom),
                   ),
                   markers: _markers,
                   onMapCreated: (controller) async {
@@ -1151,7 +1416,10 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                         CameraUpdate.newCameraPosition(
                           CameraPosition(
                             target: _currentPosition!,
-                            zoom: _currentZoomLevel,
+                            zoom: math.max(
+                              _currentZoomLevel,
+                              _preferredInitialZoom,
+                            ),
                             bearing: 0,
                             tilt: 0,
                           ),
@@ -1173,11 +1441,19 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
               Positioned(
                 top: 350,
                 right: 10,
-                child: FloatingActionButton(
-                  mini: true,
-                  backgroundColor: Colors.white,
-                  onPressed: _goToCurrentLocation,
-                  child: Icon(Icons.my_location, color: Colors.black),
+                child: Column(
+                  children: [
+                    FloatingActionButton(
+                      heroTag: 'pkg_my_location_${widget.bookingId}',
+                      mini: true,
+                      backgroundColor: Colors.white,
+                      onPressed: _goToCurrentLocation,
+                      child: const Icon(
+                        Icons.my_location,
+                        color: Colors.black,
+                      ),
+                    ),
+                  ],
                 ),
               ),
               Positioned(
@@ -1190,7 +1466,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                       String? sosNumber = prefs.getString('sosNumber');
 
                       if (sosNumber == null || sosNumber.trim().isEmpty) {
-                        AppToasts.showError(context,'SOS number not set');
+                        AppToasts.showError(context, 'SOS number not set');
                         return;
                       }
 
@@ -1204,7 +1480,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                       final normalized = hasPlus ? '+$digitsOnly' : digitsOnly;
 
                       if (normalized.isEmpty) {
-                        AppToasts.showError(context,'Invalid SOS number');
+                        AppToasts.showError(context, 'Invalid SOS number');
                         return;
                       }
 
@@ -1218,10 +1494,10 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                       );
 
                       if (!ok) {
-                        AppToasts.showError(context,'Could not open dialer');
+                        AppToasts.showError(context, 'Could not open dialer');
                       }
                     } catch (e) {
-                      AppToasts.showError(context,'Failed to start call');
+                      AppToasts.showError(context, 'Failed to start call');
                     }
                   },
 
@@ -1239,16 +1515,21 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                   ),
                 ),
               ),
- 
+
               DraggableScrollableSheet(
                 key: ValueKey(_isDriverConfirmed),
 
-                initialChildSize: _isDriverConfirmed ? 0.55 : 0.4,
+                initialChildSize: _isDriverConfirmed ? 0.55 : 0.5,
                 minChildSize: 0.3,
                 maxChildSize: _isDriverConfirmed ? 0.90 : 0.5,
                 builder: (context, scrollController) {
                   return Container(
-                    decoration: BoxDecoration(color: Colors.white),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.vertical(
+                        top: Radius.circular(20),
+                      ),
+                    ),
                     child: SafeArea(
                       top: false,
                       child: ListView(
@@ -1258,7 +1539,6 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                         children: [
                           SizedBox(height: 20),
                           if (!_isDriverConfirmed && isWaitingForDriver) ...[
-                          
                             waitingForDriverUI(),
                           ] else if (!_isDriverConfirmed && noDriverFound) ...[
                             noDriverFoundUI(),
@@ -1283,9 +1563,11 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                                         crossAxisAlignment:
                                             CrossAxisAlignment.start,
                                         children: [
-                                          const Text(
-                                            "Your trip has been cancelled",
-                                            style: TextStyle(
+                                          Text(
+                                            cancelTitle.trim().isNotEmpty
+                                                ? cancelTitle
+                                                : "Booking cancelled",
+                                            style: const TextStyle(
                                               color: Colors.red,
                                               fontWeight: FontWeight.bold,
                                             ),
@@ -1450,7 +1732,6 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                                     _otpHighlightCard(),
                                     const SizedBox(height: 16),
                                   ],
-                               
 
                                   GestureDetector(
                                     onTap: () {},
@@ -1480,8 +1761,10 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                                                     _estimateStt1,
                                                     softWrap: true,
                                                     style: const TextStyle(
-                                                      color: AppColors.commonBlack,
-                                                      fontWeight: FontWeight.w600,
+                                                      color:
+                                                          AppColors.commonBlack,
+                                                      fontWeight:
+                                                          FontWeight.w600,
                                                       fontSize: 14,
                                                     ),
                                                   ),
@@ -1494,7 +1777,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                                                 Expanded(
                                                   child: CustomTextFields.textWithStylesSmall(
                                                     maxLines: null,
-                                                    overflow: TextOverflow.visible,
+                                                    overflow:
+                                                        TextOverflow.visible,
                                                     fontWeight: FontWeight.w500,
                                                     colors:
                                                         _isDriverConfirmed
@@ -1513,7 +1797,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                                       ),
                                     ),
                                   ),
-                                  if (_routeMeters != null || _routeSeconds != null) ...[
+                                  if (_routeMeters != null ||
+                                      _routeSeconds != null) ...[
                                     const SizedBox(height: 10),
                                     Row(
                                       children: [
@@ -1524,7 +1809,9 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                                           ),
                                           decoration: BoxDecoration(
                                             color: Colors.white,
-                                            borderRadius: BorderRadius.circular(8),
+                                            borderRadius: BorderRadius.circular(
+                                              8,
+                                            ),
                                           ),
                                           child: Row(
                                             children: [
@@ -1536,11 +1823,20 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                                               const SizedBox(width: 6),
                                               CustomTextFields.textWithStylesSmall(
                                                 [
-                                                  if (_routeMeters != null)
-                                                    _formatDistance(_routeMeters!),
-                                                  if (_routeSeconds != null)
-                                                    _formatDuration(_routeSeconds!),
-                                                ].where((e) => e.trim().isNotEmpty).join(' • '),
+                                                      if (_routeMeters != null)
+                                                        _formatDistance(
+                                                          _routeMeters!,
+                                                        ),
+                                                      if (_routeSeconds != null)
+                                                        _formatDuration(
+                                                          _routeSeconds!,
+                                                        ),
+                                                    ]
+                                                    .where(
+                                                      (e) =>
+                                                          e.trim().isNotEmpty,
+                                                    )
+                                                    .join(' • '),
                                                 colors: AppColors.commonBlack,
                                                 fontWeight: FontWeight.w600,
                                                 fontSize: 12,
@@ -1568,7 +1864,9 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                                         imagePath: AppImages.clrTick1,
                                         title: 'Package Collected',
                                         subTitle:
-                                            _shortPlace(PickupAddress).isNotEmpty
+                                            _shortPlace(
+                                                  PickupAddress,
+                                                ).isNotEmpty
                                                 ? 'From ${_shortPlace(PickupAddress)}'
                                                 : 'Package collected',
                                       ),
@@ -1586,24 +1884,16 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                                         imagePath: AppImages.clrBox1,
                                         title: 'In Transit',
                                         subTitle:
-                                            _shortPlace(DropAddress).isNotEmpty
-                                                ? 'To ${_shortPlace(DropAddress)}'
-                                                : 'In transit',
+                                            _estimateText().isNotEmpty
+                                                ? _estimateText()
+                                                : (_shortPlace(
+                                                      DropAddress,
+                                                    ).isNotEmpty
+                                                    ? 'To ${_shortPlace(DropAddress)}'
+                                                    : 'Moving to destination'),
                                       ),
                                   const SizedBox(height: 10),
-                                  _isPackagePickup && !_isOutForDelivery
-                                      ? PackageContainer.pickUpFields(
-                                        title1: 'Ready',
-                                        imagePath: AppImages.box,
-                                        title: 'Package Pickup',
-                                        subTitle: 'Ready for Pickup',
-                                      )
-                                      : PackageContainer.pickUpFields(
-                                        title1: 'Ready',
-                                        imagePath: AppImages.clrHome,
-                                        title: 'Out for Delivery',
-                                        subTitle: 'Attempting delivery',
-                                      ),
+                                  _buildPickupDeliveryStatusCard(),
 
                                   SizedBox(height: 15),
                                   Divider(color: AppColors.dividerColor1),
@@ -1692,12 +1982,14 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                                   const SizedBox(height: 12),
                                   GestureDetector(
                                     onTap: () {
-                                      Get.to(
-                                        PaymentScreen(
-                                          amount: Amount,
-                                          bookingId: widget.bookingId,
-                                        ),
-                                      );
+                                      if (!destinationReached) {
+                                        AppToasts.showError(
+                                          context,
+                                          'Payment available after delivery is completed',
+                                        );
+                                        return;
+                                      }
+                                      _navigateToPayment(replace: false);
                                     },
                                     child: Card(
                                       elevation: 5,
@@ -1714,20 +2006,19 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                                               child: Row(
                                                 children: [
                                                   Expanded(
-                                                    child:
-                                                        CustomTextFields.textWithImage(
-                                                          fontWeight:
-                                                              FontWeight.w700,
-                                                          fontSize: 13,
-                                                          colors:
-                                                              AppColors.commonBlack,
-                                                          text: 'Total Fare',
-                                                          rightImagePath:
-                                                              AppImages
-                                                                  .nBlackCurrency,
-                                                          rightImagePathText:
-                                                              ' ${Amount.toStringAsFixed(2)}',
-                                                        ),
+                                                    child: CustomTextFields.textWithImage(
+                                                      fontWeight:
+                                                          FontWeight.w700,
+                                                      fontSize: 13,
+                                                      colors:
+                                                          AppColors.commonBlack,
+                                                      text: 'Total Fare',
+                                                      rightImagePath:
+                                                          AppImages
+                                                              .nBlackCurrency,
+                                                      rightImagePathText:
+                                                          ' ${Amount.toStringAsFixed(2)}',
+                                                    ),
                                                   ),
                                                   const SizedBox(width: 10),
                                                   Flexible(
@@ -1742,26 +2033,28 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                                                             BorderRadius.circular(
                                                               6,
                                                             ),
-                                                        color: AppColors
-                                                            .commonBlack,
+                                                        color:
+                                                            AppColors
+                                                                .commonBlack,
                                                       ),
-                                                      child: CustomTextFields
-                                                          .textWithStylesSmall(
-                                                        'PKG - ${BookingId}',
-                                                        maxLines: 1,
-                                                        colors: AppColors
-                                                            .commonWhite,
-                                                        fontSize: 12,
-                                                        fontWeight:
-                                                            FontWeight.w600,
-                                                      ),
+                                                      child:
+                                                          CustomTextFields.textWithStylesSmall(
+                                                            'PKG - ${BookingId}',
+                                                            maxLines: 1,
+                                                            colors:
+                                                                AppColors
+                                                                    .commonWhite,
+                                                            fontSize: 12,
+                                                            fontWeight:
+                                                                FontWeight.w600,
+                                                          ),
                                                     ),
                                                   ),
                                                 ],
                                               ),
                                             ),
                                             SizedBox(height: 20),
-                                             ],
+                                          ],
                                         ),
                                       ),
                                     ),
@@ -1918,18 +2211,41 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                                                                   BookingId,
                                                                 );
 
-                                                                AppButtons
-                                                                    .showPackageCancelBottomSheet(
+                                                                AppButtons.showPackageCancelBottomSheet(
                                                                   context,
+                                                                  courierName:
+                                                                      driverName,
+                                                                  orderId:
+                                                                      BookingId,
+                                                                  distanceMeters:
+                                                                      _routeMeters,
+                                                                  durationSeconds:
+                                                                      _routeSeconds,
+                                                                  statusMessage:
+                                                                      destinationReached
+                                                                          ? 'Delivery completed'
+                                                                          : driverStartedRide
+                                                                          ? 'Courier is delivering your package'
+                                                                          : (_isEnRoute
+                                                                              ? 'Courier is on the way to pickup'
+                                                                              : 'Waiting for courier'),
+                                                                  policyTitle:
+                                                                      'Cancellation Policy',
+                                                                  policyMessage:
+                                                                      driverStartedRide
+                                                                          ? 'The courier has already started; cancellation charges may apply.'
+                                                                          : (_isEnRoute
+                                                                              ? 'The courier is on the way; cancellation charges may apply.'
+                                                                              : 'You can cancel now.'),
+                                                                  totalPaid:
+                                                                      Amount,
                                                                   onConfirmCancel: (
                                                                     String
                                                                     selectedReason,
                                                                   ) {
-                                                                    return driverSearchController
-                                                                        .cancelRide(
+                                                                    return driverSearchController.cancelRide(
                                                                       bookingId:
-                                                                          BookingId
-                                                                              .toString(),
+                                                                          BookingId.toString(),
                                                                       selectedReason:
                                                                           selectedReason,
                                                                       context:
@@ -1945,13 +2261,15 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                                                             SizedBox(
                                                               width: 16,
                                                               height: 16,
-                                                              child:
-                                                                  CircularProgressIndicator(
+                                                              child: CircularProgressIndicator(
                                                                 strokeWidth: 2,
                                                                 valueColor:
                                                                     AlwaysStoppedAnimation<
                                                                       Color
-                                                                    >(Colors.red),
+                                                                    >(
+                                                                      Colors
+                                                                          .red,
+                                                                    ),
                                                               ),
                                                             )
                                                           else
@@ -1967,11 +2285,15 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                                                             loading
                                                                 ? 'Cancelling...'
                                                                 : 'Cancel Courier',
-                                                            style: const TextStyle(
-                                                              color: Colors.red,
-                                                              fontWeight:
-                                                                  FontWeight.w500,
-                                                            ),
+                                                            style:
+                                                                const TextStyle(
+                                                                  color:
+                                                                      Colors
+                                                                          .red,
+                                                                  fontWeight:
+                                                                      FontWeight
+                                                                          .w500,
+                                                                ),
                                                           ),
                                                         ],
                                                       ),
@@ -1990,7 +2312,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
                                                   Row(
                                                     children: [
                                                       const Icon(
-                                                        Icons.support_agent_rounded,
+                                                        Icons
+                                                            .support_agent_rounded,
                                                         size: 18,
                                                         color: Colors.black,
                                                       ),
@@ -2044,86 +2367,291 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen> {
   }
 
   Widget waitingForDriverUI() {
-    return Column(
-      children: [
-        Text(
-          textAlign: TextAlign.center,
-          'Looking for the best drivers for you',
-          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+    Widget buildStep({
+      required String title,
+      required bool isDone,
+      required bool isActive,
+    }) {
+      final icon =
+          isDone
+              ? Icons.check_circle
+              : (isActive ? Icons.radio_button_checked : Icons.circle_outlined);
+      final color =
+          isDone
+              ? Colors.green.shade600
+              : (isActive ? Colors.black : Colors.grey.shade500);
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Row(
+          children: [
+            Icon(icon, size: 18, color: color),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                title,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: isActive ? FontWeight.w700 : FontWeight.w500,
+                  color: isActive ? Colors.black : Colors.grey.shade700,
+                ),
+              ),
+            ),
+          ],
         ),
-        SizedBox(height: 12),
-        LinearProgressIndicator(
-          borderRadius: BorderRadius.circular(10),
-          minHeight: 7,
-          backgroundColor: AppColors.linearIndicatorColor.withOpacity(0.2),
-          color: AppColors.linearIndicatorColor,
-        ),
-        SizedBox(height: 20),
-        Image.asset(
-          AppImages.packageLoading,
-          height: 100,
-          width: 100,
-          fit: BoxFit.contain,
-        ),
-        SizedBox(height: 20),
+      );
+    }
 
-        SizedBox(height: 20),
-        Obx(() {
-          final loading = driverSearchController.isCancelLoading.value;
+    final t = _searchingElapsedSeconds;
+    final step1Done = t >= 5;
+    final step2Done = t >= 12;
+    final step3Done = t >= 22;
 
-          return AppButtons.button(
-            size: 350,
-            hasBorder: true,
-            borderColor: AppColors.commonBlack.withOpacity(0.2),
-            buttonColor: AppColors.commonWhite,
-            textColor: AppColors.cancelRideColor,
+    return AnimatedBuilder(
+      animation: _searchingAnimController,
+      builder: (context, _) {
+        final v = _searchingAnimController.value;
+        final oscillate = (math.sin(v * math.pi * 2) + 1) / 2; // 0..1
+        final dots = '.' * (1 + (v * 3).floor());
+        final progressValue = 0.15 + (0.75 * oscillate);
+        final type = CARTYPE.trim().toLowerCase();
+        final isCar = type.contains('car');
+        final heroAsset =
+            isCar ? AppImages.confirmCar : AppImages.packageLoading;
+        final heroFit = isCar ? BoxFit.contain : BoxFit.cover;
+        final title = isCar ? 'Finding a driver' : 'Finding a courier';
+        final step1Title =
+            isCar ? 'Requesting nearby drivers' : 'Requesting nearby couriers';
+        final step2Title =
+            isCar ? 'Finding the best price' : 'Checking best time & price';
+        final cancelText = isCar ? 'Cancel Ride' : 'Cancel Courier';
 
-            // disable while loading
-            onTap:
-                    loading
-                        ? null
-                        : () {
-                          AppButtons.showCancelRideBottomSheet(
-                            context,
-                            onConfirmCancel: (String selectedReason) {
-                              driverSearchController.cancelRide(
-                                bookingId: widget.bookingId.toString(),
-                                selectedReason: selectedReason,
-                                context: context,
-                              );
-                            },
-                          );
-                        },
-            isLoading: driverSearchController.isCancelLoading.value,
-            // show loader instead of text
-            text: 'Cancel Ride',
-          );
-        }),
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Column(
+            children: [
+            
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(18),
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      Colors.black,
+                      Colors.black.withOpacity(0.92),
+                      Colors.black.withOpacity(0.86),
+                    ],
+                  ),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        Transform.scale(
+                          scale: 1 + (0.14 * oscillate),
+                          child: Container(
+                            height: 56,
+                            width: 56,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: Colors.white.withOpacity(0.10),
+                              border: Border.all(
+                                color: Colors.white.withOpacity(0.18),
+                              ),
+                            ),
+                          ),
+                        ),
+                        Container(
+                          height: 44,
+                          width: 44,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: Colors.white.withOpacity(0.15),
+                          ),
+                          child: const Icon(
+                            Icons.local_shipping_outlined,
+                            color: Colors.white,
+                            size: 22,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            title,
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 16,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Searching nearby drivers$dots',
+                            style: TextStyle(
+                              color: Colors.white.withOpacity(0.82),
+                              fontSize: 13,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(12),
+                            child: LinearProgressIndicator(
+                              minHeight: 6,
+                              value: progressValue,
+                              backgroundColor: Colors.white.withOpacity(0.18),
+                              valueColor: const AlwaysStoppedAnimation<Color>(
+                                Colors.white,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              Icon(
+                                Icons.info_outline,
+                                size: 16,
+                                color: Colors.white.withOpacity(0.80),
+                              ),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Text(
+                                  'Arrival time shows after a driver accepts',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: Colors.white.withOpacity(0.80),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+                Image.asset(heroAsset, height: 150, width: 150, fit: heroFit),
+ 
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 14,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(
+                    color: Colors.black.withOpacity(0.08),
+                    width: 1.2,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.05),
+                      blurRadius: 16,
+                      offset: const Offset(0, 10),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      "What's happening",
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w800,
+                        color: Colors.black,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    buildStep(
+                      title: step1Title,
+                      isDone: step1Done,
+                      isActive: !step1Done,
+                    ),
+                    buildStep(
+                      title: step2Title,
+                      isDone: step2Done,
+                      isActive: step1Done && !step2Done,
+                    ),
+                    buildStep(
+                      title: 'Confirming your driver',
+                      isDone: step3Done,
+                      isActive: step2Done && !step3Done,
+                    ),
+                    const SizedBox(height: 6),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.04),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.info_outline, size: 18),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              "Keep your phone reachable. We'll confirm a driver shortly.",
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.grey.shade800,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              Obx(() {
+                final loading = driverSearchController.isCancelLoading.value;
 
-        // AppButtons.button(
-        //   hasBorder: true,
-        //   borderColor: AppColors.commonBlack.withOpacity(0.2),
-        //   buttonColor: AppColors.commonWhite,
-        //   textColor: AppColors.cancelRideColor,
-        //   onTap: () {
-        //     // setState(() {
-        //     //   isDriverConfirmed = !isDriverConfirmed;
-        //     // });
-        //     AppButtons.showCancelRideBottomSheet(
-        //       context,
-        //       onConfirmCancel: (String selectedReason) {
-        //         print(widget.bookingId);
-        //         driverSearchController.cancelRide(
-        //           bookingId: widget.bookingId.toString() ?? '',
-        //           selectedReason: selectedReason,
-        //           context: context,
-        //         );
-        //       },
-        //     );
-        //   },
-        //   text: 'Cancel Ride',
-        // ),
-      ],
+                return AppButtons.button(
+                  size: 350,
+                  hasBorder: true,
+                  borderColor: AppColors.commonBlack.withOpacity(0.2),
+                  buttonColor: AppColors.commonWhite,
+                  textColor: AppColors.cancelRideColor,
+                  onTap:
+                      loading
+                          ? null
+                          : () {
+                            AppButtons.showCancelRideBottomSheet(
+                              context,
+                              onConfirmCancel: (String selectedReason) {
+                                return driverSearchController.cancelRide(
+                                  bookingId: widget.bookingId.toString(),
+                                  selectedReason: selectedReason,
+                                  context: context,
+                                );
+                              },
+                            );
+                          },
+                  isLoading: driverSearchController.isCancelLoading.value,
+                  text: cancelText,
+                );
+              }),
+              const SizedBox(height: 10),
+            ],
+          ),
+        );
+      },
     );
   }
 

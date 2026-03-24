@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:hopper/Core/Consents/app_texts.dart';
 import 'package:hopper/Core/Utility/app_buttons.dart';
@@ -21,6 +22,13 @@ class _PermissionScreensState extends State<PermissionScreens> {
   late final LocationGateController gate;
   late final Worker _readyWorker;
 
+  Future<void> _hideKeyboard() async {
+    FocusManager.instance.primaryFocus?.unfocus();
+    try {
+      await SystemChannels.textInput.invokeMethod('TextInput.hide');
+    } catch (_) {}
+  }
+
   @override
   void initState() {
     super.initState();
@@ -31,6 +39,7 @@ class _PermissionScreensState extends State<PermissionScreens> {
       await gate.checkNow(); // controller will close dialogs + set isReady
       if (!mounted) return;
       if (gate.isReady.value) {
+        await _hideKeyboard();
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(builder: (_) => const CommonBottomNavigation()),
@@ -41,6 +50,7 @@ class _PermissionScreensState extends State<PermissionScreens> {
     // ✅ If user enables from settings later -> auto navigate too
     _readyWorker = ever<bool>(gate.isReady, (ready) {
       if (ready && mounted) {
+        _hideKeyboard();
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(builder: (_) => const CommonBottomNavigation()),
@@ -65,6 +75,7 @@ class _PermissionScreensState extends State<PermissionScreens> {
     setState(() => isLoading = false);
 
     if (gate.isReady.value) {
+      await _hideKeyboard();
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(builder: (_) => const CommonBottomNavigation()),
