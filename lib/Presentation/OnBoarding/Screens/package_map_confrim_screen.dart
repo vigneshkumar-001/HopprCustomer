@@ -832,7 +832,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         _isPackageCollected = basePayload['packageCollected'] ?? false;
         _isInTransit = basePayload['inTransit'] ?? false;
         _isOutForDelivery = basePayload['outForDelivery'] ?? false;
-        _estimateStt1 = estimate[' '] ?? '';
+        _estimateStt1 = estimate['stt1'] ?? '';
         _estimateStt2 = estimate['stt2'] ?? '';
 
         // Prefer socket ETA metrics for display (prevents mismatch vs server values)

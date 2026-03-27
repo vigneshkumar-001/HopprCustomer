@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:async';
-import 'package:geolocator/geolocator.dart';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:hopper/Core/Consents/app_colors.dart';
@@ -213,47 +212,6 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
 
     final LatLng newLoc = selectedMapData['location'];
 
-    // prevent ≤ 1km between pickup/destination
-    if (_isStartFieldFocused && _destination?['location'] != null) {
-      final LatLng destLoc = _destination!['location'];
-      final distance = Geolocator.distanceBetween(
-        newLoc.latitude,
-        newLoc.longitude,
-        destLoc.latitude,
-        destLoc.longitude,
-      );
-      if (distance <= 1000) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Pickup and drop cannot be the same or within 1 km.'),
-          ),
-        );
-        _startController.clear();
-        _pickup = null;
-        return;
-      }
-    }
-
-    if (!_isStartFieldFocused && _pickup?['location'] != null) {
-      final LatLng pickupLoc = _pickup!['location'];
-      final distance = Geolocator.distanceBetween(
-        pickupLoc.latitude,
-        pickupLoc.longitude,
-        newLoc.latitude,
-        newLoc.longitude,
-      );
-      if (distance <= 1000) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Pickup and drop cannot be the same or within 1 km.'),
-          ),
-        );
-        _destController.clear();
-        _destination = null;
-        return;
-      }
-    }
-
     setState(() {
       if (_isStartFieldFocused) {
         _startController.text = selectedMapData['description'];
@@ -291,50 +249,6 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
         result['mapAddress'] != null &&
         result['location'] is LatLng) {
       final LatLng latLng = result['location'];
-
-      // 1 km check
-      if (_isStartFieldFocused && _destination?['location'] != null) {
-        final LatLng dest = _destination!['location'];
-        final distance = Geolocator.distanceBetween(
-          latLng.latitude,
-          latLng.longitude,
-          dest.latitude,
-          dest.longitude,
-        );
-        if (distance <= 1000) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'Pickup and drop cannot be the same or within 1 km.',
-              ),
-            ),
-          );
-          _startController.clear();
-          _pickup = null;
-          return;
-        }
-      }
-      if (!_isStartFieldFocused && _pickup?['location'] != null) {
-        final LatLng pickup = _pickup!['location'];
-        final distance = Geolocator.distanceBetween(
-          pickup.latitude,
-          pickup.longitude,
-          latLng.latitude,
-          latLng.longitude,
-        );
-        if (distance <= 1000) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'Pickup and drop cannot be the same or within 1 km.',
-              ),
-            ),
-          );
-          _destController.clear();
-          _destination = null;
-          return;
-        }
-      }
 
       final selectedMapData = {
         'description': result['mapAddress'],

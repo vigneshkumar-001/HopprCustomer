@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:hopper/Presentation/Drawer/screens/ride_and_package_history_screen.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -17,14 +16,11 @@ import 'package:hopper/Core/Utility/app_loader.dart';
 import 'package:hopper/Core/Utility/app_toasts.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:hopper/Presentation/OnBoarding/Controller/package_controller.dart';
-import 'package:hopper/Presentation/OnBoarding/Screens/payment_screen.dart';
 import 'package:hopper/Presentation/OnBoarding/Widgets/package_contoiner.dart';
 import 'package:hopper/Presentation/OnBoarding/models/address_models.dart';
 import 'package:hopper/uitls/map/google_map.dart';
 import 'package:hopper/uitls/map/search_loaction.dart';
-import 'package:geolocator/geolocator.dart';
 import 'package:get/get.dart';
-import 'package:image_picker/image_picker.dart';
 
 class ConfirmationScreen extends StatefulWidget {
   final AddressModel sender;
@@ -78,11 +74,6 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
   String capitalizeFirstLetter(String name) {
     if (name.isEmpty) return '';
     return name[0].toUpperCase() + name.substring(1).toLowerCase();
-  }
-
-  bool isWithin1Km(double lat1, double lon1, double lat2, double lon2) {
-    final distanceInMeters = Geolocator.distanceBetween(lat1, lon1, lat2, lon2);
-    return distanceInMeters < 1000;
   }
 
   List<String> parcelTypes = ['Food', 'Documents', 'Clothes', 'Others'];
@@ -702,20 +693,6 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                                       );
 
                                       if (result != null) {
-                                        final loc = result['location'];
-                                        if (receiverData != null &&
-                                            isWithin1Km(
-                                              receiverData!.latitude,
-                                              receiverData!.longitude,
-                                              loc.latitude,
-                                              loc.longitude,
-                                            )) {
-                                          AppToasts.customToast(
-                                            context,
-                                            "Pickup and drop locations cannot be the same or within 1km.",
-                                          );
-                                          return;
-                                        }
                                         setState(() {
                                           senderData = AddressModel(
                                             name: result['name'],
@@ -745,21 +722,6 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                                         ),
                                       );
                                       if (result != null) {
-                                        final loc = result['location'];
-                                        if (receiverData != null &&
-                                            isWithin1Km(
-                                              receiverData!.latitude,
-                                              receiverData!.longitude,
-                                              loc.latitude,
-                                              loc.longitude,
-                                            )) {
-                                          AppToasts.customToast(
-                                            context,
-                                            "Pickup and drop locations cannot be the same or within 1km.",
-                                          );
-                                          return;
-                                        }
-
                                         setState(() {
                                           senderData = AddressModel(
                                             name: result['name'],
@@ -850,20 +812,6 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                                       );
 
                                       if (result != null) {
-                                        final loc = result['location'];
-                                        if (senderData != null &&
-                                            isWithin1Km(
-                                              senderData!.latitude,
-                                              senderData!.longitude,
-                                              loc.latitude,
-                                              loc.longitude,
-                                            )) {
-                                          AppToasts.customToast(
-                                            context,
-                                            "Pickup and drop locations cannot be the same or within 1km.",
-                                          );
-                                          return;
-                                        }
                                         setState(() {
                                           receiverData = AddressModel(
                                             name: result['name'],
@@ -894,21 +842,6 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                                         ),
                                       );
                                       if (result != null) {
-                                        final loc = result['location'];
-                                        if (senderData != null &&
-                                            isWithin1Km(
-                                              senderData!.latitude,
-                                              senderData!.longitude,
-                                              loc.latitude,
-                                              loc.longitude,
-                                            )) {
-                                          AppToasts.customToast(
-                                            context,
-                                            "Pickup and drop locations cannot be the same or within 1km.",
-                                          );
-                                          return;
-                                        }
-
                                         setState(() {
                                           receiverData = AddressModel(
                                             name: result['name'],

@@ -131,45 +131,134 @@ class _PaymentScreenState extends State<PaymentScreen> {
       context: context,
       isDismissible: false,
       enableDrag: false,
+      isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (sheetContext) {
-        return Container(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Center(child: Container(width: 48, height: 5, decoration: BoxDecoration(color: Color(0xFFD0D5DD), borderRadius: BorderRadius.circular(999)))),
-              const SizedBox(height: 18),
-              const Center(child: CircleAvatar(radius: 28, backgroundColor: Colors.black, child: Icon(Icons.check_rounded, color: Colors.white, size: 30))),
-              const SizedBox(height: 16),
-              const Center(child: Text('Payment Successful', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800))),
-              const SizedBox(height: 8),
-              Center(child: Text('Your payment is confirmed. Review or share the trip summary before rating.', textAlign: TextAlign.center, style: TextStyle(color: Color(0xFF667085), fontSize: 13))),
-              const SizedBox(height: 18),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(color: const Color(0xFFF8FAFC), borderRadius: BorderRadius.circular(16), border: Border.all(color: const Color(0xFFE5E7EB))),
-                child: Text(summary, style: const TextStyle(height: 1.5, fontSize: 13, fontWeight: FontWeight.w600)),
+        final media = MediaQuery.of(sheetContext);
+        return SafeArea(
+          top: false,
+          child: Container(
+            constraints: BoxConstraints(maxHeight: media.size.height * 0.9),
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+            ),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Center(
+                    child: Container(
+                      width: 48,
+                      height: 5,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFD0D5DD),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  const Center(
+                    child: CircleAvatar(
+                      radius: 28,
+                      backgroundColor: Colors.black,
+                      child: Icon(
+                        Icons.check_rounded,
+                        color: Colors.white,
+                        size: 30,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  const Center(
+                    child: Text(
+                      'Payment Successful',
+                      style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  const Center(
+                    child: Text(
+                      'Your payment is confirmed. Review or share the trip summary before rating.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Color(0xFF667085), fontSize: 13),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF8FAFC),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: const Color(0xFFE5E7EB)),
+                    ),
+                    child: Text(
+                      summary,
+                      style: const TextStyle(
+                        height: 1.5,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: AppButtons.button(
+                          onTap: () => Share.share(summary),
+                          text: 'Share',
+                          buttonColor: Colors.white,
+                          textColor: Colors.black,
+                          hasBorder: true,
+                          borderColor: const Color(0xFFD0D5DD),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: AppButtons.button(
+                          onTap: () async {
+                            await Clipboard.setData(ClipboardData(text: summary));
+                            AppToasts.showSuccess(context, 'Receipt copied');
+                          },
+                          text: 'Copy',
+                          buttonColor: Colors.white,
+                          textColor: Colors.black,
+                          hasBorder: true,
+                          borderColor: const Color(0xFFD0D5DD),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: AppButtons.button(
+                          onTap: () async => _exportReceipt(summary),
+                          text: 'Download',
+                          buttonColor: Colors.white,
+                          textColor: Colors.black,
+                          hasBorder: true,
+                          borderColor: const Color(0xFFD0D5DD),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: AppButtons.button(
+                          onTap: () => Navigator.pop(sheetContext),
+                          text: 'Continue',
+                          buttonColor: AppColors.commonBlack,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ),
-              const SizedBox(height: 14),
-              Row(children: [
-                Expanded(child: AppButtons.button(onTap: () => Share.share(summary), text: 'Share', buttonColor: Colors.white, textColor: Colors.black, hasBorder: true, borderColor: const Color(0xFFD0D5DD))),
-                const SizedBox(width: 10),
-                Expanded(child: AppButtons.button(onTap: () async { await Clipboard.setData(ClipboardData(text: summary)); AppToasts.showSuccess(context,'Receipt copied'); }, text: 'Copy', buttonColor: Colors.white, textColor: Colors.black, hasBorder: true, borderColor: const Color(0xFFD0D5DD))),
-              ]),
-              const SizedBox(height: 10),
-              Row(children: [
-                Expanded(child: AppButtons.button(onTap: () async => _exportReceipt(summary), text: 'Download', buttonColor: Colors.white, textColor: Colors.black, hasBorder: true, borderColor: const Color(0xFFD0D5DD))),
-                const SizedBox(width: 10),
-                Expanded(child: AppButtons.button(onTap: () => Navigator.pop(sheetContext), text: 'Continue', buttonColor: AppColors.commonBlack)),
-              ]),
-            ],
+            ),
           ),
         );
       },
@@ -1273,7 +1362,9 @@ class _PaymentScreenState extends State<PaymentScreen> {
                   ),
                   SizedBox(height: 15),
                   CustomTextFields.textWithStylesSmall(
-                    'Update your location on the hoppr home ppage to select address from a different city',
+                    'Update your location on the hoppr home page to select address from a different city',
+                    maxLines: 2,fontSize: 11
+
                   ),
                 ],
               ),

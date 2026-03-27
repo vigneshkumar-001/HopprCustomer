@@ -36,22 +36,37 @@ class HomeMapController extends GetxController {
   final RxList<RecentLocation> recentLocations = <RecentLocation>[].obs;
 
   String customerId = '';
-  LatLng? currentPosition;
+  final Rxn<LatLng> _currentPosition = Rxn<LatLng>();
+  LatLng? get currentPosition => _currentPosition.value;
+  set currentPosition(LatLng? pos) {
+    _currentPosition.value = pos;
+    _persistLastLocationDebounced(pos);
+  }
 
   String? mapStyle;
 
   CameraPosition? _lastCamera;
-  Timer? _cameraIdleDebounce;
+  bool _suppressNextIdle = false;
+
+  LatLng? get cameraTarget => _lastCamera?.target;
 
   final Map<String, String> _geocodeCache = {};
   Timer? _geocodeDebounce;
   LatLng? _lastGeocodedPos;
 
   bool _loadingLocation = false;
+  bool _started = false;
 
   double _heading = 0.0;
   StreamSubscription<CompassEvent>? _compassSub;
   Timer? _compassThrottle;
+  Worker? _gateReadyWorker;
+  StreamSubscription<Position>? _positionSub;
+  final Rxn<LatLng> _devicePosition = Rxn<LatLng>();
+  DateTime? _devicePositionAt;
+  Timer? _persistDebounce;
+
+  LatLng? get devicePosition => _devicePosition.value;
 
   BitmapDescriptor? _carIcon, _bikeIcon;
   final BitmapDescriptor _fallbackIcon = BitmapDescriptor.defaultMarker;
@@ -74,15 +89,32 @@ class HomeMapController extends GetxController {
     super.onInit();
     _preloadMapStyle();
     _startCompassListener();
+    _restoreLastLocationFromPrefs();
+
+    // If HomeMapController.start() runs before location permission is granted,
+    // initLocation() will early-return. This ensures we fetch & center as soon as
+    // the gate becomes ready, avoiding a blank/0,0 map on first open.
+    _gateReadyWorker = ever<bool>(gate.isReady, (ready) {
+      if (!ready) {
+        _stopPositionStream();
+        return;
+      }
+
+      _startPositionStream();
+      if (currentPosition != null) return;
+      initLocation();
+    });
   }
 
   @override
   void onClose() {
-    _cameraIdleDebounce?.cancel();
     _geocodeDebounce?.cancel();
     _publishDebounce?.cancel();
     _compassThrottle?.cancel();
     _compassSub?.cancel();
+    _gateReadyWorker?.dispose();
+    _stopPositionStream();
+    _persistDebounce?.cancel();
 
     for (final t in _moveTimers.values) {
       t.cancel();
@@ -92,7 +124,34 @@ class HomeMapController extends GetxController {
     super.onClose();
   }
 
+  void _startPositionStream() {
+    if (_positionSub != null) return;
+
+    try {
+      const settings = LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 2,
+      );
+
+      _positionSub = Geolocator.getPositionStream(locationSettings: settings)
+          .listen((pos) {
+            _devicePosition.value = LatLng(pos.latitude, pos.longitude);
+            _devicePositionAt = DateTime.now();
+          });
+    } catch (_) {
+      // ignore stream errors; app should still work with getCurrentPosition()
+    }
+  }
+
+  void _stopPositionStream() {
+    _positionSub?.cancel();
+    _positionSub = null;
+  }
+
   Future<void> start() async {
+    if (_started) return;
+    _started = true;
+
     await _loadCustomerId();
     _initSocket();
     await _loadDriverIcons();
@@ -112,8 +171,9 @@ class HomeMapController extends GetxController {
     // ✅ Important for home map: if currentPosition already available, move camera now
     if (currentPosition != null) {
       try {
+        _lastCamera = CameraPosition(target: currentPosition!, zoom: 15.5);
         await mapController?.animateCamera(
-          CameraUpdate.newLatLngZoom(currentPosition!, 15),
+          CameraUpdate.newLatLngZoom(currentPosition!, 15.5),
         );
       } catch (_) {}
     } else {
@@ -125,22 +185,264 @@ class HomeMapController extends GetxController {
     _lastCamera = position;
   }
 
-  void onCameraIdle() {
-    _cameraIdleDebounce?.cancel();
-    _cameraIdleDebounce = Timer(const Duration(milliseconds: 260), () {
-      final cam = _lastCamera;
-      if (cam == null) return;
+  ScreenCoordinate _pinTipScreenCoordinate({
+    required Size mapSize,
+    required double pinAlignY,
+    required double pinWidgetHeightPx,
+  }) {
+    final centerX = (mapSize.width / 2).round();
 
-      final newPos = cam.target;
+    // Align computes top-left based on (parent - child) size.
+    // Pin tip is at the bottom of the pin widget.
+    final childTopY =
+        ((pinAlignY + 1) / 2) * (mapSize.height - pinWidgetHeightPx);
+    final pinTipY = childTopY + pinWidgetHeightPx;
+    final pinY = pinTipY.round().clamp(0, mapSize.height.round());
 
-      if (currentPosition != null) {
-        final moved = _haversineMeters(currentPosition!, newPos);
-        if (moved < _reverseGeocodeMinMoveMeters) return;
+    return ScreenCoordinate(x: centerX, y: pinY);
+  }
+
+  Future<String?> onCameraIdle({
+    bool immediateGeocode = false,
+    bool suppressible = true,
+  }) async {
+    if (suppressible && _suppressNextIdle) {
+      _suppressNextIdle = false;
+      return null;
+    }
+
+    final cam = _lastCamera;
+    if (cam == null) return null;
+
+    final newPos = cam.target;
+
+    if (currentPosition != null) {
+      final moved = _haversineMeters(currentPosition!, newPos);
+      if (moved < _reverseGeocodeMinMoveMeters) {
+        return address.value;
       }
+    }
 
-      currentPosition = newPos;
-      _scheduleReverseGeocode(newPos);
-    });
+    currentPosition = newPos;
+
+    if (immediateGeocode) {
+      return await _geocodeNow(newPos);
+    }
+
+    _scheduleReverseGeocode(newPos);
+    return null;
+  }
+
+  /// Home screen uses a "floating pin" that is not at screen center (because of
+  /// the bottom sheet). This maps camera movement to the actual LatLng under
+  /// the pin tip, so the pin location matches the blue GPS dot when centered.
+  Future<String?> onCameraIdlePinned({
+    required Size mapSize,
+    required double pinAlignY,
+    required double pinWidgetHeightPx,
+    bool immediateGeocode = false,
+    bool suppressible = true,
+  }) async {
+    if (suppressible && _suppressNextIdle) {
+      _suppressNextIdle = false;
+      return null;
+    }
+
+    final controller = mapController;
+    if (controller == null) return null;
+
+    LatLng newPos;
+    try {
+      final sc = _pinTipScreenCoordinate(
+        mapSize: mapSize,
+        pinAlignY: pinAlignY,
+        pinWidgetHeightPx: pinWidgetHeightPx,
+      );
+      newPos = await controller.getLatLng(sc);
+    } catch (_) {
+      // Fallback to center target if getLatLng fails.
+      final cam = _lastCamera;
+      if (cam == null) return null;
+      newPos = cam.target;
+    }
+
+    if (currentPosition != null) {
+      final moved = _haversineMeters(currentPosition!, newPos);
+      if (moved < _reverseGeocodeMinMoveMeters) {
+        return address.value;
+      }
+    }
+
+    currentPosition = newPos;
+
+    if (immediateGeocode) {
+      return await _geocodeNow(newPos);
+    }
+
+    _scheduleReverseGeocode(newPos);
+    return null;
+  }
+
+  Future<String?> onCameraIdleAt({
+    required ScreenCoordinate pinTip,
+    bool immediateGeocode = false,
+    bool suppressible = true,
+  }) async {
+    if (suppressible && _suppressNextIdle) {
+      _suppressNextIdle = false;
+      return null;
+    }
+
+    final controller = mapController;
+    if (controller == null) return null;
+
+    LatLng newPos;
+    try {
+      newPos = await controller.getLatLng(pinTip);
+    } catch (_) {
+      final cam = _lastCamera;
+      if (cam == null) return null;
+      newPos = cam.target;
+    }
+
+    if (currentPosition != null) {
+      final moved = _haversineMeters(currentPosition!, newPos);
+      if (moved < _reverseGeocodeMinMoveMeters) {
+        return address.value;
+      }
+    }
+
+    currentPosition = newPos;
+
+    if (immediateGeocode) {
+      return await _geocodeNow(newPos);
+    }
+
+    _scheduleReverseGeocode(newPos);
+    return null;
+  }
+
+  /// Move the camera so that [currentPosition] sits exactly under the pin tip.
+  /// This is pixel-accurate and avoids "pin vs blue dot" mismatch.
+  Future<void> alignCameraToPinnedUnderPin({
+    required Size mapSize,
+    required double pinAlignY,
+    required double pinWidgetHeightPx,
+  }) async {
+    final pos = currentPosition;
+    final controller = mapController;
+    if (pos == null || controller == null) return;
+
+    try {
+      final scPin = _pinTipScreenCoordinate(
+        mapSize: mapSize,
+        pinAlignY: pinAlignY,
+        pinWidgetHeightPx: pinWidgetHeightPx,
+      );
+
+      final scBefore = await controller.getScreenCoordinate(pos);
+      var dx = (scPin.x - scBefore.x).toDouble();
+      var dy = (scPin.y - scBefore.y).toDouble();
+      if (dx.abs() + dy.abs() < 2.0) return;
+
+      // First attempt.
+      _suppressNextIdle = true;
+      await controller.animateCamera(CameraUpdate.scrollBy(dx, dy));
+
+      final scAfter1 = await controller.getScreenCoordinate(pos);
+      final dxRemain1 = (scPin.x - scAfter1.x).toDouble();
+      final dyRemain1 = (scPin.y - scAfter1.y).toDouble();
+      if (dxRemain1.abs() + dyRemain1.abs() < 2.0) return;
+
+      // If scrollBy units/sign differ, estimate how much the feature moved vs
+      // requested scroll, then apply a corrected second scroll.
+      final movedX = (scAfter1.x - scBefore.x).toDouble();
+      final movedY = (scAfter1.y - scBefore.y).toDouble();
+
+      final kx = dx.abs() > 0.5 ? (movedX / dx) : 0.0;
+      final ky = dy.abs() > 0.5 ? (movedY / dy) : 0.0;
+
+      final dx2 =
+          (kx.abs() < 0.05) ? dxRemain1 : (dxRemain1 / kx).clamp(-1200.0, 1200.0);
+      final dy2 =
+          (ky.abs() < 0.05) ? dyRemain1 : (dyRemain1 / ky).clamp(-1200.0, 1200.0);
+
+      if (dx2.abs() + dy2.abs() < 1.0) return;
+      _suppressNextIdle = true;
+      await controller.animateCamera(CameraUpdate.scrollBy(dx2, dy2));
+    } catch (_) {}
+  }
+
+  Future<void> alignCameraToPinTip({
+    required ScreenCoordinate pinTip,
+  }) async {
+    final pos = currentPosition;
+    final controller = mapController;
+    if (pos == null || controller == null) return;
+
+    try {
+      final scBefore = await controller.getScreenCoordinate(pos);
+      var dx = (pinTip.x - scBefore.x).toDouble();
+      var dy = (pinTip.y - scBefore.y).toDouble();
+      if (dx.abs() + dy.abs() < 2.0) return;
+
+      // First attempt.
+      _suppressNextIdle = true;
+      await controller.animateCamera(CameraUpdate.scrollBy(dx, dy));
+
+      final scAfter1 = await controller.getScreenCoordinate(pos);
+      final dxRemain1 = (pinTip.x - scAfter1.x).toDouble();
+      final dyRemain1 = (pinTip.y - scAfter1.y).toDouble();
+      if (dxRemain1.abs() + dyRemain1.abs() < 2.0) return;
+
+      // Estimate the effective scroll factor (handles sign / DPR issues).
+      final movedX = (scAfter1.x - scBefore.x).toDouble();
+      final movedY = (scAfter1.y - scBefore.y).toDouble();
+
+      final kx = dx.abs() > 0.5 ? (movedX / dx) : 0.0;
+      final ky = dy.abs() > 0.5 ? (movedY / dy) : 0.0;
+
+      final dx2 =
+          (kx.abs() < 0.05) ? dxRemain1 : (dxRemain1 / kx).clamp(-1200.0, 1200.0);
+      final dy2 =
+          (ky.abs() < 0.05) ? dyRemain1 : (dyRemain1 / ky).clamp(-1200.0, 1200.0);
+
+      if (dx2.abs() + dy2.abs() < 1.0) return;
+      _suppressNextIdle = true;
+      await controller.animateCamera(CameraUpdate.scrollBy(dx2, dy2));
+    } catch (_) {}
+  }
+
+  /// Recenter the camera so that [latLng] appears exactly under [desiredPoint]
+  /// on the screen. Uses `getLatLng()` iterations to avoid `scrollBy`
+  /// direction/scale differences between platforms.
+  Future<void> placeLatLngUnderScreenPoint({
+    required LatLng latLng,
+    required ScreenCoordinate desiredPoint,
+    required ScreenCoordinate centerPoint,
+  }) async {
+    final controller = mapController;
+    if (controller == null) return;
+
+    try {
+      for (var i = 0; i < 3; i++) {
+        final underPin = await controller.getLatLng(desiredPoint);
+        final centerLatLng = await controller.getLatLng(centerPoint);
+
+        if (_haversineMeters(latLng, underPin) < 2.5) return;
+
+        final dLat = latLng.latitude - underPin.latitude;
+        final dLng = latLng.longitude - underPin.longitude;
+
+        final newTarget = LatLng(
+          centerLatLng.latitude + dLat,
+          centerLatLng.longitude + dLng,
+        );
+
+        _suppressNextIdle = true;
+        await controller.animateCamera(CameraUpdate.newLatLng(newTarget));
+      }
+    } catch (_) {}
   }
 
   Future<void> _preloadMapStyle() async {
@@ -244,11 +546,23 @@ class HomeMapController extends GetxController {
   Future<Position?> _safeGetCurrentPosition() async {
     if (!await _ensureLocationReady()) return null;
     try {
+      // Quick path first (much faster on cold GPS).
+      final last = await Geolocator.getLastKnownPosition();
+      if (last != null) return last;
+
       return await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 8),
       );
     } on LocationServiceDisabledException {
       return null;
+    } on TimeoutException {
+      // Try last known again on timeout.
+      try {
+        return await Geolocator.getLastKnownPosition();
+      } catch (_) {
+        return null;
+      }
     } catch (_) {
       return null;
     }
@@ -259,10 +573,19 @@ class HomeMapController extends GetxController {
     _loadingLocation = true;
 
     try {
+      // If we already have a recent live GPS value, use it immediately.
+      final now = DateTime.now();
+      if (devicePosition != null &&
+          _devicePositionAt != null &&
+          now.difference(_devicePositionAt!).inSeconds <= 12) {
+        currentPosition = devicePosition;
+      }
+
       final pos = await _safeGetCurrentPosition();
       if (pos == null) return;
 
       currentPosition = LatLng(pos.latitude, pos.longitude);
+      _lastCamera = CameraPosition(target: currentPosition!, zoom: 15);
 
       try {
         await mapController?.animateCamera(
@@ -272,7 +595,7 @@ class HomeMapController extends GetxController {
         );
       } catch (_) {}
 
-      _scheduleReverseGeocode(currentPosition!, immediate: true);
+      await _geocodeNow(currentPosition!);
       await fetchPopularPlaces(currentPosition!);
     } finally {
       _loadingLocation = false;
@@ -280,19 +603,67 @@ class HomeMapController extends GetxController {
   }
 
   Future<void> goToCurrentLocation() async {
-    final pos = await _safeGetCurrentPosition();
-    if (pos == null) return;
+    // Prefer the live stream value (matches the blue dot better), fallback to
+    // one-shot location.
+    late final LatLng latLng;
+    final now = DateTime.now();
+    if (devicePosition != null &&
+        _devicePositionAt != null &&
+        now.difference(_devicePositionAt!).inSeconds <= 8) {
+      latLng = devicePosition!;
+    } else {
+      final pos = await _safeGetCurrentPosition();
+      if (pos == null) return;
+      latLng = LatLng(pos.latitude, pos.longitude);
+      _devicePosition.value = latLng;
+      _devicePositionAt = now;
+    }
 
-    final latLng = LatLng(pos.latitude, pos.longitude);
     currentPosition = latLng;
+    _lastCamera = CameraPosition(target: latLng, zoom: 17.5);
 
     try {
+      // Prevent home onCameraIdle from overwriting [currentPosition] while we're
+      // doing a programmatic "go to GPS" camera move.
+      _suppressNextIdle = true;
       await mapController?.animateCamera(
-        CameraUpdate.newLatLngZoom(latLng, 17),
+        CameraUpdate.newLatLngZoom(latLng, 17.5),
       );
     } catch (_) {}
 
-    _scheduleReverseGeocode(latLng, immediate: true);
+    await _geocodeNow(latLng);
+  }
+
+  void _persistLastLocationDebounced(LatLng? pos) {
+    if (pos == null) return;
+    _persistDebounce?.cancel();
+    _persistDebounce = Timer(const Duration(milliseconds: 900), () async {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setDouble('home_last_lat', pos.latitude);
+        await prefs.setDouble('home_last_lng', pos.longitude);
+        await prefs.setString('home_last_address', address.value);
+      } catch (_) {}
+    });
+  }
+
+  void _restoreLastLocationFromPrefs() {
+    Future<void>(() async {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final lat = prefs.getDouble('home_last_lat');
+        final lng = prefs.getDouble('home_last_lng');
+        final addr = prefs.getString('home_last_address');
+
+        if (lat != null && lng != null && currentPosition == null) {
+          currentPosition = LatLng(lat, lng);
+          _lastCamera = CameraPosition(target: currentPosition!, zoom: 15);
+        }
+        if (addr != null && addr.trim().isNotEmpty) {
+          address.value = addr;
+        }
+      } catch (_) {}
+    });
   }
 
   Future<String> getAddressFromLatLng(LatLng position) async {
@@ -305,7 +676,67 @@ class HomeMapController extends GetxController {
       return cached;
     }
 
-    final value = await _reverseGeocode(position);
+    return await _geocodeNow(position);
+  }
+
+  Future<void> centerCameraOnPinnedPosition() async {
+    final pos = currentPosition;
+    final controller = mapController;
+    if (pos == null || controller == null) return;
+
+    _suppressNextIdle = true;
+    try {
+      await controller.animateCamera(CameraUpdate.newLatLng(pos));
+    } catch (_) {}
+  }
+
+  Future<void> offsetCameraToKeepPinnedUnderPin({
+    required Size mapSize,
+    required double pinAlignY,
+    double pinTipYOffsetPx = 28,
+  }) async {
+    final pos = currentPosition;
+    final controller = mapController;
+    if (pos == null || controller == null) return;
+
+    // Compute the screen point symmetric to the pin around center,
+    // then move camera so the pinned location stays under the shifted pin.
+    final centerX = (mapSize.width / 2).round();
+    final centerY = (mapSize.height / 2).round();
+
+    final rawPinY = (((pinAlignY + 1) / 2) * mapSize.height) + pinTipYOffsetPx;
+    final pinY = rawPinY.round().clamp(0, mapSize.height.round());
+    final belowY = (2 * centerY - pinY).clamp(0, mapSize.height.round());
+
+    try {
+      final target = await controller.getLatLng(
+        ScreenCoordinate(x: centerX, y: belowY),
+      );
+      _suppressNextIdle = true;
+      await controller.animateCamera(CameraUpdate.newLatLng(target));
+    } catch (_) {}
+  }
+
+  Future<String> _geocodeNow(LatLng pos) async {
+    _geocodeDebounce?.cancel();
+
+    if (_lastGeocodedPos != null) {
+      final moved = _haversineMeters(_lastGeocodedPos!, pos);
+      if (moved < _reverseGeocodeMinMoveMeters) {
+        return address.value;
+      }
+    }
+
+    _lastGeocodedPos = pos;
+
+    final key = '${pos.latitude.toStringAsFixed(5)},${pos.longitude.toStringAsFixed(5)}';
+    final cached = _geocodeCache[key];
+    if (cached != null) {
+      address.value = cached;
+      return cached;
+    }
+
+    final value = await _reverseGeocode(pos);
     _geocodeCache[key] = value;
     address.value = value;
     return value;
@@ -346,7 +777,20 @@ class HomeMapController extends GetxController {
       );
       if (placemarks.isNotEmpty) {
         final p = placemarks.first;
-        final value = "${p.name ?? ''}, ${p.subLocality ?? ''}".trim();
+        final street = [
+          (p.subThoroughfare ?? '').trim(),
+          (p.thoroughfare ?? '').trim(),
+        ].where((e) => e.isNotEmpty).join(' ').trim();
+
+        final primary = street.isNotEmpty ? street : (p.name ?? '').trim();
+
+        final parts = <String>[
+          primary,
+          (p.subLocality ?? '').trim(),
+          (p.locality ?? '').trim(),
+        ].where((e) => e.isNotEmpty).toList();
+
+        final value = parts.join(', ');
         return value.isEmpty ? "Unknown Location" : value;
       }
       return "Unknown Location";

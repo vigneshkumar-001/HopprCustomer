@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:hopper/Core/Utility/app_loader.dart';
 
-import 'package:hopper/Core/Utility/app_toasts.dart';
-
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import 'package:dotted_line/dotted_line.dart';
@@ -22,7 +20,6 @@ import 'package:hopper/Presentation/OnBoarding/utils/saved_addresses_store.dart'
 import 'package:get/get.dart';
 import 'package:hopper/Presentation/OnBoarding/models/address_models.dart';
 import 'package:hopper/uitls/map/google_map.dart';
-import 'package:geolocator/geolocator.dart';
 import 'package:hopper/uitls/map/search_loaction.dart';
 
 class PackageScreens extends StatefulWidget {
@@ -109,27 +106,7 @@ class _PackageScreensState extends State<PackageScreens> {
     });
   }
 
-  bool _isTooCloseToOther(AddressModel other, AddressModel candidate) {
-    return isWithin1Km(
-      other.latitude,
-      other.longitude,
-      candidate.latitude,
-      candidate.longitude,
-    );
-  }
-
   Future<void> _applyPickupAddress(AddressModel address) async {
-    final other = isSendSelected ? receiverData : senderData;
-    if (other != null && _isTooCloseToOther(other, address)) {
-      if (mounted) {
-        AppToasts.customToast(
-          context,
-          "Pickup and drop locations cannot be the same or within 1km.",
-        );
-      }
-      return;
-    }
-
     setState(() {
       if (isSendSelected) {
         senderData = address;
@@ -142,17 +119,6 @@ class _PackageScreensState extends State<PackageScreens> {
   }
 
   Future<void> _applyDropAddress(AddressModel address) async {
-    final other = isSendSelected ? senderData : receiverData;
-    if (other != null && _isTooCloseToOther(other, address)) {
-      if (mounted) {
-        AppToasts.customToast(
-          context,
-          "Pickup and drop locations cannot be the same or within 1km.",
-        );
-      }
-      return;
-    }
-
     setState(() {
       if (isSendSelected) {
         receiverData = address;
@@ -312,11 +278,6 @@ class _PackageScreensState extends State<PackageScreens> {
         lineHeight = calculatedHeight > 0 ? calculatedHeight : 0;
       });
     }
-  }
-
-  bool isWithin1Km(double lat1, double lon1, double lat2, double lon2) {
-    final distanceInMeters = Geolocator.distanceBetween(lat1, lon1, lat2, lon2);
-    return distanceInMeters < 1000;
   }
 
   @override
