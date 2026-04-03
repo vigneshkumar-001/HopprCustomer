@@ -1,4 +1,4 @@
-﻿// ========================= home_screens.dart (FULL UPDATED) =========================
+// ========================= home_screens.dart (FULL UPDATED) =========================
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -111,6 +111,8 @@ class _HomeScreensState extends State<HomeScreens>
   static const double _pinTipVisualAdjustPx = 0;
   bool _mapScaleCaptured = false;
   double _mapScreenCoordScale = 1.0;
+  Worker? _gateReadyWorker;
+  bool _aligningUnderPin = false;
 
   String _pickupText = 'Pickup';
   LatLng? _pickupPos;
@@ -122,7 +124,7 @@ class _HomeScreensState extends State<HomeScreens>
   bool _loadingHomeHeroBanners = false;
   List<_HomeHeroBanner> _homeHeroBanners = const [];
 
-  // âœ… DO NOT remove/add card from Stack. Only show/hide internally.
+  // DO NOT remove/add card from Stack. Only show/hide internally.
   final ValueNotifier<bool> _showActiveRideCard = ValueNotifier<bool>(false);
 
   final ValueNotifier<double> _sheetHeightN = ValueNotifier<double>(0);
@@ -133,27 +135,68 @@ class _HomeScreensState extends State<HomeScreens>
 
     final prev = _sheetHeightN.value;
     if ((h - prev).abs() > 2) _sheetHeightN.value = h;
+  }
 
-    if (!_initialPinAligned &&
-        _sheetHeightN.value > 0 &&
-        mapC.currentPosition != null &&
-        mapC.mapController != null) {
-      _initialPinAligned = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) async {
-        if (!mounted) return;
-        await Future.delayed(const Duration(milliseconds: 180));
-        final tip = _pinTipInMap();
-        final center = _mapCenterInMap();
-        if (tip == null || center == null) return;
+  Future<void> _tryAlignCurrentLocationUnderPinOnce() async {
+    if (!mounted) return;
+    if (_initialPinAligned) return;
+    if (_sheetHeightN.value <= 0) return;
+    if (mapC.mapController == null) return;
+    if (!mapC.gate.isReady.value) return;
 
-        final gps = mapC.devicePosition ?? mapC.currentPosition;
-        if (gps == null) return;
-        await mapC.placeLatLngUnderScreenPoint(
-          latLng: gps,
-          desiredPoint: tip,
-          centerPoint: center,
+    final ok = await _alignCurrentLocationUnderPin(immediateGeocode: true);
+    if (!mounted) return;
+    if (ok) _initialPinAligned = true;
+  }
+
+  Future<bool> _alignCurrentLocationUnderPin({
+    required bool immediateGeocode,
+  }) async {
+    if (_aligningUnderPin) return false;
+    _aligningUnderPin = true;
+    try {
+      // Wait for the pin overlay to lay out, otherwise RenderBoxes can be null.
+      await Future.delayed(const Duration(milliseconds: 180));
+      if (!mounted) return false;
+
+      await _captureMapScreenScaleIfNeeded();
+      final tip = _pinTipInMap();
+      final center = _mapCenterInMap();
+      if (tip == null || center == null) return false;
+
+      await mapC.goToCurrentLocation();
+      if (!mounted) return false;
+      await Future.delayed(const Duration(milliseconds: 260));
+      await _captureMapScreenScaleIfNeeded();
+
+      final gps = mapC.devicePosition ?? mapC.currentPosition;
+      if (gps == null) return false;
+
+      await mapC.placeLatLngUnderScreenPoint(
+        latLng: gps,
+        desiredPoint: tip,
+        centerPoint: center,
+      );
+      await Future.delayed(const Duration(milliseconds: 120));
+      await mapC.placeLatLngUnderScreenPoint(
+        latLng: gps,
+        desiredPoint: tip,
+        centerPoint: center,
+      );
+
+      if (immediateGeocode) {
+        await mapC.onCameraIdleAt(
+          pinTip: tip,
+          immediateGeocode: true,
+          suppressible: false,
         );
-      });
+      }
+
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      _aligningUnderPin = false;
     }
   }
 
@@ -161,6 +204,14 @@ class _HomeScreensState extends State<HomeScreens>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+
+    // Align pin + blue dot as soon as location permission becomes available.
+    _gateReadyWorker = ever<bool>(mapC.gate.isReady, (ready) {
+      if (!ready) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _tryAlignCurrentLocationUnderPinOnce();
+      });
+    });
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       final screenH = MediaQuery.of(context).size.height;
@@ -177,6 +228,7 @@ class _HomeScreensState extends State<HomeScreens>
       await mapC.start();
       await _loadActiveRide();
       await _loadHomeHeroBanners();
+      _tryAlignCurrentLocationUnderPinOnce();
     });
   }
 
@@ -207,12 +259,11 @@ class _HomeScreensState extends State<HomeScreens>
       final raw = inner['banners'];
       if (raw is! List) return;
 
-      final parsed =
-          raw
-              .whereType<Map>()
-              .map((e) => _HomeHeroBanner.fromJson(Map<String, dynamic>.from(e)))
-              .where((b) => b.imageUrl.trim().isNotEmpty)
-              .toList(growable: false);
+      final parsed = raw
+          .whereType<Map>()
+          .map((e) => _HomeHeroBanner.fromJson(Map<String, dynamic>.from(e)))
+          .where((b) => b.imageUrl.trim().isNotEmpty)
+          .toList(growable: false);
 
       if (!mounted) return;
       setState(() => _homeHeroBanners = parsed);
@@ -227,6 +278,7 @@ class _HomeScreensState extends State<HomeScreens>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _gateReadyWorker?.dispose();
     _showActiveRideCard.dispose();
     _sheetHeightN.dispose();
     super.dispose();
@@ -296,8 +348,10 @@ class _HomeScreensState extends State<HomeScreens>
     final maxY = (mapBox.size.height * scale).round();
 
     final x = (local.dx * scale).round().clamp(0, maxX);
-    final y =
-        ((local.dy - _pinTipVisualAdjustPx) * scale).round().clamp(0, maxY);
+    final y = ((local.dy - _pinTipVisualAdjustPx) * scale).round().clamp(
+      0,
+      maxY,
+    );
     return ScreenCoordinate(x: x, y: y);
   }
 
@@ -317,13 +371,17 @@ class _HomeScreensState extends State<HomeScreens>
 
   Future<void> _ensureCurrentPickup() async {
     final tip = _pinTipInMap();
-    final latest = tip == null
-        ? await mapC.onCameraIdle(immediateGeocode: true, suppressible: false)
-        : await mapC.onCameraIdleAt(
-          pinTip: tip,
-          immediateGeocode: true,
-          suppressible: false,
-        );
+    final latest =
+        tip == null
+            ? await mapC.onCameraIdle(
+              immediateGeocode: true,
+              suppressible: false,
+            )
+            : await mapC.onCameraIdleAt(
+              pinTip: tip,
+              immediateGeocode: true,
+              suppressible: false,
+            );
 
     if (mapC.currentPosition == null) {
       await mapC.initLocation();
@@ -374,7 +432,7 @@ class _HomeScreensState extends State<HomeScreens>
 
     result.fold(
       (_) {
-        // âœ… API fail -> main screen disturb à®†à®•à®•à¯à®•à¯‚à®Ÿà®¾à®¤à¯
+        // API fail -> don't disturb main screen
         setState(() {
           _checkingActiveRide = false;
         });
@@ -503,12 +561,18 @@ class _HomeScreensState extends State<HomeScreens>
         initialDriverName: ride.driverName,
         initialDriverProfilePic: ride.driverProfilePic,
         initialCarDetails: initialCarDetails,
-        initialAmount: ride.amount,
+        baseFare: ride.baseFare,
+        serviceFare: ride.serviceFare,
+        distanceFare: ride.distanceFare,
+        pickupFare: ride.pickupFare,
+        bookingFee: ride.bookingFee,
+        timeFare: ride.timeFare,
+        initialAmount: ride.amount > 0 ? ride.amount : (ride.total ?? 0.0),
       ),
     );
 
     if (!mounted) return;
-      await _loadActiveRide();
+    await _loadActiveRide();
   }
 
   Widget _activeRideCard(double topPad) {
@@ -524,7 +588,7 @@ class _HomeScreensState extends State<HomeScreens>
 
           final subtitle =
               ride != null && ride.driverName.trim().isNotEmpty
-                  ? 'Driver ${ride.driverName} â€¢ ${ride.status.replaceAll('_', ' ')}'
+                  ? 'Driver ${ride.driverName} - ${ride.status.replaceAll('_', ' ')}'
                   : (ride?.status.replaceAll('_', ' ') ?? '');
 
           return IgnorePointer(
@@ -675,9 +739,13 @@ class _HomeScreensState extends State<HomeScreens>
           children: [
             Positioned.fill(
               child: Obx(() {
+                // Ensure map rebuilds when nearby-driver markers update.
+                mapC.markersRevision.value;
                 final pos = mapC.currentPosition;
                 if (pos == null) {
-                  return const Center(child:  CircularProgressIndicator(strokeWidth: 2));
+                  return const Center(
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  );
                 }
 
                 return SizedBox(
@@ -685,19 +753,21 @@ class _HomeScreensState extends State<HomeScreens>
                   child: GoogleMap(
                     initialCameraPosition: CameraPosition(
                       target: pos,
-                      zoom: 16.2,
+                      zoom: 17.2,
                     ),
                     // Keep padding zero so map projection matches overlay pin coordinates.
                     padding: EdgeInsets.zero,
                     markers: mapC.markers.toSet(),
+                    circles: mapC.circles.toSet(),
                     onMapCreated: (controller) async {
-                      debugPrint("âœ… Main Map created");
+                      debugPrint("Main Map created");
                       await mapC.attachMap(controller);
                       if (!mounted) return;
                       WidgetsBinding.instance.addPostFrameCallback((_) {
                         _captureMapScreenScaleIfNeeded();
                       });
                       _onSheetHeightChanged(_sheetHeightN.value);
+                      _tryAlignCurrentLocationUnderPinOnce();
                     },
                     onTap: (_) {},
                     onCameraMove: mapC.onCameraMove,
@@ -717,7 +787,10 @@ class _HomeScreensState extends State<HomeScreens>
                     myLocationButtonEnabled: false,
                     buildingsEnabled: false,
                     tiltGesturesEnabled: false,
-                    minMaxZoomPreference: const MinMaxZoomPreference(12.0, 18.0),
+                    minMaxZoomPreference: const MinMaxZoomPreference(
+                      12.0,
+                      18.0,
+                    ),
                     mapToolbarEnabled: false,
                     zoomControlsEnabled: false,
                     gestureRecognizers: {
@@ -855,11 +928,9 @@ class _HomeScreensState extends State<HomeScreens>
             ValueListenableBuilder<double>(
               valueListenable: _sheetHeightN,
               builder: (context, sheetH, _) {
-                final homePinAlignY =
-                    screenH <= 0
-                        ? -0.18
-                        : (-(sheetH / screenH)).clamp(-0.45, 0.0);
-                final hidePin = screenH > 0 ? ((sheetH / screenH) >= 0.62) : false;
+                const homePinAlignY = -0.18;
+                final hidePin =
+                    screenH > 0 ? ((sheetH / screenH) >= 0.62) : false;
 
                 return Positioned.fill(
                   child: IgnorePointer(
@@ -868,7 +939,7 @@ class _HomeScreensState extends State<HomeScreens>
                       duration: const Duration(milliseconds: 140),
                       opacity: hidePin ? 0 : 1,
                       child: Align(
-                        alignment: Alignment(0, homePinAlignY),
+                        alignment: const Alignment(0, homePinAlignY),
                         child: Column(
                           key: _pinKey,
                           mainAxisSize: MainAxisSize.min,
@@ -931,37 +1002,39 @@ class _HomeBottomSheet extends StatelessWidget {
         return false;
       },
       child: DraggableScrollableSheet(
-        initialChildSize: 0.42,
+        initialChildSize: 0.47,
         minChildSize: 0.30,
         maxChildSize: 0.86,
         snap: true,
+        snapSizes: const [0.30, 0.42, 0.86],
         builder: (context, scrollController) {
-          return Container(
-            decoration: const BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.only(
-                topLeft: Radius.circular(22),
-                topRight: Radius.circular(22),
-              ),
+          return Material(
+            color: Colors.white,
+            elevation: 14,
+            shadowColor: Colors.black26,
+            borderRadius: const BorderRadius.only(
+              topLeft: Radius.circular(22),
+              topRight: Radius.circular(22),
             ),
+            clipBehavior: Clip.antiAlias,
             child: SafeArea(
               top: false,
               child: ListView(
                 controller: scrollController,
                 physics: const BouncingScrollPhysics(),
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
                 children: [
                   Center(
                     child: Container(
-                    width: 38,
-                    height: 5,
-                    decoration: BoxDecoration(
-                      color: Colors.black.withOpacity(0.12),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
+                      width: 46,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.12),
+                        borderRadius: BorderRadius.circular(99),
+                      ),
                     ),
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 14),
 
                   Row(
                     children: [
@@ -1314,14 +1387,13 @@ class _HomeBottomSheet extends StatelessWidget {
                   //     trailing: Image.asset(AppImages.advertisement),
                   //   ),
                   // ),
-               
                 ],
               ),
             ),
-        );
-      },
-    ),
-  );
+          );
+        },
+      ),
+    );
   }
 }
 

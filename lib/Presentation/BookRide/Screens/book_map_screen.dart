@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -86,10 +87,7 @@ class _BookMapScreenState extends State<BookMapScreen> {
     if (pickupLocation == null || destinationLocation == null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         Get.back();
-        AppToasts.showErrorGlobal(
-          "Location data is missing",
-          title: "Error",
-        );
+        AppToasts.showErrorGlobal("Location data is missing", title: "Error");
       });
       return;
     }
@@ -112,7 +110,7 @@ class _BookMapScreenState extends State<BookMapScreen> {
         destination: resolvedDestination,
       );
 
-      // ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ Prefetch both once
+      // Prefetch both once
       await Future.wait([
         driverController.getDriverSearch(
           pickupLat: resolvedPickup.latitude,
@@ -410,6 +408,7 @@ class _BookMapScreenState extends State<BookMapScreen> {
                             isSendSelected: mapC.isRideOnly.value,
                             onSelectionChanged: (selected) async {
                               if (selected == mapC.isRideOnly.value) return;
+                              if (driverController.isGetLoading.value) return;
                               mapC.isRideOnly.value = selected;
 
                               AppLogger.log.i(
@@ -424,7 +423,30 @@ class _BookMapScreenState extends State<BookMapScreen> {
                                 );
                                 return;
                               }
-                              // no API call: already prefetched
+
+                              final pickup = mapC.pickupPosition!;
+                              final drop = mapC.destinationPosition!;
+
+                              // Refresh drivers list for selected ride type.
+                              if (mapC.isRideOnly.value) {
+                                driverController.rideType.value =
+                                    RideType.rideOnly;
+                                await driverController.getDriverSearch(
+                                  pickupLat: pickup.latitude,
+                                  pickupLng: pickup.longitude,
+                                  dropLat: drop.latitude,
+                                  dropLng: drop.longitude,
+                                );
+                              } else {
+                                driverController.rideType.value =
+                                    RideType.shared;
+                                await driverController.getSharedDriverSearch(
+                                  pickupLat: pickup.latitude,
+                                  pickupLng: pickup.longitude,
+                                  dropLat: drop.latitude,
+                                  dropLng: drop.longitude,
+                                );
+                              }
                             },
                           );
                         }),
@@ -433,7 +455,9 @@ class _BookMapScreenState extends State<BookMapScreen> {
 
                         Obx(() {
                           if (driverController.isGetLoading.value) {
-                            return AppLoader.circularLoader();
+                            return const Center(
+                              child: CupertinoActivityIndicator(radius: 14),
+                            );
                           }
 
                           final bool rideOnly = mapC.isRideOnly.value;
@@ -442,12 +466,27 @@ class _BookMapScreenState extends State<BookMapScreen> {
                           final sharedDrivers =
                               driverController.sharedServiceType;
 
+                          final fetched =
+                              rideOnly
+                                  ? driverController.hasFetchedRideOnly.value
+                                  : driverController.hasFetchedShared.value;
+
                           final hasDrivers =
                               rideOnly
                                   ? normalDrivers.isNotEmpty
                                   : sharedDrivers.isNotEmpty;
 
                           if (!hasDrivers) {
+                            if (!fetched) {
+                              // Avoid flashing "No drivers" before the first API response.
+                              if (mapC.pickupPosition == null ||
+                                  mapC.destinationPosition == null) {
+                                return const SizedBox.shrink();
+                              }
+                              return const Center(
+                                child: CupertinoActivityIndicator(radius: 14),
+                              );
+                            }
                             return const Center(
                               child: Text(
                                 'No drivers in your location',
@@ -686,14 +725,14 @@ class _BookMapScreenState extends State<BookMapScreen> {
                                 ? AppColors.containerColor
                                 : AppColors.commonBlack,
                         textColor: Colors.white,
-                         onTap: () async {
-                           if (driverController.selectedCarType.value.isEmpty) {
-                             AppToasts.showInfoGlobal(
-                               'Please select a car before proceeding.',
-                               title: 'Info',
-                             );
-                             return;
-                           }
+                        onTap: () async {
+                          if (driverController.selectedCarType.value.isEmpty) {
+                            AppToasts.showInfoGlobal(
+                              'Please select a car before proceeding.',
+                              title: 'Info',
+                            );
+                            return;
+                          }
 
                           final selectedCarType =
                               driverController.selectedCarType.value;

@@ -667,7 +667,7 @@ class _ChatScreenState extends State<ChatScreen> {
             padding: const EdgeInsets.symmetric(horizontal: 15),
             child: Row(
               children: [
-                _quickChip("I’m waiting downstairs"),
+                _quickChip("I'm waiting downstairs"),
                 const SizedBox(width: 10),
                 _quickChip("Please call when you arrive"),
                 const SizedBox(width: 10),

@@ -13,9 +13,10 @@ class ActiveBookingResponse {
     return ActiveBookingResponse(
       success: json['success'] == true,
       hasActiveBooking: json['hasActiveBooking'] == true,
-      data: json['data'] is Map<String, dynamic>
-          ? ActiveBookingData.fromJson(json['data'])
-          : null,
+      data:
+          json['data'] is Map<String, dynamic>
+              ? ActiveBookingData.fromJson(json['data'])
+              : null,
     );
   }
 }
@@ -32,6 +33,17 @@ class ActiveBookingData {
   final String rideType;
   final bool sharedBooking;
   final String driverServiceMode;
+
+  /// Fare breakdown values can arrive as strings ("566.39") or numbers.
+  final double? baseFare;
+  final double? serviceFare;
+  final double? distanceFare;
+  final double? timeFare;
+  final double? pickupFare;
+  final double? bookingFee;
+  final double? subtotal;
+  final double? total;
+
   final double amount;
   final String pickupAddress;
   final String dropAddress;
@@ -61,6 +73,14 @@ class ActiveBookingData {
     required this.rideType,
     required this.sharedBooking,
     required this.driverServiceMode,
+    this.baseFare,
+    this.serviceFare,
+    this.distanceFare,
+    this.timeFare,
+    this.pickupFare,
+    this.bookingFee,
+    this.subtotal,
+    this.total,
     required this.amount,
     required this.pickupAddress,
     required this.dropAddress,
@@ -79,7 +99,30 @@ class ActiveBookingData {
     this.vehicle,
   });
 
+  static double? _parseNum(dynamic v) {
+    if (v == null) return null;
+    if (v is num) return v.toDouble();
+    final s = v.toString().trim();
+    if (s.isEmpty) return null;
+    return double.tryParse(s);
+  }
+
+  static double? _pickNum(Map<String, dynamic> json, List<String> keys) {
+    for (final k in keys) {
+      final val = _parseNum(json[k]);
+      if (val != null) return val;
+    }
+    return null;
+  }
+
   factory ActiveBookingData.fromJson(Map<String, dynamic> json) {
+    final Map<String, dynamic> breakdown =
+        (json['fareBreakdown'] is List &&
+                (json['fareBreakdown'] as List).isNotEmpty &&
+                (json['fareBreakdown'] as List).first is Map<String, dynamic>)
+            ? ((json['fareBreakdown'] as List).first as Map<String, dynamic>)
+            : const <String, dynamic>{};
+
     return ActiveBookingData(
       bookingId: (json['bookingId'] ?? '').toString(),
       status: (json['status'] ?? '').toString(),
@@ -92,26 +135,57 @@ class ActiveBookingData {
       rideType: (json['rideType'] ?? '').toString(),
       sharedBooking: json['sharedBooking'] == true,
       driverServiceMode: (json['driverServiceMode'] ?? '').toString(),
-      amount: (json['amount'] is num)
-          ? (json['amount'] as num).toDouble()
-          : double.tryParse((json['amount'] ?? '').toString()) ?? 0.0,
+      baseFare:
+          _pickNum(json, const ['baseFare']) ??
+          _pickNum(breakdown, const ['baseFare']),
+      serviceFare:
+          _pickNum(json, const ['serviceFare']) ??
+          _pickNum(breakdown, const ['perKilometerRate']),
+      distanceFare:
+          _pickNum(json, const ['distanceFareAmount', 'distanceFare']) ??
+          _pickNum(breakdown, const ['distanceFare', 'distanceFareAmount']),
+      timeFare:
+          _pickNum(json, const ['timeFareAmount', 'timeFare']) ??
+          _pickNum(breakdown, const ['timeFareAmount', 'timeFare']),
+      pickupFare:
+          _pickNum(json, const ['pickupFareAmount', 'pickupFare']) ??
+          _pickNum(breakdown, const ['pickupFareAmount', 'pickupFare']),
+      bookingFee:
+          _pickNum(json, const ['bookingFeeAmount', 'bookingFee']) ??
+          _pickNum(breakdown, const ['bookingFeeAmount', 'bookingFee']),
+      subtotal:
+          _pickNum(json, const ['subtotal']) ??
+          _pickNum(breakdown, const ['subtotal']),
+      total:
+          _pickNum(json, const ['total']) ??
+          _pickNum(breakdown, const ['estimatedPrice']),
+      amount:
+          (json['amount'] is num)
+              ? (json['amount'] as num).toDouble()
+              : double.tryParse((json['amount'] ?? '').toString()) ?? 0.0,
       pickupAddress: (json['pickupAddress'] ?? '').toString(),
       dropAddress: (json['dropAddress'] ?? '').toString(),
-      fromLatitude: (json['fromLatitude'] is num)
-          ? (json['fromLatitude'] as num).toDouble()
-          : double.tryParse((json['fromLatitude'] ?? '').toString()) ?? 0.0,
-      fromLongitude: (json['fromLongitude'] is num)
-          ? (json['fromLongitude'] as num).toDouble()
-          : double.tryParse((json['fromLongitude'] ?? '').toString()) ?? 0.0,
-      toLatitude: (json['toLatitude'] is num)
-          ? (json['toLatitude'] as num).toDouble()
-          : double.tryParse((json['toLatitude'] ?? '').toString()) ?? 0.0,
-      toLongitude: (json['toLongitude'] is num)
-          ? (json['toLongitude'] as num).toDouble()
-          : double.tryParse((json['toLongitude'] ?? '').toString()) ?? 0.0,
-      driverLocation: json['driverLocation'] is Map<String, dynamic>
-          ? ActiveBookingDriverLocation.fromJson(json['driverLocation'])
-          : null,
+      fromLatitude:
+          (json['fromLatitude'] is num)
+              ? (json['fromLatitude'] as num).toDouble()
+              : double.tryParse((json['fromLatitude'] ?? '').toString()) ?? 0.0,
+      fromLongitude:
+          (json['fromLongitude'] is num)
+              ? (json['fromLongitude'] as num).toDouble()
+              : double.tryParse((json['fromLongitude'] ?? '').toString()) ??
+                  0.0,
+      toLatitude:
+          (json['toLatitude'] is num)
+              ? (json['toLatitude'] as num).toDouble()
+              : double.tryParse((json['toLatitude'] ?? '').toString()) ?? 0.0,
+      toLongitude:
+          (json['toLongitude'] is num)
+              ? (json['toLongitude'] as num).toDouble()
+              : double.tryParse((json['toLongitude'] ?? '').toString()) ?? 0.0,
+      driverLocation:
+          json['driverLocation'] is Map<String, dynamic>
+              ? ActiveBookingDriverLocation.fromJson(json['driverLocation'])
+              : null,
       otpCode: json['otpCode'],
       otpVerified: json['otpVerified'] == true,
       customerImageVerified: json['customerImageVerified'] == true,
@@ -119,9 +193,10 @@ class ActiveBookingData {
       destinationReached: json['destinationReached'] == true,
       rideStarted: json['rideStarted'] == true,
       cancelled: json['cancelled'] == true,
-      vehicle: json['vehicle'] is Map<String, dynamic>
-          ? ActiveBookingVehicle.fromJson(json['vehicle'])
-          : null,
+      vehicle:
+          json['vehicle'] is Map<String, dynamic>
+              ? ActiveBookingVehicle.fromJson(json['vehicle'])
+              : null,
     );
   }
 }
@@ -137,12 +212,14 @@ class ActiveBookingDriverLocation {
 
   factory ActiveBookingDriverLocation.fromJson(Map<String, dynamic> json) {
     return ActiveBookingDriverLocation(
-      latitude: (json['latitude'] is num)
-          ? (json['latitude'] as num).toDouble()
-          : double.tryParse((json['latitude'] ?? '').toString()) ?? 0.0,
-      longitude: (json['longitude'] is num)
-          ? (json['longitude'] as num).toDouble()
-          : double.tryParse((json['longitude'] ?? '').toString()) ?? 0.0,
+      latitude:
+          (json['latitude'] is num)
+              ? (json['latitude'] as num).toDouble()
+              : double.tryParse((json['latitude'] ?? '').toString()) ?? 0.0,
+      longitude:
+          (json['longitude'] is num)
+              ? (json['longitude'] as num).toDouble()
+              : double.tryParse((json['longitude'] ?? '').toString()) ?? 0.0,
     );
   }
 }
@@ -174,9 +251,10 @@ class ActiveBookingVehicle {
       color: (json['color'] ?? '').toString(),
       type: (json['type'] ?? '').toString(),
       carType: (json['carType'] ?? '').toString(),
-      carExteriorPhotos: (json['carExteriorPhotos'] as List<dynamic>? ?? const [])
-          .map((item) => item.toString())
-          .toList(),
+      carExteriorPhotos:
+          (json['carExteriorPhotos'] as List<dynamic>? ?? const [])
+              .map((item) => item.toString())
+              .toList(),
     );
   }
 }

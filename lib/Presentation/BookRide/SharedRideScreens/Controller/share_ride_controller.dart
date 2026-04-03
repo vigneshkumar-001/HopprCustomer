@@ -2,14 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:hopper/Core/Consents/app_logger.dart';
 import 'package:hopper/Core/Utility/app_toasts.dart';
-import 'package:hopper/Presentation/BookRide/Models/create_booking_model.dart';
-import 'package:hopper/Presentation/BookRide/Models/driver_search_models.dart';
 import 'package:hopper/Presentation/BookRide/Models/send_driver_request_models.dart';
 import 'package:hopper/Presentation/BookRide/Models/shared_create_booking_response.dart';
 import 'package:hopper/Presentation/BookRide/Models/shared_driver_search_response.dart';
- 
- 
-import 'package:hopper/Presentation/OnBoarding/Widgets/custom_bottomnavigation.dart';
+
 import 'package:hopper/api/dataSource/shared_api_datasource.dart';
 import 'package:hopper/api/repository/api_consents.dart';
 import 'package:hopper/uitls/websocket/shared_web_socket.dart';
@@ -32,7 +28,7 @@ class ShareRideController extends GetxController {
     required double toLatitude,
     required double toLongitude,
     required String carType,
-    required List<int> seats, 
+    required List<int> seats,
     required BuildContext context,
   }) async {
     isLoading.value = true;
@@ -50,7 +46,7 @@ class ShareRideController extends GetxController {
       return results.fold(
         (failure) {
           isLoading.value = false;
-          AppToasts.showError(context,failure.message);
+          AppToasts.showError(context, failure.message);
           return failure.message;
         },
         (response) {
@@ -65,15 +61,12 @@ class ShareRideController extends GetxController {
             return "Invalid booking data";
           }
 
-
           // Socket is expected to be connected from Home; fallback connect if needed.
           if (!rideShareSocket.connected) {
             rideShareSocket.initSocket(ApiConsents.sharedBaseUrl);
           }
 
-
           rideShareSocket.registerUser(customerId, bookingId: bookingId);
-
 
           rideShareSocket.setBooking(bookingId);
 
@@ -105,6 +98,26 @@ class ShareRideController extends GetxController {
     isLoading.value = true;
 
     try {
+      final safeBookingId = bookingId.trim();
+      final hasValidCoords =
+          pickupLatitude != 0.0 &&
+          pickupLongitude != 0.0 &&
+          dropLatitude != 0.0 &&
+          dropLongitude != 0.0;
+
+      if (safeBookingId.isEmpty || !hasValidCoords) {
+        isLoading.value = false;
+        AppToasts.showError(
+          context,
+          'Invalid booking details. Please try again.',
+        );
+        AppLogger.log.e(
+          'sendSharedDriverRequest blocked: bookingId="$safeBookingId", '
+          'pickup=($pickupLatitude,$pickupLongitude), drop=($dropLatitude,$dropLongitude)',
+        );
+        return null;
+      }
+
       final results = await sharedApiDatasource.sendSharedDriverRequest(
         carType: carType,
 
@@ -112,20 +125,21 @@ class ShareRideController extends GetxController {
         pickupLongitude: pickupLongitude,
         dropLatitude: dropLatitude,
         dropLongitude: dropLongitude,
-        bookingId: bookingId,
+        bookingId: safeBookingId,
       );
 
       return results.fold(
         (failure) {
           isLoading.value = false;
-          return failure.message;
+          AppToasts.showError(context, failure.message);
+          return null;
         },
         (response) {
           isLoading.value = false;
           sendDriverRequestData.value = response.data;
           AppLogger.log.i(response.data);
 
-          return '';
+          return 'success';
         },
       );
     } catch (e) {

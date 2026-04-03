@@ -53,8 +53,10 @@ class SharedMapState extends State<SharedMap>
   bool _cameraInitialized = false;
   String? _mapStyle;
   DateTime _lastFitAt = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastPulseRebuildAt = DateTime.fromMillisecondsSinceEpoch(0);
   static const double _tinyBoundsThresholdMeters = 260.0;
   static const double _tinyBoundsCapZoom = 16.4;
+  static const Duration _pulseRebuildMinInterval = Duration(milliseconds: 140);
 
   double _haversineMeters(LatLng a, LatLng b) {
     const r = 6371000.0; // meters
@@ -65,7 +67,10 @@ class SharedMapState extends State<SharedMap>
 
     final h =
         math.sin(dLat / 2) * math.sin(dLat / 2) +
-        math.cos(lat1) * math.cos(lat2) * math.sin(dLng / 2) * math.sin(dLng / 2);
+        math.cos(lat1) *
+            math.cos(lat2) *
+            math.sin(dLng / 2) *
+            math.sin(dLng / 2);
     return 2 * r * math.asin(math.min(1.0, math.sqrt(h)));
   }
 
@@ -90,6 +95,13 @@ class SharedMapState extends State<SharedMap>
     _pulseController =
         AnimationController(vsync: this, duration: const Duration(seconds: 2))
           ..addListener(() {
+            if (widget.pickupPosition == null) return;
+            final now = DateTime.now();
+            if (now.difference(_lastPulseRebuildAt) <
+                _pulseRebuildMinInterval) {
+              return;
+            }
+            _lastPulseRebuildAt = now;
             if (mounted) setState(() {});
           })
           ..repeat();
@@ -98,7 +110,7 @@ class SharedMapState extends State<SharedMap>
   Future<void> _loadMapStyle() async {
     try {
       final style = await rootBundle.loadString(
-        'assets/map_style/map_style1.json',
+        'assets/map_style/map_style_uber_like.json',
       );
       _mapStyle = style;
       if (_mapController != null) {
@@ -260,14 +272,20 @@ class SharedMapState extends State<SharedMap>
       } else {
         _mapController!.moveCamera(
           CameraUpdate.newCameraPosition(
-            CameraPosition(target: widget.initialPosition, zoom: widget.initialZoom),
+            CameraPosition(
+              target: widget.initialPosition,
+              zoom: widget.initialZoom,
+            ),
           ),
         );
       }
     }
   }
 
-  Future<void> fitPolylineBounds(List<LatLng> pts, {double padding = 80}) async {
+  Future<void> fitPolylineBounds(
+    List<LatLng> pts, {
+    double padding = 80,
+  }) async {
     if (_mapController == null) return;
     if (pts.length < 2) return;
 
@@ -290,7 +308,6 @@ class SharedMapState extends State<SharedMap>
 
     await _safeMoveToBounds(bounds, padding: padding);
   }
-
 
   LatLngBounds _boundsFromMarkers(Set<Marker> markers) {
     final list = markers.toList();
@@ -345,7 +362,10 @@ class SharedMapState extends State<SharedMap>
     if (_mapController == null || widget.pickupPosition == null) return;
     await _mapController!.animateCamera(
       CameraUpdate.newCameraPosition(
-        CameraPosition(target: widget.pickupPosition!, zoom: _safeZoomForTinyBounds()),
+        CameraPosition(
+          target: widget.pickupPosition!,
+          zoom: _safeZoomForTinyBounds(),
+        ),
       ),
     );
   }

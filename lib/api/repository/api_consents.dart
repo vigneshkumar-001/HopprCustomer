@@ -38,6 +38,7 @@ class ApiConsents {
   static final String signIn = '$baseUrl/api/customer/sign-in';
   static final String verifyOtp = '$baseUrl/api/customer/verify-otp';
   static final String resendOtp = '$baseUrl/api/customer/resend-otp';
+  static final String logout = '$baseUrl/api/customer/logout';
   static final String notification = '$baseUrl/api/customer/notifications';
   static final String appSettings = '$baseUrl/api/settings/app-settings';
   static final String discountApply = '$baseUrl/api/customer/discount-apply';

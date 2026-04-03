@@ -36,6 +36,9 @@ class DriverSearchController extends GetxController {
   RxBool isRetryLoading = false.obs;
   RxBool isCancelLoading = false.obs;
   RxBool isGetLoading = false.obs;
+  // Used by UI to avoid showing "No drivers" before the first response arrives.
+  RxBool hasFetchedRideOnly = false.obs;
+  RxBool hasFetchedShared = false.obs;
   RxString selectedCarType = ''.obs;
   Rxn<SharedDriverData> selectedSharedDriver = Rxn<SharedDriverData>();
 
@@ -64,10 +67,12 @@ class DriverSearchController extends GetxController {
       return results.fold(
         (failure) {
           isGetLoading.value = false;
+          hasFetchedRideOnly.value = true;
           return null;
         },
         (response) {
           isGetLoading.value = false;
+          hasFetchedRideOnly.value = true;
           serviceType.value = response.data;
           markerAdded.value = false;
           update();
@@ -78,6 +83,7 @@ class DriverSearchController extends GetxController {
       );
     } catch (e) {
       isGetLoading.value = false;
+      hasFetchedRideOnly.value = true;
       return null;
     }
   }
@@ -106,10 +112,12 @@ class DriverSearchController extends GetxController {
       return results.fold(
         (failure) {
           isGetLoading.value = false;
+          hasFetchedShared.value = true;
           return null;
         },
         (response) {
           isGetLoading.value = false;
+          hasFetchedShared.value = true;
           // set shared drivers list safely
           sharedServiceType.value = response.data ?? [];
           markerAdded.value = false;
@@ -121,6 +129,7 @@ class DriverSearchController extends GetxController {
       );
     } catch (e) {
       isGetLoading.value = false;
+      hasFetchedShared.value = true;
       return null;
     }
   }
@@ -149,7 +158,7 @@ class DriverSearchController extends GetxController {
       return results.fold(
         (failure) {
           isLoading.value = false;
-          AppToasts.showError(context,failure.message);
+          AppToasts.showError(context, failure.message);
           return failure.message;
         },
         (response) {
@@ -161,16 +170,15 @@ class DriverSearchController extends GetxController {
             'userId': response.data.customerId,
           };
 
-           // Log the data
-           AppLogger.log.i("📤 Join booking data: $bookingData");
-           socketService.joinBookingRoom(
-             bookingId: response.data.bookingId.toString(),
-             payload: bookingData,
-           );
+          // Log the data
+          AppLogger.log.i("📤 Join booking data: $bookingData");
+          socketService.joinBookingRoom(
+            bookingId: response.data.bookingId.toString(),
+            payload: bookingData,
+          );
 
-
-           AppLogger.log.i(response.data);
-           return null;
+          AppLogger.log.i(response.data);
+          return null;
         },
       );
     } catch (e) {
@@ -205,7 +213,7 @@ class DriverSearchController extends GetxController {
       return results.fold(
         (failure) {
           isLoading.value = false;
-          AppToasts.showError(context,failure.message);
+          AppToasts.showError(context, failure.message);
           return failure.message;
         },
         (response) {
@@ -217,15 +225,17 @@ class DriverSearchController extends GetxController {
             'userId': response.data?.customerId,
           };
 
-           AppLogger.log.i("📤 Join booking data: $bookingData");
-           final bookingId = (response.data?.bookingId ?? '').toString().trim();
-           if (bookingId.isNotEmpty) {
-             socketService.joinBookingRoom(bookingId: bookingId, payload: bookingData);
-           }
+          AppLogger.log.i("📤 Join booking data: $bookingData");
+          final bookingId = (response.data?.bookingId ?? '').toString().trim();
+          if (bookingId.isNotEmpty) {
+            socketService.joinBookingRoom(
+              bookingId: bookingId,
+              payload: bookingData,
+            );
+          }
 
-
-           AppLogger.log.i(response.data);
-           return null;
+          AppLogger.log.i(response.data);
+          return null;
         },
       );
     } catch (e) {
@@ -247,19 +257,50 @@ class DriverSearchController extends GetxController {
     isRetryLoading.value = true;
 
     try {
-      final results = await apiDataSource.sendDriverRequest(
-        carType: carType,
-        pickupLatitude: pickupLatitude,
-        pickupLongitude: pickupLongitude,
-        dropLatitude: dropLatitude,
-        dropLongitude: dropLongitude,
-        bookingId: bookingId,
-      );
+      final safeBookingId = bookingId.trim();
+      final hasValidCoords =
+          pickupLatitude != 0.0 &&
+          pickupLongitude != 0.0 &&
+          dropLatitude != 0.0 &&
+          dropLongitude != 0.0;
+
+      if (safeBookingId.isEmpty || !hasValidCoords) {
+        isRetryLoading.value = false;
+        AppToasts.showError(
+          context,
+          'Invalid booking details. Please try again.',
+        );
+        AppLogger.log.e(
+          'sendDriverRequest blocked: bookingId="$safeBookingId", '
+          'pickup=($pickupLatitude,$pickupLongitude), drop=($dropLatitude,$dropLongitude), '
+          'rideType=${rideType.value}',
+        );
+        return null;
+      }
+
+      final results =
+          rideType.value == RideType.shared
+              ? await sharedApiDatasource.sendSharedDriverRequest(
+                carType: carType,
+                pickupLatitude: pickupLatitude,
+                pickupLongitude: pickupLongitude,
+                dropLatitude: dropLatitude,
+                dropLongitude: dropLongitude,
+                bookingId: safeBookingId,
+              )
+              : await apiDataSource.sendDriverRequest(
+                carType: carType,
+                pickupLatitude: pickupLatitude,
+                pickupLongitude: pickupLongitude,
+                dropLatitude: dropLatitude,
+                dropLongitude: dropLongitude,
+                bookingId: safeBookingId,
+              );
 
       return results.fold(
         (failure) {
           isRetryLoading.value = false;
-          AppToasts.showError(context,failure.message);
+          AppToasts.showError(context, failure.message);
           return null;
         },
         (response) {
@@ -271,7 +312,7 @@ class DriverSearchController extends GetxController {
         },
       );
     } catch (e) {
-          isRetryLoading.value = false;
+      isRetryLoading.value = false;
       return 'An error occurred';
     }
   }
@@ -293,7 +334,11 @@ class DriverSearchController extends GetxController {
         (failure) {
           isCancelLoading.value = false;
           AppLogger.log.e(failure.message);
-          AppToasts.showError(context,failure.message, title: 'Cancellation Failed');
+          AppToasts.showError(
+            context,
+            failure.message,
+            title: 'Cancellation Failed',
+          );
           return failure.message;
         },
         (response) {
@@ -301,15 +346,12 @@ class DriverSearchController extends GetxController {
           sendDriverRequestData.value = response.data;
           AppLogger.log.i(response.data);
           final msg = response.message.trim();
-          AppToasts.showSuccessGlobal(
-            msg.isEmpty ? 'Booking cancelled' : msg,
-          );
+          AppToasts.showSuccessGlobal(msg.isEmpty ? 'Booking cancelled' : msg);
           return '';
         },
       );
-
     } catch (e) {
-          isCancelLoading.value = false;
+      isCancelLoading.value = false;
       return 'An error occurred';
     }
   }
@@ -331,7 +373,7 @@ class DriverSearchController extends GetxController {
         (failure) {
           isLoading.value = false;
           AppLogger.log.e(failure.message);
-          AppToasts.showError(context,failure.message);
+          AppToasts.showError(context, failure.message);
           // Navigator.pushReplacement(
           //   context,
           //   MaterialPageRoute(
@@ -403,8 +445,3 @@ class DriverSearchController extends GetxController {
 
   void clearState() {}
 }
-
-
-
-
-

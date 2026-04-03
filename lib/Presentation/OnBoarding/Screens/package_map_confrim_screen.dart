@@ -12,6 +12,7 @@ import 'package:hopper/Presentation/OnBoarding/Widgets/custom_bottomnavigation.d
 import 'package:hopper/Presentation/OnBoarding/Widgets/package_contoiner.dart';
 import 'package:hopper/Presentation/OnBoarding/models/address_models.dart';
 import 'package:hopper/uitls/netWorkHandling/network_handling_screen.dart';
+import 'package:hopper/uitls/map/map_ui_defaults.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hopper/Presentation/OnBoarding/Screens/payment_screen.dart';
@@ -23,6 +24,7 @@ import 'package:hopper/Core/Utility/app_buttons.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:hopper/uitls/websocket/socket_io_client.dart';
+import 'package:hopper/uitls/map/compact_marker_icons.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:hopper/Core/Consents/app_logger.dart';
 import 'package:geolocator/geolocator.dart';
@@ -56,6 +58,9 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   LatLng? _currentPosition;
   Set<Polyline> _polylines = {};
   BitmapDescriptor? _carIcon;
+  BitmapDescriptor? _pickupPinIcon;
+  BitmapDescriptor? _dropPinIcon;
+  BitmapDescriptor? _pickupWaitingLabelIcon;
   Set<Marker> _markers = {};
   Set<Circle> _circles = {};
   bool _isDriverConfirmed = false;
@@ -63,6 +68,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   bool driverStartedRide = false;
   bool destinationReached = false;
   bool _autoFollowEnabled = true;
+  bool _locationToggleFit = false;
   bool _isDrawingPolyline = false;
   LatLng? _customerLatLng;
   LatLng? _customerToLatLang;
@@ -200,8 +206,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     _paymentNavTimer = null;
 
     _navigatedToPayment = true;
-    final id = (BookingId.trim().isNotEmpty ? BookingId : widget.bookingId)
-        .trim();
+    final id =
+        (BookingId.trim().isNotEmpty ? BookingId : widget.bookingId).trim();
 
     final screen = PaymentScreen(
       bookingId: id,
@@ -271,8 +277,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
     try {
       final icon = await BitmapDescriptor.asset(
-        height: 60,
-        ImageConfiguration(size: Size(52, 52)),
+        height: 46,
+        ImageConfiguration(size: Size(40, 40)),
         asset,
       );
       if (!mounted) return;
@@ -280,6 +286,37 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       final pos = _currentDriverLatLng;
       if (pos != null) _updateDriverMarker(pos, _lastBearing);
     } catch (_) {}
+  }
+
+  Future<void> _loadPickupDropIcons() async {
+    try {
+      _pickupPinIcon = await CompactMarkerIcons.assetPin(
+        assetPath: AppImages.pinLocation,
+        widthDp: 26,
+      );
+    } catch (_) {
+      _pickupPinIcon = null;
+    }
+    try {
+      _dropPinIcon = await CompactMarkerIcons.assetPin(
+        assetPath: AppImages.rectangleDest,
+        widthDp: 22,
+      );
+    } catch (_) {
+      _dropPinIcon = null;
+    }
+    try {
+      _pickupWaitingLabelIcon = await CompactMarkerIcons.labeledPin(
+        label: 'Your pickup spot',
+        assetPath: AppImages.pinLocation,
+        bubbleWidthDp: 126,
+        bubbleHeightDp: 38,
+        pinWidthDp: 26,
+        fontSizeDp: 11.5,
+      );
+    } catch (_) {
+      _pickupWaitingLabelIcon = _pickupPinIcon;
+    }
   }
 
   Widget _buildPickupDeliveryStatusCard() {
@@ -342,9 +379,13 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         Marker(
           markerId: const MarkerId("pickup_marker"),
           position: pickup,
-          icon: BitmapDescriptor.defaultMarkerWithHue(
-            BitmapDescriptor.hueGreen,
-          ),
+          icon:
+              (isWaitingForDriver && !_isDriverConfirmed
+                  ? _pickupWaitingLabelIcon
+                  : _pickupPinIcon) ??
+              BitmapDescriptor.defaultMarkerWithHue(
+                MapUiDefaults.pickupDropMarkerHueGreen,
+              ),
           infoWindow: const InfoWindow(title: "Pickup"),
         ),
       );
@@ -355,7 +396,11 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         Marker(
           markerId: const MarkerId("drop_marker"),
           position: drop,
-          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+          icon:
+              _dropPinIcon ??
+              BitmapDescriptor.defaultMarkerWithHue(
+                MapUiDefaults.pickupDropMarkerHueRed,
+              ),
           infoWindow: const InfoWindow(title: "Drop"),
         ),
       );
@@ -399,9 +444,13 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         Marker(
           markerId: const MarkerId("pickup_marker"),
           position: pickup,
-          icon: BitmapDescriptor.defaultMarkerWithHue(
-            BitmapDescriptor.hueGreen,
-          ),
+          icon:
+              (isWaitingForDriver && !_isDriverConfirmed
+                  ? _pickupWaitingLabelIcon
+                  : _pickupPinIcon) ??
+              BitmapDescriptor.defaultMarkerWithHue(
+                MapUiDefaults.pickupDropMarkerHueGreen,
+              ),
           infoWindow: const InfoWindow(title: "Pickup"),
         ),
       );
@@ -412,7 +461,11 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         Marker(
           markerId: const MarkerId("drop_marker"),
           position: drop,
-          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed),
+          icon:
+              _dropPinIcon ??
+              BitmapDescriptor.defaultMarkerWithHue(
+                MapUiDefaults.pickupDropMarkerHueRed,
+              ),
           infoWindow: const InfoWindow(title: "Drop"),
         ),
       );
@@ -585,7 +638,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     }
   }
 
-  void _goToCurrentLocation() async {
+  Future<void> _goToCurrentLocation() async {
     try {
       final position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
@@ -598,6 +651,49 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
           CameraPosition(
             target: latLng,
             zoom: _currentZoomLevel,
+            bearing: 0,
+            tilt: 0,
+          ),
+        ),
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _fitPickupDropBounds() async {
+    if (_mapController == null) return;
+    if (_customerLatLng == null || _customerToLatLang == null) return;
+    try {
+      final bounds = MapUiDefaults.boundsFrom2(
+        _customerLatLng!,
+        _customerToLatLang!,
+      );
+      await _mapController!.animateCamera(
+        CameraUpdate.newLatLngBounds(bounds, 120),
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _onLocationFabTap() async {
+    if (_mapController == null) return;
+    if (_locationToggleFit) {
+      _locationToggleFit = false;
+      await _fitPickupDropBounds();
+      return;
+    }
+
+    _locationToggleFit = true;
+    final target = _currentDriverLatLng;
+    if (target == null) {
+      await _goToCurrentLocation();
+      return;
+    }
+    try {
+      _pauseAutoFollowUntil = DateTime.fromMillisecondsSinceEpoch(0);
+      await _mapController!.animateCamera(
+        CameraUpdate.newCameraPosition(
+          CameraPosition(
+            target: target,
+            zoom: math.max(_currentZoomLevel, MapUiDefaults.focusZoom),
             bearing: 0,
             tilt: 0,
           ),
@@ -641,6 +737,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       setState(() => _searchingElapsedSeconds += 1);
     });
     _initLocation();
+    _loadPickupDropIcons();
     _loadCustomMarker();
     initSocket();
     _bootSocket();
@@ -1104,50 +1201,51 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       final data = json.decode(response.body);
       if (!mounted) return;
       if (data['status'] == 'OK') {
-      final legs = (data['routes']?[0]?['legs'] as List?) ?? const [];
-      final leg0 = legs.isNotEmpty ? (legs.first as Map?) : null;
-      final meters =
-          (leg0?['distance']?['value'] is num)
-              ? (leg0?['distance']?['value'] as num).toDouble()
-              : null;
-      final seconds =
-          (leg0?['duration']?['value'] is num)
-              ? (leg0?['duration']?['value'] as num).toInt()
-              : null;
+        final legs = (data['routes']?[0]?['legs'] as List?) ?? const [];
+        final leg0 = legs.isNotEmpty ? (legs.first as Map?) : null;
+        final meters =
+            (leg0?['distance']?['value'] is num)
+                ? (leg0?['distance']?['value'] as num).toDouble()
+                : null;
+        final seconds =
+            (leg0?['duration']?['value'] is num)
+                ? (leg0?['duration']?['value'] as num).toInt()
+                : null;
 
-      final stepPoints = _decodeStepsPolyline(legs);
-      final encoded =
-          (data['routes']?[0]?['overview_polyline']?['points'] ?? '').toString();
-      final points =
-          stepPoints.isNotEmpty ? stepPoints : _decodePolyline(encoded);
-      if (!mounted) return;
-      final socketFresh =
-          _routeMetricsFromSocket &&
-          DateTime.now().difference(_routeMetricsFromSocketAt) <
-              const Duration(seconds: 75);
-      setState(() {
-        if (!socketFresh) {
-          _routeMeters = meters;
-          _routeSeconds = seconds;
-          _routeMetricsFromSocket = false;
-        }
-        _polylines = {
-          Polyline(
-            polylineId: PolylineId(
-              driverStartedRide ? "driver_to_drop" : "driver_to_pickup",
+        final stepPoints = _decodeStepsPolyline(legs);
+        final encoded =
+            (data['routes']?[0]?['overview_polyline']?['points'] ?? '')
+                .toString();
+        final points =
+            stepPoints.isNotEmpty ? stepPoints : _decodePolyline(encoded);
+        if (!mounted) return;
+        final socketFresh =
+            _routeMetricsFromSocket &&
+            DateTime.now().difference(_routeMetricsFromSocketAt) <
+                const Duration(seconds: 75);
+        setState(() {
+          if (!socketFresh) {
+            _routeMeters = meters;
+            _routeSeconds = seconds;
+            _routeMetricsFromSocket = false;
+          }
+          _polylines = {
+            Polyline(
+              polylineId: PolylineId(
+                driverStartedRide ? "driver_to_drop" : "driver_to_pickup",
+              ),
+              points: points,
+              color: Colors.black,
+              width: MapUiDefaults.polylineWidth,
+              jointType: JointType.round,
+              startCap: Cap.roundCap,
+              endCap: Cap.roundCap,
             ),
-            points: points,
-            color: Colors.black,
-            width: 4,
-            jointType: JointType.round,
-            startCap: Cap.roundCap,
-            endCap: Cap.roundCap,
-          ),
-        };
-      });
-    } else {
-      AppLogger.log.e("Directions error: ${data['status']}");
-    }
+          };
+        });
+      } else {
+        AppLogger.log.e("Directions error: ${data['status']}");
+      }
     } catch (e) {
       AppLogger.log.e("Directions exception: $e");
     } finally {
@@ -1287,7 +1385,11 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
     if (dist > _hardJumpMeters) {
       _currentDriverLatLng = to;
-      _lastBearing = _smoothBearing(_lastBearing, _getBearing(from, to), alpha: 0.6);
+      _lastBearing = _smoothBearing(
+        _lastBearing,
+        _getBearing(from, to),
+        alpha: 0.6,
+      );
       _updateDriverMarker(to, _lastBearing);
       _maybeAutoFollow(to);
       _maybeUpdatePolyline(to, force: true);
@@ -1447,11 +1549,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                       heroTag: 'pkg_my_location_${widget.bookingId}',
                       mini: true,
                       backgroundColor: Colors.white,
-                      onPressed: _goToCurrentLocation,
-                      child: const Icon(
-                        Icons.my_location,
-                        color: Colors.black,
-                      ),
+                      onPressed: _onLocationFabTap,
+                      child: const Icon(Icons.my_location, color: Colors.black),
                     ),
                   ],
                 ),
@@ -1836,7 +1935,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                                                       (e) =>
                                                           e.trim().isNotEmpty,
                                                     )
-                                                    .join(' • '),
+                                                    .join(' - '),
                                                 colors: AppColors.commonBlack,
                                                 fontWeight: FontWeight.w600,
                                                 fontSize: 12,
@@ -2429,7 +2528,6 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
           padding: const EdgeInsets.symmetric(horizontal: 16),
           child: Column(
             children: [
-            
               Container(
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
@@ -2542,8 +2640,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                   ],
                 ),
               ),
-                Image.asset(heroAsset, height: 150, width: 150, fit: heroFit),
- 
+              Image.asset(heroAsset, height: 150, width: 150, fit: heroFit),
+
               Container(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 16,
@@ -2672,7 +2770,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
           ),
           const SizedBox(height: 8),
           const Text(
-            "We couldn’t find any available drivers nearby.\nPlease try again in a few minutes.",
+            "We couldn't find any available drivers nearby.\nPlease try again in a few minutes.",
             textAlign: TextAlign.center,
             style: TextStyle(fontSize: 16, color: Colors.grey),
           ),

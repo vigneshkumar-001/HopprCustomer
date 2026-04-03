@@ -58,7 +58,7 @@ class _LocateOnMapScreenState extends State<LocateOnMapScreen>
   bool _isDragging = false;
   bool _isFetchingAddress = false;
 
-  String _selectedAddress = "Fetching address…";
+  String _selectedAddress = "Fetching address...";
 
   // ====== UI ======
   final TextEditingController _searchController = TextEditingController();
@@ -114,7 +114,7 @@ class _LocateOnMapScreenState extends State<LocateOnMapScreen>
     if (!mounted) return;
     setState(() {
       _targetLocation = target;
-      _selectedAddress = "Fetching address…";
+      _selectedAddress = "Fetching address...";
       _searchController.text = _selectedAddress;
     });
     _getAddressFromLatLng(target);
@@ -182,7 +182,7 @@ class _LocateOnMapScreenState extends State<LocateOnMapScreen>
     if (!mounted) return;
     setState(() {
       _isFetchingAddress = true;
-      _selectedAddress = 'Fetching address…';
+      _selectedAddress = 'Fetching address...';
       _searchController.text = _selectedAddress;
     });
 
@@ -766,7 +766,7 @@ class _LocateOnMapScreenState extends State<LocateOnMapScreen>
                                 _isFetchingAddress ? null : _onConfirmLocation,
                             text:
                                 _isFetchingAddress
-                                    ? 'Fetching address…'
+                                    ? 'Fetching address...'
                                     : 'Confirm Location',
                           ),
                         ],

@@ -1,5 +1,5 @@
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
 
 class AppLoader {
@@ -13,11 +13,6 @@ class AppLoader {
   }
 
   static circularLoader() {
-    return Center(
-      child: CircularProgressIndicator(
-        color: AppColors.commonBlack,
-        strokeWidth: 2,
-      ),
-    );
+    return Center(child: CupertinoActivityIndicator(radius: 14));
   }
 }

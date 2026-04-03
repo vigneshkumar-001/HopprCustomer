@@ -82,9 +82,7 @@ class AppToasts {
         duration: const Duration(seconds: 3),
         behavior: SnackBarBehavior.floating,
         margin: const EdgeInsets.all(10),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       ),
     );
   }
@@ -108,18 +106,16 @@ class AppToasts {
           duration: const Duration(seconds: 3),
           behavior: SnackBarBehavior.floating,
           margin: const EdgeInsets.all(10),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8),
-          ),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
         ),
       );
   }
 
   static void showError(
-      BuildContext context,
-      String message, {
-        String title = "Error",
-      }) {
+    BuildContext context,
+    String message, {
+    String title = "Error",
+  }) {
     if (!context.mounted) return;
 
     final messenger = _messenger(context);
@@ -133,9 +129,7 @@ class AppToasts {
             const Icon(Icons.error, color: Colors.white),
             const SizedBox(width: 10),
             Expanded(
-              child: Text(
-                "$title: $message",
-              ),
+              child: Text(title.trim().isEmpty ? message : "$title: $message"),
             ),
           ],
         ),
@@ -143,9 +137,7 @@ class AppToasts {
         duration: const Duration(seconds: 3),
         behavior: SnackBarBehavior.floating,
         margin: const EdgeInsets.all(10),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       ),
     );
   }
@@ -164,7 +156,7 @@ class AppToasts {
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  "$title: $message",
+                  title.trim().isEmpty ? message : "$title: $message",
                 ),
               ),
             ],
@@ -173,9 +165,7 @@ class AppToasts {
           duration: const Duration(seconds: 3),
           behavior: SnackBarBehavior.floating,
           margin: const EdgeInsets.all(10),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8),
-          ),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
         ),
       );
   }
@@ -199,9 +189,7 @@ class AppToasts {
           duration: const Duration(seconds: 3),
           behavior: SnackBarBehavior.floating,
           margin: const EdgeInsets.all(10),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8),
-          ),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
         ),
       );
   }

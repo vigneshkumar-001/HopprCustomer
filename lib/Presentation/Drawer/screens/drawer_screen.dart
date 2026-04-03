@@ -1,3 +1,5 @@
+import 'dart:async' show unawaited;
+
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
@@ -12,7 +14,8 @@ import 'package:hopper/Presentation/Drawer/screens/settings_screen.dart';
 import 'package:hopper/Presentation/OnBoarding/Widgets/custom_bottomnavigation.dart';
 import 'package:hopper/Presentation/CustomerSupport/screens/customer_support_list_screen.dart';
 import 'package:hopper/Presentation/wallet/screens/wallet_screens.dart';
-import 'package:hopper/TutorialService_widgets.dart';
+import 'package:hopper/api/repository/api_consents.dart';
+import 'package:hopper/api/repository/request.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../Authentication/screens/mobile_screens.dart';
@@ -472,11 +475,19 @@ class _DrawerScreenState extends State<DrawerScreen> {
   Future<void> _logout(BuildContext context) async {
     final prefs = await SharedPreferences.getInstance();
 
-    await prefs.remove('token');
-    await prefs.remove('refreshToken');
-    await prefs.remove('sessionToken');
-    await prefs.remove('role');
-    await prefs.remove('contacts_synced');
+    final token = prefs.getString('token');
+    unawaited(
+      Request.sendLogoutFireAndForget(
+        url: ApiConsents.logout,
+        token: token,
+      ),
+    );
+
+    unawaited(prefs.remove('token'));
+    unawaited(prefs.remove('refreshToken'));
+    unawaited(prefs.remove('sessionToken'));
+    unawaited(prefs.remove('role'));
+    unawaited(prefs.remove('contacts_synced'));
 
     if (!context.mounted) return;
 

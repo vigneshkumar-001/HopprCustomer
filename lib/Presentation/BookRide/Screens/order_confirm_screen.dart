@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -88,6 +89,12 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
   Timer? _searchingElapsedTimer;
   int _searchingElapsedSeconds = 0;
 
+  double? _toDouble(dynamic v) {
+    if (v == null) return null;
+    if (v is num) return v.toDouble();
+    return double.tryParse(v.toString());
+  }
+
   @override
   void initState() {
     super.initState();
@@ -99,11 +106,28 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
 
     c = Get.put(OrderConfirmController(), tag: widget.bookingId);
 
+    final pickupLat =
+        _toDouble(widget.pickupData['lat']) ??
+        _toDouble(widget.pickupData['latitude']);
+    final pickupLng =
+        _toDouble(widget.pickupData['lng']) ??
+        _toDouble(widget.pickupData['longitude']);
+    final dropLat =
+        _toDouble(widget.destinationData['lat']) ??
+        _toDouble(widget.destinationData['latitude']);
+    final dropLng =
+        _toDouble(widget.destinationData['lng']) ??
+        _toDouble(widget.destinationData['longitude']);
+
     c.init(
       bookingId: widget.bookingId,
       pickupAddress: widget.pickupAddress,
       destinationAddress: widget.destinationAddress,
       carType: widget.carType,
+      pickupLat: pickupLat,
+      pickupLng: pickupLng,
+      dropLat: dropLat,
+      dropLng: dropLng,
       baseFare: widget.baseFare,
       serviceFare: widget.serviceFare,
       distanceFare: widget.distanceFare,
@@ -117,11 +141,11 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
       initialAmount: widget.initialAmount,
     );
 
-    // âœ… IMPORTANT: bind context after first frame (so timer & API always works)
+    // IMPORTANT: bind context after first frame (so timer & API always works)
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       c.bindContext(context);
-      c.startDriverSearchTimer(); // âœ… now timer will always update UI
+      c.startDriverSearchTimer(); // timer will always update UI
     });
 
     _searchingAnimController = AnimationController(
@@ -198,51 +222,66 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
               SizedBox(
                 height: 550,
                 width: double.infinity,
-                child: Obx(
-                  () => GoogleMap(
-                    compassEnabled: true,
-                    rotateGesturesEnabled: false,
-                    tiltGesturesEnabled: false,
+                child: RepaintBoundary(
+                  child: Obx(
+                    () => GoogleMap(
+                      compassEnabled: true,
+                      rotateGesturesEnabled: false,
+                      tiltGesturesEnabled: false,
 
-                    myLocationEnabled: false,
-                    buildingsEnabled: false,
-                    indoorViewEnabled: false,
-                    myLocationButtonEnabled: false,
-                    zoomControlsEnabled: false,
+                      myLocationEnabled: false,
+                      buildingsEnabled: false,
+                      indoorViewEnabled: false,
+                      myLocationButtonEnabled: false,
+                      zoomControlsEnabled: false,
 
-                    onCameraMove: c.onCameraMove,
-                    onCameraMoveStarted: () => c.onUserMapGesture(),
-                    onTap: (_) => c.onUserMapGesture(),
+                      onCameraMove: c.onCameraMove,
+                      onCameraMoveStarted: () => c.onUserMapGesture(),
+                      onTap: (_) => c.onUserMapGesture(),
 
-                    initialCameraPosition: CameraPosition(
-                      target:
-                          c.currentPosition ??
-                          const LatLng(9.9144908, 78.0970899),
-                      zoom: c.currentZoomLevel,
-                      bearing: 0,
-                      tilt: 0,
-                    ),
-
-                    markers: c.markers.toSet(),
-                    polylines: c.polylines.toSet(),
-                    circles: c.circles.toSet(),
-                    minMaxZoomPreference: const MinMaxZoomPreference(
-                      11.0,
-                      17.0,
-                    ),
-
-                    onMapCreated: (controller) async {
-                      // final style = await DefaultAssetBundle.of(context)
-                      //     .loadString('assets/map_style/map_style1.json');
-                      c.onMapCreated(controller /*style*/);
-                    },
-
-                    gestureRecognizers: {
-                      Factory<OneSequenceGestureRecognizer>(
-                        () => EagerGestureRecognizer(),
+                      initialCameraPosition: CameraPosition(
+                        target:
+                            c.customerLatLng ??
+                            c.currentPosition ??
+                            const LatLng(9.9144908, 78.0970899),
+                        zoom: c.currentZoomLevel,
+                        bearing: 0,
+                        tilt: 0,
                       ),
-                    },
+
+                      markers: c.markers.toSet(),
+                      polylines: c.polylines.toSet(),
+                      circles: c.circles.toSet(),
+                      minMaxZoomPreference: const MinMaxZoomPreference(
+                        11.0,
+                        17.0,
+                      ),
+
+                      onMapCreated: (controller) async {
+                        // final style = await DefaultAssetBundle.of(context)
+                        //     .loadString('assets/map_style/map_style1.json');
+                        c.onMapCreated(controller /*style*/);
+                      },
+
+                      gestureRecognizers: {
+                        Factory<OneSequenceGestureRecognizer>(
+                          () => EagerGestureRecognizer(),
+                        ),
+                      },
+                    ),
                   ),
+                ),
+              ),
+
+              Positioned(
+                top: 350,
+                right: 10,
+                child: FloatingActionButton(
+                  heroTag: 'ride_my_location_${widget.bookingId}',
+                  mini: true,
+                  backgroundColor: Colors.white,
+                  onPressed: () => c.onLocationButtonTap(),
+                  child: const Icon(Icons.my_location, color: Colors.black),
                 ),
               ),
 
@@ -319,20 +358,20 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
               ),
 
               // OTP overlay (black card on map)
-              Positioned(
-                top: 148,
-                left: 16,
-                right: 16,
-                child: Obx(() {
-                  if (c.otp.value.isEmpty ||
-                      c.driverStartedRide.value ||
-                      c.destinationReached.value ||
-                      c.isTripCancelled.value) {
-                    return const SizedBox.shrink();
-                  }
-                  return _otpMapCard();
-                }),
-              ),
+              // Positioned(
+              //   top: 148,
+              //   left: 16,
+              //   right: 16,
+              //   child: Obx(() {
+              //     if (c.otp.value.isEmpty ||
+              //         c.driverStartedRide.value ||
+              //         c.destinationReached.value ||
+              //         c.isTripCancelled.value) {
+              //       return const SizedBox.shrink();
+              //     }
+              //     return _otpMapCard();
+              //   }),
+              // ),
 
               // locate / fit-route toggle
               Positioned(
@@ -887,71 +926,71 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
     );
   }
 
-  Widget _otpMapCard() {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.black,
-        borderRadius: BorderRadius.circular(14),
-        boxShadow: const [
-          BoxShadow(
-            color: Colors.black26,
-            blurRadius: 10,
-            offset: Offset(0, 6),
-          ),
-        ],
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Text(
-                  'Ride OTP',
-                  style: TextStyle(
-                    color: Colors.white70,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  c.otp.value,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 22,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: 2.5,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 10),
-          InkWell(
-            onTap: () async {
-              await Clipboard.setData(ClipboardData(text: c.otp.value));
-              AppToasts.showSuccess(context, 'OTP copied');
-            },
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: const Icon(
-                Icons.copy_rounded,
-                size: 18,
-                color: Colors.black,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+  // Widget _otpMapCard() {
+  //   return Container(
+  //     padding: const EdgeInsets.all(12),
+  //     decoration: BoxDecoration(
+  //       color: Colors.black,
+  //       borderRadius: BorderRadius.circular(14),
+  //       boxShadow: const [
+  //         BoxShadow(
+  //           color: Colors.black26,
+  //           blurRadius: 10,
+  //           offset: Offset(0, 6),
+  //         ),
+  //       ],
+  //     ),
+  //     child: Row(
+  //       children: [
+  //         Expanded(
+  //           child: Column(
+  //             crossAxisAlignment: CrossAxisAlignment.start,
+  //             mainAxisSize: MainAxisSize.min,
+  //             children: [
+  //               const Text(
+  //                 'Ride OTP',
+  //                 style: TextStyle(
+  //                   color: Colors.white70,
+  //                   fontSize: 12,
+  //                   fontWeight: FontWeight.w600,
+  //                 ),
+  //               ),
+  //               const SizedBox(height: 4),
+  //               Text(
+  //                 c.otp.value,
+  //                 style: const TextStyle(
+  //                   color: Colors.white,
+  //                   fontSize: 22,
+  //                   fontWeight: FontWeight.w800,
+  //                   letterSpacing: 2.5,
+  //                 ),
+  //               ),
+  //             ],
+  //           ),
+  //         ),
+  //         const SizedBox(width: 10),
+  //         InkWell(
+  //           onTap: () async {
+  //             await Clipboard.setData(ClipboardData(text: c.otp.value));
+  //             AppToasts.showSuccess(context, 'OTP copied');
+  //           },
+  //           child: Container(
+  //             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+  //             decoration: BoxDecoration(
+  //               color: Colors.white,
+  //               borderRadius: BorderRadius.circular(12),
+  //             ),
+  //             child: const Icon(
+  //               Icons.copy_rounded,
+  //               size: 18,
+  //               color: Colors.black,
+  //             ),
+  //           ),
+  //         ),
+  //       ],
+  //     ),
+  //   );
+  // }
 
   Widget _fareBox() {
     return Obx(
@@ -968,7 +1007,7 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
           borderRadius: BorderRadius.circular(8),
         ),
         child: Padding(
-          padding: const EdgeInsets.only(top: 20),
+          padding: const EdgeInsets.only(top: 20, bottom: 12),
           child: Column(
             children: [
               Padding(
@@ -1030,12 +1069,16 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                         ),
                       ),
                     ),
-                    AnimatedSwitcher(
-                      duration: const Duration(milliseconds: 300),
-                      child:
-                          c.isExpanded.value
-                              ? _fareBreakdown()
-                              : const SizedBox.shrink(),
+                    ClipRect(
+                      child: AnimatedSize(
+                        duration: const Duration(milliseconds: 260),
+                        curve: Curves.easeOutCubic,
+                        alignment: Alignment.topCenter,
+                        child:
+                            c.isExpanded.value
+                                ? _fareBreakdown()
+                                : const SizedBox.shrink(),
+                      ),
                     ),
                   ],
                 ),
@@ -1050,9 +1093,13 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
   Widget _supportShareRow() {
     return Obx(() {
       final isCancelling = c.driverSearchController.isCancelLoading.value;
-      // Allow cancellation even when ride is in progress (charges may apply).
+      final rideInProgress =
+          c.driverStartedRide.value &&
+          !c.destinationReached.value &&
+          !c.isTripCancelled.value;
       final canCancel =
           !isCancelling &&
+          !rideInProgress &&
           !c.destinationReached.value &&
           !c.isTripCancelled.value;
 
@@ -1079,22 +1126,36 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               CustomTextFields.textWithImage(
-                onTap:
-                    canCancel
-                        ? () {
-                          AppButtons.showCancelRideBottomSheet(
-                            context,
-                            onConfirmCancel: (String selectedReason) async {
-                              if (!hasId) return null;
-                              return _handleCancelRide(
-                                bookingId: id,
-                                selectedReason: selectedReason,
-                              );
-                            },
-                          );
-                        }
-                        : null,
-                text: isCancelling ? 'Cancelling...' : 'Cancel Ride',
+                onTap: () {
+                  if (rideInProgress) {
+                    AppToasts.showInfoGlobal(
+                      "Ride is in progress. Cancellation is not available now.",
+                      title: 'Info',
+                    );
+                    return;
+                  }
+                  if (!canCancel) return;
+                  if (!hasId) {
+                    AppToasts.showError(
+                      context,
+                      'Booking id missing. Please try again.',
+                    );
+                    return;
+                  }
+                  AppButtons.showCancelRideBottomSheet(
+                    context,
+                    onConfirmCancel: (String selectedReason) async {
+                      return _handleCancelRide(
+                        bookingId: id,
+                        selectedReason: selectedReason,
+                      );
+                    },
+                  );
+                },
+                text:
+                    rideInProgress
+                        ? 'Ride in progress'
+                        : (isCancelling ? 'Cancelling...' : 'Cancel Ride'),
                 fontWeight: FontWeight.w500,
                 colors:
                     canCancel
@@ -1201,8 +1262,6 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
           padding: const EdgeInsets.symmetric(horizontal: 5),
           child: Column(
             children: [
-             
-   
               Container(
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
@@ -1223,17 +1282,14 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                     Stack(
                       alignment: Alignment.center,
                       children: [
-                        Transform.scale(
-                          scale: 1 + (0.14 * oscillate),
-                          child: Container(
-                            height: 56,
-                            width: 56,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: Colors.white.withOpacity(0.10),
-                              border: Border.all(
-                                color: Colors.white.withOpacity(0.18),
-                              ),
+                        Container(
+                          height: 56,
+                          width: 56,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: Colors.white.withOpacity(0.10),
+                            border: Border.all(
+                              color: Colors.white.withOpacity(0.18),
                             ),
                           ),
                         ),
@@ -1244,10 +1300,16 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                             shape: BoxShape.circle,
                             color: Colors.white.withOpacity(0.15),
                           ),
-                          child: const Icon(
-                            Icons.local_taxi_outlined,
-                            color: Colors.white,
-                            size: 22,
+                          child: const Stack(
+                            alignment: Alignment.center,
+                            children: [
+                              CupertinoActivityIndicator(radius: 12),
+                              Icon(
+                                Icons.local_taxi_outlined,
+                                color: Colors.white,
+                                size: 22,
+                              ),
+                            ],
                           ),
                         ),
                       ],
@@ -1315,13 +1377,8 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                   ],
                 ),
               ),
-               Image.asset(
-                AppImages.confirmCar,
-                height: 150,
-                width: 220,
-                
-              ),
-          
+              Image.asset(AppImages.confirmCar, height: 150, width: 220),
+
               Container(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 16,
@@ -1441,6 +1498,7 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
   Widget _fareBreakdown() {
     return Container(
       margin: const EdgeInsets.only(top: 10),
+      width: double.infinity,
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         border: Border.all(color: AppColors.commonBlack.withOpacity(0.1)),

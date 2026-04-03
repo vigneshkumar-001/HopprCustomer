@@ -16,22 +16,22 @@ class SupportController extends GetxController {
       tickets.addAll(<SupportTicket>[
         SupportTicket(
           id: _id(),
-          subject: 'Transaction Failed due to some reason, i don’t ...',
+          subject: "Transaction Failed due to some reason, I don't ...",
           description: 'Payment failed while finishing the ride.',
           createdAt: now.subtract(const Duration(days: 1)),
           status: SupportTicketStatus.opened,
         ),
         SupportTicket(
           id: _id(),
-          subject: 'Transaction Failed due to some reason, i don’t ...',
+          subject: "Transaction Failed due to some reason, I don't ...",
           description: 'Need help with my last trip receipt.',
           createdAt: now.subtract(const Duration(days: 2)),
           status: SupportTicketStatus.solved,
         ),
         SupportTicket(
           id: _id(),
-          subject: 'Transaction Failed due to some reason, i don’t ...',
-          description: 'Driver didn’t move and app was stuck.',
+          subject: "Transaction Failed due to some reason, I don't ...",
+          description: "Driver didn't move and app was stuck.",
           createdAt: now.subtract(const Duration(days: 3)),
           status: SupportTicketStatus.pending,
         ),
@@ -104,4 +104,3 @@ class SupportController extends GetxController {
 
   String _id() => (Random().nextInt(900000) + 100000).toString();
 }
-

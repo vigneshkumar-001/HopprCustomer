@@ -275,7 +275,7 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                                       const SizedBox(width: 8),
                                       Expanded(
                                         child: Text(
-                                          'Applied: ${_appliedCouponCode!} • Saved ₹${_discountAmount.toStringAsFixed(2)}',
+                                          'Applied: ${_appliedCouponCode!} - Saved ₹${_discountAmount.toStringAsFixed(2)}',
                                           style: const TextStyle(
                                             color: Colors.green,
                                             fontWeight: FontWeight.w600,
@@ -438,7 +438,8 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                                                   _couponCtrl.text.trim();
 
                                               await packageController
-                                                  .applyCoupon(context: context,
+                                                  .applyCoupon(
+                                                    context: context,
                                                     actionType: 'REMOVE',
                                                     code: code,
                                                     bookingId: bookingId,
@@ -447,7 +448,8 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
 
                                             if (ctx.mounted) Navigator.pop(ctx);
                                             AppToasts.showSuccess(
-                                              context,        'Coupon removed',
+                                              context,
+                                              'Coupon removed',
                                             );
                                           },
                                   isLoading: loading,
@@ -466,7 +468,8 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                                           final code = _couponCtrl.text.trim();
                                           if (code.isEmpty) {
                                             AppToasts.showError(
-                                              context,'Enter a coupon code',
+                                              context,
+                                              'Enter a coupon code',
                                             );
                                             return;
                                           }

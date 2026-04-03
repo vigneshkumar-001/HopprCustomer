@@ -24,7 +24,7 @@ import 'package:hopper/Core/Utility/app_loader.dart';
 import 'package:hopper/Core/Utility/typing_animate.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 
-class  SharedChatScreens  extends StatefulWidget {
+class SharedChatScreens extends StatefulWidget {
   final String bookingId;
   const SharedChatScreens({super.key, required this.bookingId});
 
@@ -153,9 +153,9 @@ class _SharedChatScreensState extends State<SharedChatScreens> {
       final apiImg = _normalizeUrl(it.senderImage ?? '');
 
       final avatar =
-      isMe
-          ? (apiImg.isNotEmpty ? apiImg : myAvatarUrl)
-          : (apiImg.isNotEmpty ? apiImg : driverAvatarUrl);
+          isMe
+              ? (apiImg.isNotEmpty ? apiImg : myAvatarUrl)
+              : (apiImg.isNotEmpty ? apiImg : driverAvatarUrl);
 
       final timeStr = _relativeTimeFromString(it.timestamp);
 
@@ -244,9 +244,7 @@ class _SharedChatScreensState extends State<SharedChatScreens> {
   Future<void> _initializeSocketAndData() async {
     await _loadCustomerAndDriverInfo();
 
-    rideShareSocket.initSocket(
-      ApiConsents.sharedBaseUrl,
-    );
+    rideShareSocket.initSocket(ApiConsents.sharedBaseUrl);
 
     rideShareSocket.onConnect(() {
       rideShareSocket.registerUser(customerId);
@@ -304,11 +302,11 @@ class _SharedChatScreensState extends State<SharedChatScreens> {
         chatController.driverImage.value,
       );
       final avatarForBubble =
-      socketImg.isNotEmpty
-          ? socketImg
-          : (driverAvatarUrl.isNotEmpty
-          ? driverAvatarUrl
-          : controllerDriverImg);
+          socketImg.isNotEmpty
+              ? socketImg
+              : (driverAvatarUrl.isNotEmpty
+                  ? driverAvatarUrl
+                  : controllerDriverImg);
 
       final tm = _relativeFromDateTime(DateTime.now());
 
@@ -479,17 +477,17 @@ class _SharedChatScreensState extends State<SharedChatScreens> {
             chatController.driverImage.value,
           );
           final img =
-          (reactiveDriver.isNotEmpty ? reactiveDriver : driverAvatarUrl)
-              .trim();
+              (reactiveDriver.isNotEmpty ? reactiveDriver : driverAvatarUrl)
+                  .trim();
           final name =
-          chatController.driverName.value.isNotEmpty
-              ? chatController.driverName.value
-              : 'Driver';
+              chatController.driverName.value.isNotEmpty
+                  ? chatController.driverName.value
+                  : 'Driver';
 
           final driverPhone =
-          chatController.driverPhone.value.isNotEmpty
-              ? chatController.driverPhone.value
-              : ' ';
+              chatController.driverPhone.value.isNotEmpty
+                  ? chatController.driverPhone.value
+                  : ' ';
 
           return Row(
             children: [
@@ -611,9 +609,9 @@ class _SharedChatScreensState extends State<SharedChatScreens> {
                       final current = messages[index];
                       final previous = index > 0 ? messages[index - 1] : null;
                       final next =
-                      index < messages.length - 1
-                          ? messages[index + 1]
-                          : null;
+                          index < messages.length - 1
+                              ? messages[index + 1]
+                              : null;
 
                       final showAvatar =
                           previous == null || previous.isMe != current.isMe;
@@ -669,7 +667,7 @@ class _SharedChatScreensState extends State<SharedChatScreens> {
             padding: const EdgeInsets.symmetric(horizontal: 15),
             child: Row(
               children: [
-                _quickChip("I’m waiting downstairs"),
+                _quickChip("I'm waiting downstairs"),
                 const SizedBox(width: 10),
                 _quickChip("Please call when you arrive"),
                 const SizedBox(width: 10),
@@ -741,7 +739,7 @@ class _SharedChatScreensState extends State<SharedChatScreens> {
                           if (!_isRecording) {
                             final tempDir = await getTemporaryDirectory();
                             _audioPath =
-                            '${tempDir.path}/${DateTime.now().millisecondsSinceEpoch}.aac';
+                                '${tempDir.path}/${DateTime.now().millisecondsSinceEpoch}.aac';
                             await _recorder.startRecorder(
                               toFile: _audioPath,
                               codec: Codec.aacADTS,
@@ -753,13 +751,13 @@ class _SharedChatScreensState extends State<SharedChatScreens> {
                           setState(() => _isRecording = !_isRecording);
                         },
                         child:
-                        _isRecording
-                            ? const Icon(Icons.pause)
-                            : Image.asset(
-                          AppImages.mic,
-                          height: 26,
-                          width: 26,
-                        ),
+                            _isRecording
+                                ? const Icon(Icons.pause)
+                                : Image.asset(
+                                  AppImages.mic,
+                                  height: 26,
+                                  width: 26,
+                                ),
                       ),
                     ],
                   ),
@@ -823,20 +821,20 @@ class _SharedChatScreensState extends State<SharedChatScreens> {
       fit: BoxFit.cover,
       placeholder:
           (_, __) => CircleAvatar(
-        radius: size / 2,
-        backgroundColor: Colors.grey.shade200,
-        child: const SizedBox(
-          width: 16,
-          height: 16,
-          child: CircularProgressIndicator(strokeWidth: 2),
-        ),
-      ),
+            radius: size / 2,
+            backgroundColor: Colors.grey.shade200,
+            child: const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          ),
       errorWidget:
           (_, __, ___) => CircleAvatar(
-        radius: size / 2,
-        backgroundColor: Colors.grey.shade300,
-        child: const Icon(Icons.person, color: Colors.white),
-      ),
+            radius: size / 2,
+            backgroundColor: Colors.grey.shade300,
+            child: const Icon(Icons.person, color: Colors.white),
+          ),
     );
   }
 
@@ -860,23 +858,23 @@ class _SharedChatScreensState extends State<SharedChatScreens> {
       fit: BoxFit.cover,
       placeholder:
           (_, __) => SizedBox(
-        width: w,
-        height: h,
-        child: const Center(
-          child: SizedBox(
-            width: 18,
-            height: 18,
-            child: CircularProgressIndicator(strokeWidth: 2),
+            width: w,
+            height: h,
+            child: const Center(
+              child: SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ),
           ),
-        ),
-      ),
       errorWidget:
           (_, __, ___) => Container(
-        width: w,
-        height: h,
-        color: Colors.grey.shade300,
-        child: const Icon(Icons.broken_image),
-      ),
+            width: w,
+            height: h,
+            color: Colors.grey.shade300,
+            child: const Icon(Icons.broken_image),
+          ),
     );
   }
 
@@ -915,10 +913,10 @@ class _SharedChatScreensState extends State<SharedChatScreens> {
 
   void _openImagePreview(String pathOrUrl) {
     final imageProvider =
-    pathOrUrl.startsWith('http')
-        ? CachedNetworkImageProvider(pathOrUrl)
-        : FileImage(File(pathOrUrl.replaceFirst('file://', '')))
-    as ImageProvider;
+        pathOrUrl.startsWith('http')
+            ? CachedNetworkImageProvider(pathOrUrl)
+            : FileImage(File(pathOrUrl.replaceFirst('file://', '')))
+                as ImageProvider;
 
     Navigator.of(context).push(
       PageRouteBuilder(
@@ -926,9 +924,9 @@ class _SharedChatScreensState extends State<SharedChatScreens> {
         barrierColor: Colors.black,
         pageBuilder:
             (_, __, ___) => ImagePreviewPage(
-          imageProvider: imageProvider,
-          heroTag: 'img:${pathOrUrl.hashCode}',
-        ),
+              imageProvider: imageProvider,
+              heroTag: 'img:${pathOrUrl.hashCode}',
+            ),
         transitionsBuilder:
             (_, anim, __, child) => FadeTransition(opacity: anim, child: child),
       ),
@@ -938,7 +936,7 @@ class _SharedChatScreensState extends State<SharedChatScreens> {
   Widget buildMessage(ChatMessage msg, bool showAvatar, bool showTime) {
     return Row(
       mainAxisAlignment:
-      msg.isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
+          msg.isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (!msg.isMe && showAvatar) buildAvatar(msg.avatar),
@@ -946,7 +944,7 @@ class _SharedChatScreensState extends State<SharedChatScreens> {
         const SizedBox(width: 6),
         Column(
           crossAxisAlignment:
-          msg.isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+              msg.isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
           children: [
             if (msg.isTyping)
               Container(
@@ -970,9 +968,9 @@ class _SharedChatScreensState extends State<SharedChatScreens> {
                 decoration: BoxDecoration(
                   border: Border.all(color: AppColors.adminChatContainerColor),
                   color:
-                  msg.isMe
-                      ? AppColors.userChatContainerColor
-                      : AppColors.commonWhite,
+                      msg.isMe
+                          ? AppColors.userChatContainerColor
+                          : AppColors.commonWhite,
                   borderRadius: BorderRadius.circular(15),
                 ),
                 constraints: const BoxConstraints(maxWidth: 250),

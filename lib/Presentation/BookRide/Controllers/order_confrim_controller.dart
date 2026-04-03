@@ -15,6 +15,8 @@ import 'package:hopper/Presentation/BookRide/Controllers/driver_search_controlle
 import 'package:hopper/uitls/map/direction_helper.dart';
 import 'package:hopper/uitls/websocket/socket_io_client.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:hopper/uitls/map/map_ui_defaults.dart';
+import 'package:hopper/uitls/map/compact_marker_icons.dart';
 
 class DriverPose {
   final LatLng latLng;
@@ -39,12 +41,17 @@ class OrderConfirmController extends GetxController
   late final double? bookingFee;
   late final double? timeFare;
   String? resumeDriverId;
+  bool _iconsReady = false;
 
   void init({
     required String bookingId,
     required String pickupAddress,
     required String destinationAddress,
     required String carType,
+    double? pickupLat,
+    double? pickupLng,
+    double? dropLat,
+    double? dropLng,
     double? baseFare,
     double? serviceFare,
     double? distanceFare,
@@ -81,6 +88,17 @@ class OrderConfirmController extends GetxController
     if (initialAmount != null && initialAmount > 0) {
       amount.value = initialAmount;
     }
+
+    // Ensure pickup point is available immediately for "Finding a driver" UI,
+    // even before socket returns `customerLocation`.
+    if (pickupLat != null &&
+        pickupLng != null &&
+        dropLat != null &&
+        dropLng != null) {
+      customerLatLng = LatLng(pickupLat, pickupLng);
+      customerToLatLng = LatLng(dropLat, dropLng);
+      _syncPickupMarkerForSearch(force: true);
+    }
   }
 
   // ---------- deps ----------
@@ -103,12 +121,17 @@ class OrderConfirmController extends GetxController
   static const double _mapBearingNorth = 0.0;
   static const double _mapTilt = 0.0;
 
-  // âœ… auto camera control (Ola style)
+  // Auto camera control (Ola style)
   DateTime _lastCameraMoveAt = DateTime.fromMillisecondsSinceEpoch(0);
   final Duration _cameraInterval = const Duration(milliseconds: 900);
   DateTime _pauseAutoFollowUntil = DateTime.fromMillisecondsSinceEpoch(0);
   final Duration _userGesturePause = const Duration(seconds: 6);
   bool _hasFittedAtLeastOnce = false;
+  bool _autoFitBoundsEnabled = true;
+  bool _didFitDriverAndPickup = false;
+  static const double _focusDriverZoom = 16.6;
+  DateTime _lastAutoFrameAt = DateTime.fromMillisecondsSinceEpoch(0);
+  final Duration _autoFrameInterval = const Duration(milliseconds: 1400);
 
   // ---------- UI / state ----------
   final RxBool isExpanded = false.obs;
@@ -151,13 +174,27 @@ class OrderConfirmController extends GetxController
   BitmapDescriptor? carIcon;
   BitmapDescriptor? bikeIcon;
 
-  // âœ… pickup/drop IMAGE icons
+  // Pickup/drop image icons
+  // Pickup/drop compact image pins (like home map).
   BitmapDescriptor? pickupPinIcon;
   BitmapDescriptor? dropPinIcon;
+  BitmapDescriptor? pickupWaitingLabelIcon;
+
+  String _pickupMarkerVariant = 'dot';
+  bool _locationToggleFit = false;
 
   LatLng? currentPosition;
   LatLng? customerLatLng; // pickup
   LatLng? customerToLatLng; // drop
+
+  // Throttle driver marker updates to avoid rebuilding GoogleMap every frame.
+  // `_updateDriverMarker` is called on every animation tick (up to ~60fps).
+  // Rebuilding the platform view that often causes jank/white-map flashes.
+  static const Duration _driverMarkerMinInterval = Duration(milliseconds: 120);
+  DateTime _lastDriverMarkerAt = DateTime.fromMillisecondsSinceEpoch(0);
+  Timer? _driverMarkerFlushTimer;
+  LatLng? _pendingDriverMarkerPos;
+  double? _pendingDriverMarkerBearing;
 
   bool _isRideStartedStatus(String status) {
     final s = status.trim().toUpperCase();
@@ -192,7 +229,7 @@ class OrderConfirmController extends GetxController
   final Curve _ease = Curves.easeInOutCubic;
   VoidCallback? _activeTick;
 
-  // âœ… hard filter to stop â€œteleport jumpâ€
+  // Hard filter to stop "teleport jump"
   final double _hardJumpMeters =
       120.0; // if server point jumps > 120m => ignore
   final double _minMoveMeters = 1.2; // ignore micro jitter
@@ -223,14 +260,18 @@ class OrderConfirmController extends GetxController
   Future<void> _boot() async {
     await _ensureSocketReady();
     await _loadCustomMarkers();
+    _iconsReady = true;
+    _syncPickupMarkerForSearch(force: true);
     _startPulseAnimation();
     _setupSocketListeners();
     if ((resumeDriverId ?? '').trim().isNotEmpty) {
-      socketService.joinBooking(bookingId: bookingId, driverId: resumeDriverId!.trim());
+      socketService.joinBooking(
+        bookingId: bookingId,
+        driverId: resumeDriverId!.trim(),
+      );
     }
     await _initLocation();
   }
-
 
   Future<void> _ensureSocketReady() async {
     try {
@@ -248,15 +289,21 @@ class OrderConfirmController extends GetxController
     } catch (e) {
       AppLogger.log.e('Socket bootstrap failed in ride screen: ');
     }
-  }  Future<void> _loadMapStyle() async {
+  }
+
+  Future<void> _loadMapStyle() async {
     try {
-      mapStyle = await rootBundle.loadString('assets/map_style/map_style1.json');
+      mapStyle = await rootBundle.loadString(
+        'assets/map_style/map_style_ride_clean.json',
+      );
     } catch (_) {}
   }
+
   @override
   void onClose() {
     _searchTimer?.cancel();
     _pulseTimer?.cancel();
+    _driverMarkerFlushTimer?.cancel();
     if (_activeTick != null) _moveCtrl.removeListener(_activeTick!);
     _moveCtrl.dispose();
     super.onClose();
@@ -271,7 +318,7 @@ class OrderConfirmController extends GetxController
       } catch (_) {}
     }
 
-    // âœ… initial move
+    // Initial move
     if (currentPosition != null) {
       mapController?.moveCamera(
         CameraUpdate.newCameraPosition(
@@ -287,15 +334,17 @@ class OrderConfirmController extends GetxController
 
     // Ola-like: show pickup/drop once available
     _maybeFitInitialRoute();
+    _focusPickupForWaiting();
   }
 
   void onCameraMove(CameraPosition pos) {
     currentZoomLevel = pos.zoom.clamp(11.0, 17.0).toDouble();
   }
 
-  // âœ… call from UI when user touches map
+  // Call from UI when user touches map
   void onUserMapGesture() {
     _pauseAutoFollowUntil = DateTime.now().add(_userGesturePause);
+    _autoFitBoundsEnabled = false;
   }
 
   void bindContext(BuildContext ctx) {
@@ -330,9 +379,9 @@ class OrderConfirmController extends GetxController
 
   Future<void> _zoomBy(double delta) async {
     if (mapController == null) return;
-    final next =
-        (currentZoomLevel + delta).clamp(11.0, 17.0).toDouble();
+    final next = (currentZoomLevel + delta).clamp(11.0, 17.0).toDouble();
     _pauseAutoFollowUntil = DateTime.now().add(const Duration(seconds: 2));
+    _autoFitBoundsEnabled = false;
     try {
       await mapController!.animateCamera(CameraUpdate.zoomTo(next));
     } catch (_) {}
@@ -358,12 +407,15 @@ class OrderConfirmController extends GetxController
     }
 
     _pauseAutoFollowUntil = DateTime.fromMillisecondsSinceEpoch(0);
+    _autoFitBoundsEnabled = false;
     try {
       await mapController?.animateCamera(
         CameraUpdate.newCameraPosition(
           CameraPosition(
             target: target,
-            zoom: math.max(currentZoomLevel, _minAutoFollowZoom),
+            zoom: math
+                .max(currentZoomLevel, _focusDriverZoom)
+                .clamp(_minAutoFollowZoom, 17.0),
             bearing: _mapBearingNorth,
             tilt: _mapTilt,
           ),
@@ -384,7 +436,7 @@ class OrderConfirmController extends GetxController
     }
 
     if (customerLatLng != null && customerToLatLng != null) {
-      _fitPickupAndDrop(force: true);
+      _fitBounds(points: [customerLatLng!, customerToLatLng!], padding: 150);
       return;
     }
 
@@ -412,36 +464,73 @@ class OrderConfirmController extends GetxController
     try {
       carIcon = await _bitmapFromAssetSized(
         AppImages.carHop,
-        widthDp: 32,
+        widthDp: 28,
         dpr: dpr,
         circleBadge: true,
       );
     } catch (_) {
-      carIcon = BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure);
+      carIcon = BitmapDescriptor.defaultMarkerWithHue(
+        BitmapDescriptor.hueAzure,
+      );
     }
 
     try {
       bikeIcon = await _bitmapFromAssetSized(
         AppImages.packageBike,
-        widthDp: 32,
+        widthDp: 28,
         dpr: dpr,
         circleBadge: true,
       );
     } catch (_) {
-      bikeIcon = BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange);
+      bikeIcon = BitmapDescriptor.defaultMarkerWithHue(
+        BitmapDescriptor.hueOrange,
+      );
     }
 
-    pickupPinIcon = await _bitmapFromAssetSized(
-      AppImages.circleStart,
-      widthDp: 30,
-      dpr: dpr,
-    );
-    dropPinIcon = await _bitmapFromAssetSized(
-      AppImages.rectangleDest,
-      widthDp: 30,
-      dpr: dpr,
-    );
+    // Compact pickup/drop pins (assets).
+    try {
+      pickupPinIcon = await CompactMarkerIcons.assetPin(
+        assetPath: AppImages.pinLocation,
+        widthDp: 26,
+        dpr: dpr,
+      );
+    } catch (_) {
+      pickupPinIcon = null;
+    }
+    try {
+      dropPinIcon = await CompactMarkerIcons.assetPin(
+        assetPath: AppImages.rectangleDest,
+        widthDp: 22,
+        dpr: dpr,
+      );
+    } catch (_) {
+      dropPinIcon = null;
+    }
+    try {
+      pickupWaitingLabelIcon = await CompactMarkerIcons.labeledPin(
+        label: 'Your pickup spot',
+        assetPath: AppImages.pinLocation,
+        bubbleWidthDp: 126,
+        bubbleHeightDp: 38,
+        pinWidthDp: 26,
+        fontSizeDp: 11.5,
+        dpr: dpr,
+      );
+    } catch (_) {
+      pickupWaitingLabelIcon = pickupPinIcon;
+    }
   }
+
+  void _syncPickupMarkerForSearch({required bool force}) {
+    if (!_iconsReady) return;
+    if (customerLatLng == null) return;
+
+    // Only applies before ride start; after start we show destination marker.
+    if (driverStartedRide.value) return;
+
+    _seedStaticMarkers(forceRecreate: force);
+  }
+
   Future<BitmapDescriptor> _bitmapFromAssetSized(
     String assetPath, {
     required double widthDp,
@@ -458,7 +547,9 @@ class OrderConfirmController extends GetxController
     final frame = await codec.getNextFrame();
 
     if (!circleBadge) {
-      final bytes = await frame.image.toByteData(format: ui.ImageByteFormat.png);
+      final bytes = await frame.image.toByteData(
+        format: ui.ImageByteFormat.png,
+      );
       return BitmapDescriptor.fromBytes(bytes!.buffer.asUint8List());
     }
 
@@ -469,11 +560,7 @@ class OrderConfirmController extends GetxController
     final center = rect.center;
     final radius = targetPx / 2;
 
-    canvas.drawCircle(
-      center,
-      radius * 0.88,
-      Paint()..color = Colors.white,
-    );
+    canvas.drawCircle(center, radius * 0.88, Paint()..color = Colors.white);
     canvas.drawCircle(
       center,
       radius * 0.88,
@@ -490,7 +577,12 @@ class OrderConfirmController extends GetxController
     );
     canvas.drawImageRect(
       frame.image,
-      Rect.fromLTWH(0, 0, frame.image.width.toDouble(), frame.image.height.toDouble()),
+      Rect.fromLTWH(
+        0,
+        0,
+        frame.image.width.toDouble(),
+        frame.image.height.toDouble(),
+      ),
       imageRect,
       Paint()..filterQuality = FilterQuality.high,
     );
@@ -538,8 +630,13 @@ class OrderConfirmController extends GetxController
     latestRideStatus.value = 'SEARCHING';
     etaChipText.value = '';
     etaMinutes.value = 0;
+    _autoFitBoundsEnabled = true;
 
-    _searchTimer = Timer(const Duration(seconds: 40), () async {
+    _syncPickupMarkerForSearch(force: true);
+    _focusPickupForWaiting();
+    _locationToggleFit = false;
+
+    _searchTimer = Timer(const Duration(seconds: 60), () async {
       if (isClosed) return;
       if (isDriverConfirmed.value) return;
       if (_screenCtx == null) return;
@@ -556,16 +653,77 @@ class OrderConfirmController extends GetxController
     });
   }
 
+  Future<void> onLocationButtonTap() async {
+    if (mapController == null) return;
+
+    // Toggle between focus (driver/current/pickup) and fit bounds (pickup+drop).
+    if (_locationToggleFit) {
+      _locationToggleFit = false;
+      if (customerLatLng != null && customerToLatLng != null) {
+        try {
+          final bounds = MapUiDefaults.boundsFrom2(
+            customerLatLng!,
+            customerToLatLng!,
+          );
+          await mapController!.animateCamera(
+            CameraUpdate.newLatLngBounds(bounds, 120),
+          );
+          return;
+        } catch (_) {}
+      }
+    } else {
+      _locationToggleFit = true;
+      final target = _emaPos ?? _displayPos;
+      if (target == null) {
+        // No driver yet: zoom to current device location (or internal fallback).
+        await goToCurrentLocation();
+        return;
+      }
+      try {
+        _pauseAutoFollowUntil = DateTime.fromMillisecondsSinceEpoch(0);
+        await mapController!.animateCamera(
+          CameraUpdate.newCameraPosition(
+            CameraPosition(
+              target: target,
+              zoom: math.max(currentZoomLevel, MapUiDefaults.focusZoom),
+              bearing: _mapBearingNorth,
+              tilt: _mapTilt,
+            ),
+          ),
+        );
+      } catch (_) {}
+    }
+  }
+
+  void _focusPickupForWaiting() {
+    if (mapController == null) return;
+    if (customerLatLng == null) return;
+    if (!isWaitingForDriver.value) return;
+    if (isDriverConfirmed.value || driverStartedRide.value) return;
+
+    try {
+      mapController?.animateCamera(
+        CameraUpdate.newCameraPosition(
+          CameraPosition(
+            target: customerLatLng!,
+            zoom: math.max(currentZoomLevel, MapUiDefaults.focusZoom),
+            bearing: _mapBearingNorth,
+            tilt: _mapTilt,
+          ),
+        ),
+      );
+    } catch (_) {}
+  }
+
   // =================================================================
   //                         SOCKETS
   // =================================================================
   void _setupSocketListeners() {
     socketService.onConnect(() {
-      AppLogger.log.i("âœ… Socket connected on booking screen");
+      AppLogger.log.i("Socket connected on booking screen");
     });
 
     socketService.on('joined-booking', (data) async {
-
       final vehicle = data['vehicle'] ?? {};
       final String driverId = (data['driverId'] ?? '').toString();
       final String driverFullName = (data['driverName'] ?? '').toString();
@@ -588,11 +746,17 @@ class OrderConfirmController extends GetxController
       final driverLng = _toDouble(driverLoc['longitude']);
 
       final bool hasDriver =
-          driverAccepted || driverId.trim().isNotEmpty || (driverLat != null && driverLng != null);
+          driverAccepted ||
+          driverId.trim().isNotEmpty ||
+          (driverLat != null && driverLng != null);
 
       final String plate = (vehicle['plateNumber'] ?? '').toString();
-      final String profile = _firstImageUrl(data['profilePic'] ?? vehicle['profilePic']);
-      final photos = _firstImageUrl(data['carExteriorPhotos'] ?? vehicle['carExteriorPhotos']);
+      final String profile = _firstImageUrl(
+        data['profilePic'] ?? vehicle['profilePic'],
+      );
+      final photos = _firstImageUrl(
+        data['carExteriorPhotos'] ?? vehicle['carExteriorPhotos'],
+      );
 
       final customerLoc = data['customerLocation'] ?? {};
       final amt =
@@ -646,9 +810,12 @@ class OrderConfirmController extends GetxController
       _refreshPulseCircles();
 
       final latestStatus =
-          (data['latestStatus'] ?? data['status'] ?? '').toString().toUpperCase();
+          (data['latestStatus'] ?? data['status'] ?? '')
+              .toString()
+              .toUpperCase();
       _updateRideMetrics(data);
-      latestRideStatus.value = latestStatus.isEmpty ? 'SEARCHING' : latestStatus;
+      latestRideStatus.value =
+          latestStatus.isEmpty ? 'SEARCHING' : latestStatus;
       final joinedRideStarted = _isRideStartedStatus(latestStatus);
       final hasAssignedDriver =
           driverAccepted ||
@@ -665,7 +832,6 @@ class OrderConfirmController extends GetxController
         isWaitingForDriver.value = true;
         isDriverConfirmed.value = false;
       }
-
 
       if (joinedRideStarted) {
         driverStartedRide.value = true;
@@ -720,11 +886,13 @@ class OrderConfirmController extends GetxController
       if (age > _maxStale) return;
 
       final srvBearing = _toDouble(data['bearing']);
-      final liveRideType = (data['rideType'] ?? data['vehicleType'] ?? '').toString();
+      final liveRideType =
+          (data['rideType'] ?? data['vehicleType'] ?? '').toString();
       if (liveRideType.trim().isNotEmpty) {
         cartypeFromServer.value = liveRideType;
       }
-      final latestStatus = (data['latestStatus'] ?? '').toString().toUpperCase();
+      final latestStatus =
+          (data['latestStatus'] ?? '').toString().toUpperCase();
       _updateRideMetrics(data);
       final derivedRideStarted = _isRideStartedStatus(latestStatus);
 
@@ -741,7 +909,7 @@ class OrderConfirmController extends GetxController
           );
         }
       }
-      // âœ… jump filter (teleport)
+      // Jump filter (teleport)
       if (_lastReceivedPos != null) {
         final distJump = Geolocator.distanceBetween(
           _lastReceivedPos!.latitude,
@@ -856,8 +1024,11 @@ class OrderConfirmController extends GetxController
           force: true,
         );
 
-        // Ola like: fit pickup+drop after ride started
-        _fitPickupAndDrop(force: true);
+        // Ola like: fit pickup+drop after ride started (skip if user manually
+        // took over the camera via focus/zoom/drag).
+        if (_autoFitBoundsEnabled) {
+          _fitPickupAndDrop(force: true);
+        }
       }
     });
 
@@ -921,7 +1092,10 @@ class OrderConfirmController extends GetxController
     }
     final raw = (value ?? '').toString().trim();
     if (raw.isEmpty) return '';
-    final normalized = raw.replaceAll('[', '').replaceAll(']', '').replaceAll('"', '');
+    final normalized = raw
+        .replaceAll('[', '')
+        .replaceAll(']', '')
+        .replaceAll('"', '');
     for (final part in normalized.split(',')) {
       final url = part.trim();
       if (url.isNotEmpty) return url;
@@ -947,16 +1121,20 @@ class OrderConfirmController extends GetxController
 
   String _formatDistanceKm(double meters) {
     final km = meters <= 0 ? 0.0 : meters / 1000;
-    return km >= 10 ? '${km.toStringAsFixed(0)} km' : '${km.toStringAsFixed(1)} km';
+    return km >= 10
+        ? '${km.toStringAsFixed(0)} km'
+        : '${km.toStringAsFixed(1)} km';
   }
 
   void _updateRideMetrics(dynamic data) {
     pickupDurationMin.value = _toInt(data['pickupDurationInMin']);
     dropDurationMin.value = _toInt(data['dropDurationInMin']);
     tripDurationMin.value = _toInt(data['tripDurationInMin']);
-    pickupDistanceMeters.value = _toDouble(data['pickupDistanceInMeters']) ?? 0.0;
+    pickupDistanceMeters.value =
+        _toDouble(data['pickupDistanceInMeters']) ?? 0.0;
     dropDistanceMeters.value = _toDouble(data['dropDistanceInMeters']) ?? 0.0;
-    final incomingStatus = (data['latestStatus'] ?? data['status'] ?? '').toString().toUpperCase();
+    final incomingStatus =
+        (data['latestStatus'] ?? data['status'] ?? '').toString().toUpperCase();
     if (incomingStatus.isNotEmpty) {
       latestRideStatus.value = incomingStatus;
     }
@@ -965,22 +1143,30 @@ class OrderConfirmController extends GetxController
       final meters = pickupDistanceMeters.value;
       final isArriving = driverArrived.value || meters <= 120 || mins <= 1;
       etaMinutes.value = mins;
-      etaChipText.value = isArriving
-          ? 'Arriving at pickup | ' + _formatDistanceKm(meters)
-          : _formatEtaDuration(mins) + ' away | ' + _formatDistanceKm(meters);
+      etaChipText.value =
+          isArriving
+              ? 'Arriving at pickup | ' + _formatDistanceKm(meters)
+              : _formatEtaDuration(mins) +
+                  ' away | ' +
+                  _formatDistanceKm(meters);
       nearDestination.value = false;
       return;
     }
-    final mins = dropDurationMin.value > 0 ? dropDurationMin.value : tripDurationMin.value;
+    final mins =
+        dropDurationMin.value > 0
+            ? dropDurationMin.value
+            : tripDurationMin.value;
     final meters = dropDistanceMeters.value;
-    nearDestination.value = meters > 0 && meters <= 400 || (mins > 0 && mins <= 2);
+    nearDestination.value =
+        meters > 0 && meters <= 400 || (mins > 0 && mins <= 2);
     etaMinutes.value = mins;
     if (destinationReached.value) {
       etaChipText.value = 'Arrived at destination';
     } else if (nearDestination.value) {
       etaChipText.value = 'Near destination | ' + _formatDistanceKm(meters);
     } else {
-      etaChipText.value = _formatEtaDuration(mins) + ' to drop | ' + _formatDistanceKm(meters);
+      etaChipText.value =
+          _formatEtaDuration(mins) + ' to drop | ' + _formatDistanceKm(meters);
     }
   }
 
@@ -1017,8 +1203,7 @@ class OrderConfirmController extends GetxController
     );
     if (meters <= 0) return;
 
-    final int mins =
-        ((meters / (7.2 * 60.0)).ceil()).clamp(1, 999).toInt();
+    final int mins = ((meters / (7.2 * 60.0)).ceil()).clamp(1, 999).toInt();
     final dist = _formatDistanceKm(meters);
 
     if (destinationReached.value) {
@@ -1039,14 +1224,20 @@ class OrderConfirmController extends GetxController
     final near = meters <= 400 || mins <= 2;
     nearDestination.value = near;
     etaChipText.value =
-        near ? 'Near destination | $dist' : '${_formatEtaDuration(mins)} to drop | $dist';
+        near
+            ? 'Near destination | $dist'
+            : '${_formatEtaDuration(mins)} to drop | $dist';
   }
 
   void _seedStaticMarkers({required bool forceRecreate}) {
     final set = Set<Marker>.from(markers);
 
     if (forceRecreate) {
-      set.removeWhere((m) => m.markerId.value == 'pickup_marker' || m.markerId.value == 'drop_marker');
+      set.removeWhere(
+        (m) =>
+            m.markerId.value == 'pickup_marker' ||
+            m.markerId.value == 'drop_marker',
+      );
       _seededPickupMarker = false;
       _seededDropMarker = false;
     }
@@ -1059,9 +1250,36 @@ class OrderConfirmController extends GetxController
       }
     }
 
-    if (!driverStartedRide.value && customerLatLng != null && !_seededPickupMarker) {
-      set.add(Marker(markerId: const MarkerId('pickup_marker'), position: customerLatLng!, infoWindow: const InfoWindow(title: 'Pickup'), icon: pickupPinIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen), anchor: const Offset(0.5, 1.0), flat: true));
-      _seededPickupMarker = true;
+    if (!driverStartedRide.value && customerLatLng != null) {
+      // Waiting screen: show a compact pin with a small label above.
+      final useWaitingLabel =
+          isWaitingForDriver.value && !isDriverConfirmed.value;
+      final variant = useWaitingLabel ? 'wait_label' : 'pin';
+      final shouldReplace =
+          forceRecreate ||
+          !_seededPickupMarker ||
+          _pickupMarkerVariant != variant;
+
+      if (shouldReplace) {
+        set.removeWhere((m) => m.markerId.value == 'pickup_marker');
+        set.add(
+          Marker(
+            markerId: const MarkerId('pickup_marker'),
+            position: customerLatLng!,
+            infoWindow: InfoWindow.noText,
+            icon:
+                (useWaitingLabel ? pickupWaitingLabelIcon : pickupPinIcon) ??
+                BitmapDescriptor.defaultMarkerWithHue(
+                  MapUiDefaults.pickupDropMarkerHueGreen,
+                ),
+            anchor: const Offset(0.5, 1.0),
+            flat: true,
+            zIndexInt: 10,
+          ),
+        );
+        _seededPickupMarker = true;
+        _pickupMarkerVariant = variant;
+      }
     }
 
     // After ride starts: show ONLY destination marker (hide pickup).
@@ -1072,8 +1290,23 @@ class OrderConfirmController extends GetxController
       }
     }
 
-    if (driverStartedRide.value && customerToLatLng != null && !_seededDropMarker) {
-      set.add(Marker(markerId: const MarkerId('drop_marker'), position: customerToLatLng!, infoWindow: const InfoWindow(title: 'Destination'), icon: dropPinIcon ?? BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed), anchor: const Offset(0.5, 1.0), flat: true));
+    if (driverStartedRide.value &&
+        customerToLatLng != null &&
+        !_seededDropMarker) {
+      set.add(
+        Marker(
+          markerId: const MarkerId('drop_marker'),
+          position: customerToLatLng!,
+          infoWindow: InfoWindow.noText,
+          icon:
+              dropPinIcon ??
+              BitmapDescriptor.defaultMarkerWithHue(
+                MapUiDefaults.pickupDropMarkerHueRed,
+              ),
+          anchor: const Offset(0.5, 1.0),
+          flat: true,
+        ),
+      );
       _seededDropMarker = true;
     }
 
@@ -1083,21 +1316,6 @@ class OrderConfirmController extends GetxController
 
     _refreshPulseCircles();
   }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
   // =================================================================
   //                      MOTION
@@ -1186,11 +1404,34 @@ class OrderConfirmController extends GetxController
 
     _updateDriverMarker(_emaPos!, _lastBearing);
 
-    // âœ… Ola-like camera update (NOT every tick + NOT over zoom)
+    // Ola-like camera update (NOT every tick + NOT over zoom)
     _autoCameraUpdate();
   }
 
   void _updateDriverMarker(LatLng position, double bearing) {
+    final now = DateTime.now();
+    final since = now.difference(_lastDriverMarkerAt);
+    if (since < _driverMarkerMinInterval) {
+      _pendingDriverMarkerPos = position;
+      _pendingDriverMarkerBearing = bearing;
+      _driverMarkerFlushTimer?.cancel();
+      _driverMarkerFlushTimer = Timer(_driverMarkerMinInterval - since, () {
+        if (isClosed) return;
+        final pos = _pendingDriverMarkerPos;
+        if (pos == null) return;
+        final b = _pendingDriverMarkerBearing ?? _lastBearing;
+        _pendingDriverMarkerPos = null;
+        _pendingDriverMarkerBearing = null;
+        _applyDriverMarkerNow(pos, b);
+      });
+      return;
+    }
+
+    _applyDriverMarkerNow(position, bearing);
+  }
+
+  void _applyDriverMarkerNow(LatLng position, double bearing) {
+    _lastDriverMarkerAt = DateTime.now();
     final newMarker = Marker(
       markerId: const MarkerId("driver_marker"),
       position: position,
@@ -1200,13 +1441,9 @@ class OrderConfirmController extends GetxController
       flat: true,
     );
 
-    final set = Set<Marker>.from(markers);
-    set.removeWhere((m) => m.markerId.value == "driver_marker");
-    set.add(newMarker);
-
-    markers
-      ..clear()
-      ..addAll(set);
+    markers.removeWhere((m) => m.markerId.value == "driver_marker");
+    markers.add(newMarker);
+    markers.refresh();
 
     _refreshPulseCircles();
   }
@@ -1296,7 +1533,10 @@ class OrderConfirmController extends GetxController
     if (mapController == null) return;
 
     if (customerLatLng != null && customerToLatLng != null) {
-      _fitPickupAndDrop(force: true);
+      _autoFramePoints(
+        points: [customerLatLng!, customerToLatLng!],
+        allowZoomOut: false,
+      );
       _hasFittedAtLeastOnce = true;
       return;
     }
@@ -1320,20 +1560,85 @@ class OrderConfirmController extends GetxController
   void _fitDriverAndPickupOnce() {
     if (mapController == null) return;
     if (_emaPos == null || customerLatLng == null) return;
+    if (!_autoFitBoundsEnabled) return;
+    if (_didFitDriverAndPickup) return;
+    _didFitDriverAndPickup = true;
 
     // only once right after first driver point
-    _fitBounds(points: [_emaPos!, customerLatLng!], padding: 130);
+    _autoFramePoints(points: [_emaPos!, customerLatLng!], allowZoomOut: false);
   }
 
   void _fitPickupAndDrop({required bool force}) {
     if (mapController == null) return;
     if (customerLatLng == null || customerToLatLng == null) return;
     if (!force && DateTime.now().isBefore(_pauseAutoFollowUntil)) return;
+    if (!_autoFitBoundsEnabled) return;
 
-    _fitBounds(points: [customerLatLng!, customerToLatLng!], padding: 150);
+    _autoFramePoints(
+      points: [customerLatLng!, customerToLatLng!],
+      allowZoomOut: false,
+    );
   }
 
-  void _fitBounds({required List<LatLng> points, required double padding}) {
+  double _zoomForDiagMeters(double meters) {
+    if (!meters.isFinite) return currentZoomLevel;
+    if (meters <= 300) return 16.8;
+    if (meters <= 700) return 16.2;
+    if (meters <= 1500) return 15.6;
+    if (meters <= 3000) return 15.0;
+    if (meters <= 6000) return 14.5;
+    return 13.9;
+  }
+
+  void _autoFramePoints({
+    required List<LatLng> points,
+    required bool allowZoomOut,
+  }) {
+    final controller = mapController;
+    if (controller == null) return;
+    if (points.length < 2) return;
+
+    if (DateTime.now().isBefore(_pauseAutoFollowUntil)) return;
+
+    final now = DateTime.now();
+    if (now.difference(_lastAutoFrameAt) < _autoFrameInterval) return;
+    _lastAutoFrameAt = now;
+
+    final b = _boundsFrom(points);
+    final diag = Geolocator.distanceBetween(
+      b.southwest.latitude,
+      b.southwest.longitude,
+      b.northeast.latitude,
+      b.northeast.longitude,
+    );
+
+    final mid = LatLng(
+      (b.northeast.latitude + b.southwest.latitude) / 2,
+      (b.northeast.longitude + b.southwest.longitude) / 2,
+    );
+
+    final desired = _zoomForDiagMeters(diag).clamp(11.0, 17.0);
+    final z = allowZoomOut ? desired : math.max(currentZoomLevel, desired);
+
+    try {
+      controller.animateCamera(
+        CameraUpdate.newCameraPosition(
+          CameraPosition(
+            target: mid,
+            zoom: z,
+            bearing: _mapBearingNorth,
+            tilt: _mapTilt,
+          ),
+        ),
+      );
+    } catch (_) {}
+  }
+
+  void _fitBounds({
+    required List<LatLng> points,
+    required double padding,
+    bool allowZoomOut = true,
+  }) {
     if (mapController == null) return;
     if (points.length < 2) return;
 
@@ -1344,12 +1649,40 @@ class OrderConfirmController extends GetxController
       b.northeast.latitude,
       b.northeast.longitude,
     );
+
+    // Auto-fit should not zoom way out (looks unprofessional in production).
+    // Users can still press the fit button to see the full route.
+    if (!allowZoomOut && diag.isFinite && diag > 3500) {
+      final mid = LatLng(
+        (b.northeast.latitude + b.southwest.latitude) / 2,
+        (b.northeast.longitude + b.southwest.longitude) / 2,
+      );
+      final z = math
+          .max(currentZoomLevel, _minAutoFollowZoom)
+          .clamp(11.0, 17.0);
+      try {
+        mapController!.animateCamera(
+          CameraUpdate.newCameraPosition(
+            CameraPosition(
+              target: mid,
+              zoom: z,
+              bearing: _mapBearingNorth,
+              tilt: _mapTilt,
+            ),
+          ),
+        );
+      } catch (_) {}
+      return;
+    }
+
     if (diag.isFinite && diag < 260) {
       final mid = LatLng(
         (b.northeast.latitude + b.southwest.latitude) / 2,
         (b.northeast.longitude + b.southwest.longitude) / 2,
       );
-      final z = math.min(14.9, currentZoomLevel);
+      final z = math
+          .max(currentZoomLevel, _minAutoFollowZoom)
+          .clamp(11.0, 17.0);
       try {
         mapController!.animateCamera(
           CameraUpdate.newCameraPosition(
@@ -1440,10 +1773,19 @@ class OrderConfirmController extends GetxController
 
       polylines.assignAll({
         Polyline(
+          polylineId: PolylineId('${polyId}_outline'),
+          points: pts,
+          color: const Color(0xFFE5E7EB),
+          width: 5,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          jointType: JointType.round,
+        ),
+        Polyline(
           polylineId: PolylineId(polyId),
           points: pts,
           color: Colors.black,
-          width: 4,
+          width: MapUiDefaults.polylineWidth,
           startCap: Cap.roundCap,
           endCap: Cap.roundCap,
           jointType: JointType.round,
@@ -1451,7 +1793,7 @@ class OrderConfirmController extends GetxController
       });
       _activePolyId = polyId;
     } catch (e) {
-      AppLogger.log.e("â— Polyline error: $e");
+      AppLogger.log.e("Polyline error: $e");
     } finally {
       _isDrawingPolyline = false;
     }
@@ -1582,22 +1924,27 @@ class OrderConfirmController extends GetxController
 
   void _refreshPulseCircles() {
     final items = <Circle>{};
-    final activeTarget = driverStartedRide.value ? customerToLatLng : customerLatLng;
-    final passiveTarget = driverStartedRide.value ? null : customerToLatLng;
+    final searching = !isDriverConfirmed.value && !driverStartedRide.value;
+    final activeTarget =
+        searching
+            ? customerLatLng
+            : (driverStartedRide.value ? customerToLatLng : customerLatLng);
+    final passiveTarget =
+        searching ? null : (driverStartedRide.value ? null : customerToLatLng);
 
     void addPulse(String id, LatLng center, Color baseColor, bool active) {
-      final baseRadius = active ? 26.0 : 18.0;
-      final pulseRadius = active ? 54.0 : 34.0;
+      final baseRadius = active ? 18.0 : 14.0;
+      final pulseRadius = active ? 40.0 : 28.0;
       final radius = baseRadius + (pulseRadius * _pulsePhase);
-      final alpha = active ? (0.22 - (0.14 * _pulsePhase)) : 0.10;
+      final alpha = active ? (0.18 - (0.12 * _pulsePhase)) : 0.08;
 
       items.add(
         Circle(
           circleId: CircleId('${id}_inner'),
           center: center,
-          radius: active ? 24 : 18,
-          fillColor: baseColor.withOpacity(active ? 0.18 : 0.10),
-          strokeColor: baseColor.withOpacity(active ? 0.24 : 0.12),
+          radius: active ? 16 : 14,
+          fillColor: baseColor.withOpacity(active ? 0.14 : 0.08),
+          strokeColor: baseColor.withOpacity(active ? 0.18 : 0.10),
           strokeWidth: 1,
         ),
       );
@@ -1622,29 +1969,6 @@ class OrderConfirmController extends GetxController
 
     circles.assignAll(items);
   }
+
   void toggleFareDetails() => isExpanded.value = !isExpanded.value;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

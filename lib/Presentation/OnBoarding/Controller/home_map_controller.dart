@@ -30,6 +30,8 @@ class HomeMapController extends GetxController {
   GoogleMapController? mapController;
 
   final RxSet<Marker> markers = <Marker>{}.obs;
+  final RxSet<Circle> circles = <Circle>{}.obs;
+  final RxInt markersRevision = 0.obs;
   final RxString address = 'Fetching your location...'.obs;
 
   final RxList<PopularPlace> popularPlaces = <PopularPlace>[].obs;
@@ -56,6 +58,9 @@ class HomeMapController extends GetxController {
 
   bool _loadingLocation = false;
   bool _started = false;
+  bool _restoredFromPrefs = false;
+
+  static const double _homeInitZoom = 17.2;
 
   double _heading = 0.0;
   StreamSubscription<CompassEvent>? _compassSub;
@@ -65,6 +70,8 @@ class HomeMapController extends GetxController {
   final Rxn<LatLng> _devicePosition = Rxn<LatLng>();
   DateTime? _devicePositionAt;
   Timer? _persistDebounce;
+  Timer? _pulseTimer;
+  DateTime _pulseStartAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   LatLng? get devicePosition => _devicePosition.value;
 
@@ -90,6 +97,7 @@ class HomeMapController extends GetxController {
     _preloadMapStyle();
     _startCompassListener();
     _restoreLastLocationFromPrefs();
+    _startMyLocationPulse();
 
     // If HomeMapController.start() runs before location permission is granted,
     // initLocation() will early-return. This ensures we fetch & center as soon as
@@ -101,8 +109,12 @@ class HomeMapController extends GetxController {
       }
 
       _startPositionStream();
-      if (currentPosition != null) return;
-      initLocation();
+      // If we previously restored a stale last-known map location (from prefs)
+      // before permission was granted, we must still recenter to live GPS once
+      // the gate becomes ready.
+      if (currentPosition == null || _restoredFromPrefs) {
+        initLocation();
+      }
     });
   }
 
@@ -115,6 +127,7 @@ class HomeMapController extends GetxController {
     _gateReadyWorker?.dispose();
     _stopPositionStream();
     _persistDebounce?.cancel();
+    _pulseTimer?.cancel();
 
     for (final t in _moveTimers.values) {
       t.cancel();
@@ -122,6 +135,56 @@ class HomeMapController extends GetxController {
     _moveTimers.clear();
 
     super.onClose();
+  }
+
+  void _startMyLocationPulse() {
+    _pulseTimer?.cancel();
+    _pulseStartAt = DateTime.now();
+    // Higher tick-rate so the animation feels smooth (not "stuck").
+    _pulseTimer = Timer.periodic(const Duration(milliseconds: 60), (_) {
+      _refreshMyLocationPulseCircles();
+    });
+  }
+
+  void _refreshMyLocationPulseCircles() {
+    // Only show when permission is granted (myLocationEnabled is on).
+    if (!gate.isReady.value) {
+      circles.clear();
+      return;
+    }
+
+    // Prefer live device stream (matches blue dot), fallback to last known.
+    final now = DateTime.now();
+    final LatLng? center =
+        (devicePosition != null &&
+                _devicePositionAt != null &&
+                now.difference(_devicePositionAt!).inSeconds <= 10)
+            ? devicePosition
+            : currentPosition;
+    if (center == null) {
+      circles.clear();
+      return;
+    }
+
+    const ringColor = Color(0xFF34C759); // light green
+    final elapsedMs = DateTime.now().difference(_pulseStartAt).inMilliseconds;
+    const periodMs = 1400;
+    final phase = ((elapsedMs % periodMs) / periodMs).clamp(0.0, 1.0);
+
+    // One ring: small -> medium -> large, and fade out.
+    final radius = 14.0 + (62.0 * phase);
+    final alpha = (0.34 * (1.0 - phase)).clamp(0.0, 0.34);
+
+    circles.assignAll({
+      Circle(
+        circleId: const CircleId('home_loc_ring'),
+        center: center,
+        radius: radius,
+        fillColor: Colors.transparent,
+        strokeColor: ringColor.withOpacity(alpha),
+        strokeWidth: 2,
+      ),
+    });
   }
 
   void _startPositionStream() {
@@ -171,9 +234,9 @@ class HomeMapController extends GetxController {
     // ✅ Important for home map: if currentPosition already available, move camera now
     if (currentPosition != null) {
       try {
-        _lastCamera = CameraPosition(target: currentPosition!, zoom: 15.5);
+        _lastCamera = CameraPosition(target: currentPosition!, zoom: _homeInitZoom);
         await mapController?.animateCamera(
-          CameraUpdate.newLatLngZoom(currentPosition!, 15.5),
+          CameraUpdate.newLatLngZoom(currentPosition!, _homeInitZoom),
         );
       } catch (_) {}
     } else {
@@ -448,8 +511,13 @@ class HomeMapController extends GetxController {
   Future<void> _preloadMapStyle() async {
     try {
       mapStyle = await rootBundle.loadString(
-        'assets/map_style/map_style1.json',
+        'assets/map_style/map_style_uber_like.json',
       );
+      try {
+        if (mapController != null && mapStyle != null) {
+          await mapController?.setMapStyle(mapStyle);
+        }
+      } catch (_) {}
     } catch (e) {
       debugPrint('Failed to load map style: $e');
     }
@@ -528,8 +596,62 @@ class HomeMapController extends GetxController {
       );
     });
 
+    // Shared-ride backend nearby updates (show on the same home map too).
+    rideShareSocket.on('nearby-driver-update', (data) {
+      final String driverId = 'shared_${(data['driverId'] ?? '').toString()}';
+      if (driverId == 'shared_') return;
+
+      final now = DateTime.now().toUtc();
+      final last = _lastSocketProcessedAt[driverId];
+      if (last != null &&
+          now.difference(last).inMilliseconds < _socketThrottleMs) {
+        return;
+      }
+      _lastSocketProcessedAt[driverId] = now;
+
+      final latRaw = data['latitude'];
+      final lngRaw = data['longitude'];
+      if (latRaw is! num || lngRaw is! num) return;
+      final double lat = latRaw.toDouble();
+      final double lng = lngRaw.toDouble();
+
+      final String rideType =
+          (data['rideType'] ??
+                  data['serviceType'] ??
+                  data['vehicleType'] ??
+                  data['type'] ??
+                  'car')
+              .toString();
+
+      final dynamic hRaw = data['bearing'] ?? data['heading'];
+      final double? serverHeading = (hRaw is num) ? hRaw.toDouble() : null;
+
+      _driverTypes[driverId] = rideType;
+
+      animateDriverTo(
+        driverId: driverId,
+        to: LatLng(lat, lng),
+        serviceType: rideType,
+        serverHeading: serverHeading,
+      );
+    });
+
     socketService.on('remove-nearby-driver', (data) {
       final String driverId = data['driverId'].toString();
+
+      _moveTimers.remove(driverId)?.cancel();
+      _driverMarkers.remove(driverId);
+      _driverTypes.remove(driverId);
+      _lastPos.remove(driverId);
+      _lastSocketProcessedAt.remove(driverId);
+
+      _publishMarkersDebounced();
+    });
+
+    rideShareSocket.on('remove-nearby-driver', (data) {
+      final raw = (data['driverId'] ?? '').toString();
+      if (raw.trim().isEmpty) return;
+      final driverId = 'shared_$raw';
 
       _moveTimers.remove(driverId)?.cancel();
       _driverMarkers.remove(driverId);
@@ -585,12 +707,13 @@ class HomeMapController extends GetxController {
       if (pos == null) return;
 
       currentPosition = LatLng(pos.latitude, pos.longitude);
-      _lastCamera = CameraPosition(target: currentPosition!, zoom: 15);
+      _restoredFromPrefs = false;
+      _lastCamera = CameraPosition(target: currentPosition!, zoom: _homeInitZoom);
 
       try {
         await mapController?.animateCamera(
           CameraUpdate.newCameraPosition(
-            CameraPosition(target: currentPosition!, zoom: 15),
+            CameraPosition(target: currentPosition!, zoom: _homeInitZoom),
           ),
         );
       } catch (_) {}
@@ -620,6 +743,7 @@ class HomeMapController extends GetxController {
     }
 
     currentPosition = latLng;
+    _restoredFromPrefs = false;
     _lastCamera = CameraPosition(target: latLng, zoom: 17.5);
 
     try {
@@ -657,6 +781,7 @@ class HomeMapController extends GetxController {
 
         if (lat != null && lng != null && currentPosition == null) {
           currentPosition = LatLng(lat, lng);
+          _restoredFromPrefs = true;
           _lastCamera = CameraPosition(target: currentPosition!, zoom: 15);
         }
         if (addr != null && addr.trim().isNotEmpty) {
@@ -964,6 +1089,7 @@ class HomeMapController extends GetxController {
     _publishDebounce?.cancel();
     _publishDebounce = Timer(const Duration(milliseconds: 60), () {
       markers.assignAll(_driverMarkers.values.toSet());
+      markersRevision.value++;
     });
   }
 

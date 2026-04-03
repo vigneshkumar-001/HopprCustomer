@@ -257,6 +257,31 @@ class Request {
     }
   }
 
+  /// Customer logout call that should never block UI navigation.
+  ///
+  /// Call this with `unawaited(...)` from the UI layer.
+  static Future<void> sendLogoutFireAndForget({
+    required String url,
+    required String? token,
+  }) async {
+    final dio = Dio(_baseOptions());
+    final headers = _buildHeaders(
+      token: token,
+      isTokenRequired: token != null && token.trim().isNotEmpty,
+    );
+
+    _logInfo('LOGOUT API: $url');
+    try {
+      await dio.post(
+        url,
+        data: const <String, dynamic>{},
+        options: Options(headers: headers),
+      );
+    } catch (e) {
+      _logError('Logout API failed: $e');
+    }
+  }
+
   static Future<dynamic> formData(
     String url,
     dynamic body,
