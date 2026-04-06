@@ -58,6 +58,12 @@ class _BookMapScreenState extends State<BookMapScreen> {
   void initState() {
     super.initState();
 
+    // Reset any previous selection from another booking flow.
+    driverController.selectedCarType.value = '';
+    driverController.selectedSharedDriver.value = null;
+    driverController.estimatedTime.value = '';
+    driverController.markerAdded.value = false;
+
     _startController.text = widget.pickupAddress;
     _destController.text = widget.destinationAddress;
 
@@ -118,12 +124,12 @@ class _BookMapScreenState extends State<BookMapScreen> {
           dropLat: resolvedDestination.latitude,
           dropLng: resolvedDestination.longitude,
         ),
-        driverController.getSharedDriverSearch(
-          pickupLat: resolvedPickup.latitude,
-          pickupLng: resolvedPickup.longitude,
-          dropLat: resolvedDestination.latitude,
-          dropLng: resolvedDestination.longitude,
-        ),
+        // driverController.getSharedDriverSearch(
+        //   pickupLat: resolvedPickup.latitude,
+        //   pickupLng: resolvedPickup.longitude,
+        //   dropLat: resolvedDestination.latitude,
+        //   dropLng: resolvedDestination.longitude,
+        // ),
       ]);
     });
   }

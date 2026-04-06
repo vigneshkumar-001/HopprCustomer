@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 enum CustomerSupportTicketStatus { opened, pending, solved, closed }
 
+enum CustomerSupportMessageSendState { sending, sent, failed }
+
 extension CustomerSupportTicketStatusX on CustomerSupportTicketStatus {
   String get label {
     switch (this) {
@@ -49,6 +51,8 @@ class CustomerSupportMessage {
   final DateTime createdAt;
   final bool fromCustomer;
   final String? imageUrl;
+  final String? localImagePath;
+  final CustomerSupportMessageSendState sendState;
 
   CustomerSupportMessage({
     required this.id,
@@ -56,6 +60,8 @@ class CustomerSupportMessage {
     required this.createdAt,
     required this.fromCustomer,
     this.imageUrl,
+    this.localImagePath,
+    this.sendState = CustomerSupportMessageSendState.sent,
   });
 }
 
@@ -382,6 +388,180 @@ class SupportTicketApi {
       attachments: attachments,
       createdAt: parseDt(json['createdAt']),
       updatedAt: parseDt(json['updatedAt']),
+    );
+  }
+}
+
+class SupportTicketMessageApi {
+  final String id; // _id
+  final String ticketId;
+  final String ticketMessage;
+  final List<String> ticketFiles;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+  final String? userId;
+  final String? adminId;
+
+  SupportTicketMessageApi({
+    required this.id,
+    required this.ticketId,
+    required this.ticketMessage,
+    required this.ticketFiles,
+    required this.createdAt,
+    required this.updatedAt,
+    this.userId,
+    this.adminId,
+  });
+
+  factory SupportTicketMessageApi.fromJson(Map<String, dynamic> json) {
+    DateTime parseDt(dynamic v) =>
+        DateTime.tryParse(v?.toString() ?? '') ?? DateTime.now();
+
+    final rawFiles = json['ticketFiles'];
+    final files =
+        rawFiles is List
+            ? rawFiles.map((e) => e.toString()).toList(growable: false)
+            : <String>[];
+
+    return SupportTicketMessageApi(
+      id: (json['_id'] ?? '').toString(),
+      ticketId: (json['ticketId'] ?? '').toString(),
+      ticketMessage: (json['ticketMessage'] ?? '').toString(),
+      ticketFiles: files,
+      createdAt: parseDt(json['createdAt'] ?? json['date']),
+      updatedAt: parseDt(json['updatedAt'] ?? json['date']),
+      userId:
+          (json['userId'] == null) ? null : (json['userId'] ?? '').toString(),
+      adminId:
+          (json['adminId'] == null) ? null : (json['adminId'] ?? '').toString(),
+    );
+  }
+}
+
+class SupportTicketDetailsData {
+  final SupportTicketApi? ticket;
+  final List<SupportTicketMessageApi> messages;
+
+  SupportTicketDetailsData({required this.ticket, required this.messages});
+
+  factory SupportTicketDetailsData.fromJson(Map<String, dynamic> json) {
+    final ticketJson = json['ticket'];
+    final ticket =
+        ticketJson is Map
+            ? SupportTicketApi.fromJson(Map<String, dynamic>.from(ticketJson))
+            : null;
+
+    final rawMessages = json['messages'];
+    final messages =
+        rawMessages is List
+            ? rawMessages
+                .whereType<Map>()
+                .map(
+                  (e) => SupportTicketMessageApi.fromJson(
+                    Map<String, dynamic>.from(e),
+                  ),
+                )
+                .toList(growable: false)
+            : <SupportTicketMessageApi>[];
+
+    return SupportTicketDetailsData(ticket: ticket, messages: messages);
+  }
+}
+
+class SupportTicketDetailsResponse {
+  final bool success;
+  final SupportTicketDetailsData? data;
+
+  SupportTicketDetailsResponse({required this.success, required this.data});
+
+  factory SupportTicketDetailsResponse.fromJson(Map<String, dynamic> json) {
+    final data = json['data'];
+    return SupportTicketDetailsResponse(
+      success: json['success'] == true,
+      data:
+          data is Map
+              ? SupportTicketDetailsData.fromJson(
+                Map<String, dynamic>.from(data),
+              )
+              : null,
+    );
+  }
+}
+
+class SupportSendMessageTicketApi {
+  final String id; // _id
+  final String ticketId;
+  final String userId;
+  final String userType;
+  final String status;
+
+  SupportSendMessageTicketApi({
+    required this.id,
+    required this.ticketId,
+    required this.userId,
+    required this.userType,
+    required this.status,
+  });
+
+  factory SupportSendMessageTicketApi.fromJson(Map<String, dynamic> json) {
+    return SupportSendMessageTicketApi(
+      id: (json['_id'] ?? '').toString(),
+      ticketId: (json['ticketId'] ?? '').toString(),
+      userId: (json['userId'] ?? '').toString(),
+      userType: (json['userType'] ?? '').toString(),
+      status: (json['status'] ?? '').toString(),
+    );
+  }
+}
+
+class SupportSendMessageData {
+  final SupportSendMessageTicketApi? ticket;
+  final SupportTicketMessageApi? message;
+
+  SupportSendMessageData({required this.ticket, required this.message});
+
+  factory SupportSendMessageData.fromJson(Map<String, dynamic> json) {
+    final ticketJson = json['ticket'];
+    final messageJson = json['message'];
+    return SupportSendMessageData(
+      ticket:
+          ticketJson is Map
+              ? SupportSendMessageTicketApi.fromJson(
+                Map<String, dynamic>.from(ticketJson),
+              )
+              : null,
+      message:
+          messageJson is Map
+              ? SupportTicketMessageApi.fromJson(
+                Map<String, dynamic>.from(messageJson),
+              )
+              : null,
+    );
+  }
+}
+
+class SupportSendMessageResponse {
+  final bool success;
+  final String message;
+  final SupportSendMessageData? data;
+
+  SupportSendMessageResponse({
+    required this.success,
+    required this.message,
+    required this.data,
+  });
+
+  factory SupportSendMessageResponse.fromJson(Map<String, dynamic> json) {
+    final data = json['data'];
+    return SupportSendMessageResponse(
+      success: json['success'] == true,
+      message: (json['message'] ?? '').toString(),
+      data:
+          data is Map
+              ? SupportSendMessageData.fromJson(
+                Map<String, dynamic>.from(data),
+              )
+              : null,
     );
   }
 }

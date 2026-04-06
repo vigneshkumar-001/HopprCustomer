@@ -104,7 +104,11 @@ class SharedMapState extends State<SharedMap>
             _lastPulseRebuildAt = now;
             if (mounted) setState(() {});
           })
-          ..repeat();
+          ..stop();
+
+    if (widget.pickupPosition != null) {
+      _pulseController.repeat();
+    }
   }
 
   Future<void> _loadMapStyle() async {
@@ -131,6 +135,18 @@ class SharedMapState extends State<SharedMap>
   @override
   void didUpdateWidget(covariant SharedMap oldWidget) {
     super.didUpdateWidget(oldWidget);
+
+    // Start/stop pulse ticker to avoid wasting battery when not needed.
+    final hadPickup = oldWidget.pickupPosition != null;
+    final hasPickup = widget.pickupPosition != null;
+    if (hadPickup != hasPickup) {
+      if (!hasPickup && _pulseController.isAnimating) {
+        _pulseController.stop();
+      } else if (hasPickup && !_pulseController.isAnimating) {
+        _pulseController.repeat();
+      }
+    }
+
     if (!widget.fitToBounds) return;
     if (_mapController == null) return;
 

@@ -246,7 +246,7 @@ class OrderConfirmController extends GetxController
   bool _seededPickupMarker = false;
   bool _seededDropMarker = false;
   Timer? _pulseTimer;
-  double _pulsePhase = 0.0;
+  DateTime _pulseStartAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   @override
   void onInit() {
@@ -1913,11 +1913,9 @@ class OrderConfirmController extends GetxController
 
   void _startPulseAnimation() {
     _pulseTimer?.cancel();
-    _pulseTimer = Timer.periodic(const Duration(milliseconds: 1400), (_) {
-      _pulsePhase += 0.18;
-      if (_pulsePhase > 1.0) {
-        _pulsePhase = 0.0;
-      }
+    _pulseStartAt = DateTime.now();
+    // Smooth pulse without over-updating the map.
+    _pulseTimer = Timer.periodic(const Duration(milliseconds: 120), (_) {
       _refreshPulseCircles();
     });
   }
@@ -1929,22 +1927,34 @@ class OrderConfirmController extends GetxController
         searching
             ? customerLatLng
             : (driverStartedRide.value ? customerToLatLng : customerLatLng);
-    final passiveTarget =
-        searching ? null : (driverStartedRide.value ? null : customerToLatLng);
+    // Only one pulse at a time:
+    // - Before pickup: pulse pickup
+    // - After pickup: pulse destination
+    // Destination marker can still show; just don't animate it.
 
-    void addPulse(String id, LatLng center, Color baseColor, bool active) {
-      final baseRadius = active ? 18.0 : 14.0;
-      final pulseRadius = active ? 40.0 : 28.0;
-      final radius = baseRadius + (pulseRadius * _pulsePhase);
-      final alpha = active ? (0.18 - (0.12 * _pulsePhase)) : 0.08;
+    if (activeTarget == null) {
+      circles.clear();
+      return;
+    }
+
+    final now = DateTime.now();
+    final elapsedMs = now.difference(_pulseStartAt).inMilliseconds;
+    const periodMs = 1400;
+    final phase = ((elapsedMs % periodMs) / periodMs).clamp(0.0, 1.0);
+
+    void addPulse(String id, LatLng center, Color baseColor) {
+      const baseRadius = 18.0;
+      const pulseRadius = 40.0;
+      final radius = baseRadius + (pulseRadius * phase);
+      final alpha = (0.18 * (1.0 - phase)).clamp(0.0, 0.18);
 
       items.add(
         Circle(
           circleId: CircleId('${id}_inner'),
           center: center,
-          radius: active ? 16 : 14,
-          fillColor: baseColor.withOpacity(active ? 0.14 : 0.08),
-          strokeColor: baseColor.withOpacity(active ? 0.18 : 0.10),
+          radius: 16,
+          fillColor: baseColor.withOpacity(0.14),
+          strokeColor: baseColor.withOpacity(0.18),
           strokeWidth: 1,
         ),
       );
@@ -1953,19 +1963,14 @@ class OrderConfirmController extends GetxController
           circleId: CircleId('${id}_pulse'),
           center: center,
           radius: radius,
-          fillColor: baseColor.withOpacity(alpha.clamp(0.0, 1.0)),
+          fillColor: baseColor.withOpacity(alpha),
           strokeColor: baseColor.withOpacity((alpha + 0.08).clamp(0.0, 1.0)),
           strokeWidth: 1,
         ),
       );
     }
 
-    if (activeTarget != null) {
-      addPulse('active_target', activeTarget, Colors.black, true);
-    }
-    if (passiveTarget != null) {
-      addPulse('passive_target', passiveTarget, Colors.black54, false);
-    }
+    addPulse('active_target', activeTarget, Colors.black);
 
     circles.assignAll(items);
   }

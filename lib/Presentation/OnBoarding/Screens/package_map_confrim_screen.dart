@@ -172,7 +172,6 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
   Timer? _pulseTimer;
   double _pulsePhase = 0.0;
-  LatLng? _pulseCenter;
 
   late final AnimationController _searchingAnimController;
   Timer? _searchingElapsedTimer;
@@ -366,6 +365,10 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     final drop = _customerToLatLang;
     if (pickup == null && drop == null) return;
 
+    // UX: during "waiting for pickup/driver", show only the pickup pin.
+    // Once the package is collected / in transit, show the destination pin.
+    final showDrop = driverStartedRide || destinationReached;
+
     final next = <Marker>{
       ..._markers.where(
         (m) =>
@@ -391,7 +394,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       );
     }
 
-    if (drop != null) {
+    if (showDrop && drop != null) {
       next.add(
         Marker(
           markerId: const MarkerId("drop_marker"),
@@ -427,6 +430,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     final pickup = _customerLatLng;
     final drop = _customerToLatLang;
     final showPickup = !driverStartedRide && !destinationReached;
+    final showDrop = driverStartedRide || destinationReached;
 
     final next = <Marker>{
       ..._markers.where(
@@ -456,7 +460,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       );
     }
 
-    if (drop != null) {
+    if (showDrop && drop != null) {
       next.add(
         Marker(
           markerId: const MarkerId("drop_marker"),
@@ -484,7 +488,13 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   }
 
   void _updatePulseCircle() {
-    final center = _pulseCenter ?? _currentDriverLatLng ?? _customerLatLng;
+    // Pulse should highlight the active target:
+    // - Before pickup: pickup point
+    // - After pickup (in transit): destination point
+    final LatLng? center =
+        (driverStartedRide || destinationReached)
+            ? (_customerToLatLang ?? _currentDriverLatLng ?? _customerLatLng)
+            : (_customerLatLng ?? _currentDriverLatLng ?? _customerToLatLang);
     if (center == null) return;
     if (!mounted) return;
 
@@ -728,6 +738,23 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   @override
   void initState() {
     super.initState();
+
+    // Seed pickup/drop immediately from the data we already have, so the
+    // "Your pickup spot" marker is reliable even if socket payload is delayed
+    // or missing coordinates.
+    _customerLatLng =
+        LatLng(widget.senderData.latitude, widget.senderData.longitude);
+    _customerToLatLang =
+        LatLng(widget.receiverData.latitude, widget.receiverData.longitude);
+    PickupAddress =
+        widget.senderData.mapAddress.isNotEmpty
+            ? widget.senderData.mapAddress
+            : widget.senderData.address;
+    DropAddress =
+        widget.receiverData.mapAddress.isNotEmpty
+            ? widget.receiverData.mapAddress
+            : widget.receiverData.address;
+
     _searchingAnimController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1600),
@@ -743,6 +770,10 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     _bootSocket();
     _startPulseAnimation();
     WidgetsBinding.instance.addPostFrameCallback((_) => _calculateLineHeight());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _seedPickupDropMarkers();
+      _syncPhaseMarkers();
+    });
     startDriverSearch();
   }
 
@@ -1136,7 +1167,6 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   }
 
   void _updateDriverMarker(LatLng position, double bearing) {
-    _pulseCenter = position;
     _driverMarker = Marker(
       markerId: const MarkerId("driver_marker"),
       position: position,
@@ -1476,6 +1506,11 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
   @override
   Widget build(BuildContext context) {
+    final initialTarget =
+        _customerLatLng ??
+        _currentPosition ??
+        const LatLng(9.9144908, 78.0970899);
+
     return NoInternetOverlay(
       child: WillPopScope(
         onWillPop: () async {
@@ -1502,7 +1537,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                   onCameraMoveStarted: _onUserMapGesture,
                   onTap: (_) => _onUserMapGesture(),
                   initialCameraPosition: CameraPosition(
-                    target: _currentPosition ?? LatLng(9.9144908, 78.0970899),
+                    target: initialTarget,
                     zoom: math.max(_currentZoomLevel, _preferredInitialZoom),
                   ),
                   markers: _markers,
@@ -1513,11 +1548,12 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                     ).loadString('assets/map_style/map_style1.json');
                     _mapController?.setMapStyle(style);
 
-                    if (_currentPosition != null) {
+                    final focus = _customerLatLng ?? _currentPosition;
+                    if (focus != null) {
                       _mapController?.moveCamera(
                         CameraUpdate.newCameraPosition(
                           CameraPosition(
-                            target: _currentPosition!,
+                            target: focus,
                             zoom: math.max(
                               _currentZoomLevel,
                               _preferredInitialZoom,

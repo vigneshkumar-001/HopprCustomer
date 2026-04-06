@@ -72,6 +72,9 @@ class HomeMapController extends GetxController {
   Timer? _persistDebounce;
   Timer? _pulseTimer;
   DateTime _pulseStartAt = DateTime.fromMillisecondsSinceEpoch(0);
+  LatLng? _lastPulseCenter;
+  double _lastPulseRadius = -1;
+  double _lastPulseAlpha = -1;
 
   LatLng? get devicePosition => _devicePosition.value;
 
@@ -140,8 +143,8 @@ class HomeMapController extends GetxController {
   void _startMyLocationPulse() {
     _pulseTimer?.cancel();
     _pulseStartAt = DateTime.now();
-    // Higher tick-rate so the animation feels smooth (not "stuck").
-    _pulseTimer = Timer.periodic(const Duration(milliseconds: 60), (_) {
+    // Keep the pulse smooth without over-updating the GoogleMap platform view.
+    _pulseTimer = Timer.periodic(const Duration(milliseconds: 120), (_) {
       _refreshMyLocationPulseCircles();
     });
   }
@@ -149,20 +152,29 @@ class HomeMapController extends GetxController {
   void _refreshMyLocationPulseCircles() {
     // Only show when permission is granted (myLocationEnabled is on).
     if (!gate.isReady.value) {
-      circles.clear();
+      if (circles.isNotEmpty) circles.clear();
       return;
     }
 
     // Prefer live device stream (matches blue dot), fallback to last known.
     final now = DateTime.now();
+    final hasFreshDevicePos =
+        devicePosition != null &&
+        _devicePositionAt != null &&
+        now.difference(_devicePositionAt!).inSeconds <= 10;
+
+    // If we're showing a restored-from-prefs map position, avoid rendering the
+    // pulsing ring until we have a fresh live GPS point. Otherwise the ring
+    // "jumps" when live GPS arrives.
+    if (_restoredFromPrefs && !hasFreshDevicePos) {
+      if (circles.isNotEmpty) circles.clear();
+      return;
+    }
+
     final LatLng? center =
-        (devicePosition != null &&
-                _devicePositionAt != null &&
-                now.difference(_devicePositionAt!).inSeconds <= 10)
-            ? devicePosition
-            : currentPosition;
+        hasFreshDevicePos ? devicePosition : currentPosition;
     if (center == null) {
-      circles.clear();
+      if (circles.isNotEmpty) circles.clear();
       return;
     }
 
@@ -174,6 +186,26 @@ class HomeMapController extends GetxController {
     // One ring: small -> medium -> large, and fade out.
     final radius = 14.0 + (62.0 * phase);
     final alpha = (0.34 * (1.0 - phase)).clamp(0.0, 0.34);
+
+    // Skip emitting tiny updates to reduce platform-view churn (prevents
+    // visible stutter/jumps on some devices).
+    final prevCenter = _lastPulseCenter;
+    final centerMovedMeters =
+        prevCenter == null
+            ? double.infinity
+            : _haversineMeters(prevCenter, center);
+    final radiusChanged = (_lastPulseRadius - radius).abs();
+    final alphaChanged = (_lastPulseAlpha - alpha).abs();
+    final shouldEmit =
+        circles.isEmpty ||
+        centerMovedMeters >= 1.0 ||
+        radiusChanged >= 1.2 ||
+        alphaChanged >= 0.03;
+    if (!shouldEmit) return;
+
+    _lastPulseCenter = center;
+    _lastPulseRadius = radius;
+    _lastPulseAlpha = alpha;
 
     circles.assignAll({
       Circle(

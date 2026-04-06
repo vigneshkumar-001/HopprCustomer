@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:get/get.dart';
 import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Presentation/CustomerSupport/controller/customer_support_controller.dart';
@@ -73,7 +74,7 @@ class _CustomerSupportListScreenState extends State<CustomerSupportListScreen> {
               child: Obx(() {
                 if (c.isLoading.value && c.tickets.isEmpty) {
                   return const Center(
-                    child: CircularProgressIndicator(color: Colors.black),
+                    child: CupertinoActivityIndicator(radius: 14),
                   );
                 }
 
@@ -85,6 +86,22 @@ class _CustomerSupportListScreenState extends State<CustomerSupportListScreen> {
                         c.error.value,
                         textAlign: TextAlign.center,
                         style: const TextStyle(
+                          color: Color(0xFF667085),
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  );
+                }
+
+                if (c.tickets.isEmpty) {
+                  return const Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(24),
+                      child: Text(
+                        'No tickets yet',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
                           color: Color(0xFF667085),
                           fontWeight: FontWeight.w600,
                         ),

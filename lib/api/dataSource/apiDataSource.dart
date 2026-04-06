@@ -37,6 +37,9 @@ typedef SupportCommonDetailsResult =
 typedef SupportMyTicketsResult = Either<Failure, SupportMyTicketsResponse>;
 typedef SupportCreateTicketResult =
     Either<Failure, SupportCreateTicketResponse>;
+typedef SupportMyTicketDetailsResult =
+    Either<Failure, SupportTicketDetailsResponse>;
+typedef SupportSendMessageResult = Either<Failure, SupportSendMessageResponse>;
 
 abstract class BaseApiDataSource {
   Future<Either<Failure, LoginResponse>> mobileNumberLogin(
@@ -597,6 +600,48 @@ class ApiDataSource extends BaseApiDataSource {
     }
   }
 
+  Future<SupportMyTicketDetailsResult> getMySupportTicketDetails({
+    required String ticketId,
+  }) async {
+    try {
+      final id = ticketId.trim();
+      if (id.isEmpty) {
+        return Left(ServerFailure('Ticket id is required'));
+      }
+
+      final url = '${ApiConsents.supportMyTickets}/$id';
+      final response = await Request.sendGetRequest(url, {}, 'GET', true);
+
+      if (response is! Response) {
+        return Left(ServerFailure('Unexpected response from server'));
+      }
+
+      if (response.statusCode != 200) {
+        final msg =
+            (response.data is Map<String, dynamic>)
+                ? (response.data['message'] ?? '').toString()
+                : '';
+        return Left(
+          ServerFailure(msg.isEmpty ? 'Failed to load ticket' : msg),
+        );
+      }
+
+      final data = response.data;
+      if (data is! Map<String, dynamic>) {
+        return Left(ServerFailure('Invalid response format'));
+      }
+
+      final parsed = SupportTicketDetailsResponse.fromJson(data);
+      if (!parsed.success) {
+        return Left(ServerFailure((data['message'] ?? 'Failed').toString()));
+      }
+      return Right(parsed);
+    } catch (e, st) {
+      AppLogger.log.e("getMySupportTicketDetails error: $e\n$st");
+      return Left(ServerFailure('Something went wrong'));
+    }
+  }
+
   Future<SupportCreateTicketResult> createSupportTicket({
     required String categoryId,
     required String subcategoryId,
@@ -649,6 +694,62 @@ class ApiDataSource extends BaseApiDataSource {
       return Right(parsed);
     } catch (e, st) {
       AppLogger.log.e("createSupportTicket error: $e\n$st");
+      return Left(ServerFailure('Something went wrong'));
+    }
+  }
+
+  Future<SupportSendMessageResult> sendSupportTicketMessage({
+    required String ticketId,
+    required String userType,
+    required String message,
+    List<String> attachments = const <String>[],
+  }) async {
+    try {
+      final id = ticketId.trim();
+      if (id.isEmpty) {
+        return Left(ServerFailure('Ticket id is required'));
+      }
+
+      final url = '${ApiConsents.supportCustomerTickets}/$id/message';
+      final payload = <String, dynamic>{
+        'userType': userType.trim(),
+        'message': message.trim(),
+        'attachments': attachments,
+      };
+
+      final response = await Request.sendRequest(url, payload, 'Post', true);
+
+      if (response is DioException) {
+        return Left(ServerFailure(response.message ?? 'Network error'));
+      }
+
+      if (response is! Response) {
+        return Left(ServerFailure('Unexpected response from server'));
+      }
+
+      final status = response.statusCode ?? 0;
+      if (status != 200 && status != 201) {
+        final msg =
+            (response.data is Map<String, dynamic>)
+                ? (response.data['message'] ?? '').toString()
+                : '';
+        return Left(
+          ServerFailure(msg.isEmpty ? 'Failed to send message' : msg),
+        );
+      }
+
+      final data = response.data;
+      if (data is! Map<String, dynamic>) {
+        return Left(ServerFailure('Invalid response format'));
+      }
+
+      final parsed = SupportSendMessageResponse.fromJson(data);
+      if (!parsed.success) {
+        return Left(ServerFailure((data['message'] ?? 'Failed').toString()));
+      }
+      return Right(parsed);
+    } catch (e, st) {
+      AppLogger.log.e("sendSupportTicketMessage error: $e\n$st");
       return Left(ServerFailure('Something went wrong'));
     }
   }
@@ -725,7 +826,7 @@ class ApiDataSource extends BaseApiDataSource {
       final url = ApiConsents.getwalletBalance;
       AppLogger.log.i(url);
 
-      dynamic response = await Request.sendGetRequest(url, {}, 'GET', false);
+      dynamic response = await Request.sendGetRequest(url, {}, 'GET', true);
 
       if (response.statusCode == 200) {
         if (response.data['success'] == true) {

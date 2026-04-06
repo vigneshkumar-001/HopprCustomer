@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math' as math;
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
@@ -85,9 +84,9 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
     'ride_screen_control',
   );
 
-  late final AnimationController _searchingAnimController;
   Timer? _searchingElapsedTimer;
   int _searchingElapsedSeconds = 0;
+  Worker? _rideSideEffectsWorker;
 
   double? _toDouble(dynamic v) {
     if (v == null) return null;
@@ -146,16 +145,45 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
       if (!mounted) return;
       c.bindContext(context);
       c.startDriverSearchTimer(); // timer will always update UI
+      _setupRideSideEffectsWorker();
     });
 
-    _searchingAnimController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1600),
-    )..repeat();
     _searchingElapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       setState(() => _searchingElapsedSeconds += 1);
     });
+  }
+
+  void _setupRideSideEffectsWorker() {
+    _rideSideEffectsWorker?.dispose();
+    _rideSideEffectsWorker = everAll(
+      <RxInterface<dynamic>>[
+        c.isDriverConfirmed,
+        c.driverStartedRide,
+        c.destinationReached,
+        c.isTripCancelled,
+      ],
+      (_) {
+        if (!mounted) return;
+        _applyRideSideEffects();
+      },
+    );
+    _applyRideSideEffects();
+  }
+
+  void _applyRideSideEffects() {
+    // Battery: keep screen on only while waiting for a driver (pre-ride).
+    final waitingForDriver =
+        !c.isDriverConfirmed.value &&
+        !c.driverStartedRide.value &&
+        !c.destinationReached.value &&
+        !c.isTripCancelled.value;
+
+    unawaited(_setKeepScreenOn(waitingForDriver));
+
+    if (!waitingForDriver) {
+      _searchingElapsedTimer?.cancel();
+    }
   }
 
   Future<String?> _handleCancelRide({
@@ -185,7 +213,7 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
     _startController.dispose();
     _destController.dispose();
     _searchingElapsedTimer?.cancel();
-    _searchingAnimController.dispose();
+    _rideSideEffectsWorker?.dispose();
     _setKeepScreenOn(false);
     WidgetsBinding.instance.removeObserver(this);
     Get.delete<OrderConfirmController>(tag: widget.bookingId, force: true);
@@ -195,7 +223,7 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      _setKeepScreenOn(true);
+      _applyRideSideEffects();
     } else if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
@@ -1250,248 +1278,235 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
       );
     }
 
-    return AnimatedBuilder(
-      animation: _searchingAnimController,
-      builder: (context, _) {
-        final v = _searchingAnimController.value;
-        final oscillate = (math.sin(v * math.pi * 2) + 1) / 2; // 0..1
-        final dots = '.' * (1 + (v * 3).floor());
-        final progressValue = 0.15 + (0.75 * oscillate);
-
-        return Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 5),
-          child: Column(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(18),
-                  gradient: LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [
-                      Colors.black,
-                      Colors.black.withOpacity(0.92),
-                      Colors.black.withOpacity(0.86),
-                    ],
-                  ),
-                ),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+    final dots = '.' * (1 + (t % 3));
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 5),
+      child: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(18),
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  Colors.black,
+                  Colors.black.withOpacity(0.92),
+                  Colors.black.withOpacity(0.86),
+                ],
+              ),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Stack(
+                  alignment: Alignment.center,
                   children: [
-                    Stack(
-                      alignment: Alignment.center,
-                      children: [
-                        Container(
-                          height: 56,
-                          width: 56,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: Colors.white.withOpacity(0.10),
-                            border: Border.all(
-                              color: Colors.white.withOpacity(0.18),
-                            ),
-                          ),
+                    Container(
+                      height: 56,
+                      width: 56,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.white.withOpacity(0.10),
+                        border: Border.all(
+                          color: Colors.white.withOpacity(0.18),
                         ),
-                        Container(
-                          height: 44,
-                          width: 44,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: Colors.white.withOpacity(0.15),
-                          ),
-                          child: const Stack(
-                            alignment: Alignment.center,
-                            children: [
-                              CupertinoActivityIndicator(radius: 12),
-                              Icon(
-                                Icons.local_taxi_outlined,
-                                color: Colors.white,
-                                size: 22,
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
+                      ),
                     ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                    Container(
+                      height: 44,
+                      width: 44,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.white.withOpacity(0.15),
+                      ),
+                      child: const Stack(
+                        alignment: Alignment.center,
                         children: [
-                          const Text(
-                            'Finding a driver',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 16,
-                              fontWeight: FontWeight.w800,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Searching nearby drivers$dots',
-                            style: TextStyle(
-                              color: Colors.white.withOpacity(0.82),
-                              fontSize: 13,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                          const SizedBox(height: 10),
-                          ClipRRect(
-                            borderRadius: BorderRadius.circular(12),
-                            child: LinearProgressIndicator(
-                              minHeight: 6,
-                              value: progressValue,
-                              backgroundColor: Colors.white.withOpacity(0.18),
-                              valueColor: const AlwaysStoppedAnimation<Color>(
-                                Colors.white,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Row(
-                            children: [
-                              Icon(
-                                Icons.info_outline,
-                                size: 16,
-                                color: Colors.white.withOpacity(0.80),
-                              ),
-                              const SizedBox(width: 6),
-                              Expanded(
-                                child: Text(
-                                  'Arrival time shows after a driver accepts',
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    color: Colors.white.withOpacity(0.80),
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                ),
-                              ),
-                            ],
+                          CupertinoActivityIndicator(radius: 12),
+                          Icon(
+                            Icons.local_taxi_outlined,
+                            color: Colors.white,
+                            size: 22,
                           ),
                         ],
                       ),
                     ),
                   ],
                 ),
-              ),
-              Image.asset(AppImages.confirmCar, height: 150, width: 220),
-
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 14,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(18),
-                  border: Border.all(
-                    color: Colors.black.withOpacity(0.08),
-                    width: 1.2,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.05),
-                      blurRadius: 16,
-                      offset: const Offset(0, 10),
-                    ),
-                  ],
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      "What's happening",
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w800,
-                        color: Colors.black,
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Finding a driver',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 6),
-                    buildStep(
-                      title: 'Requesting nearby drivers',
-                      isDone: step1Done,
-                      isActive: !step1Done,
-                    ),
-                    buildStep(
-                      title: 'Finding the best price',
-                      isDone: step2Done,
-                      isActive: step1Done && !step2Done,
-                    ),
-                    buildStep(
-                      title: 'Confirming your driver',
-                      isDone: step3Done,
-                      isActive: step2Done && !step3Done,
-                    ),
-                    const SizedBox(height: 6),
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: Colors.black.withOpacity(0.04),
-                        borderRadius: BorderRadius.circular(14),
+                      const SizedBox(height: 4),
+                      Text(
+                        'Searching nearby drivers$dots',
+                        style: TextStyle(
+                          color: Colors.white.withOpacity(0.82),
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                        ),
                       ),
-                      child: Row(
+                      const SizedBox(height: 10),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: LinearProgressIndicator(
+                          minHeight: 6,
+                          backgroundColor: Colors.white.withOpacity(0.18),
+                          valueColor: const AlwaysStoppedAnimation<Color>(
+                            Colors.white,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
                         children: [
-                          const Icon(Icons.info_outline, size: 18),
-                          const SizedBox(width: 10),
+                          Icon(
+                            Icons.info_outline,
+                            size: 16,
+                            color: Colors.white.withOpacity(0.80),
+                          ),
+                          const SizedBox(width: 6),
                           Expanded(
                             child: Text(
-                              "Keep your phone reachable. We'll confirm a driver shortly.",
+                              'Arrival time shows after a driver accepts',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                               style: TextStyle(
+                                color: Colors.white.withOpacity(0.80),
                                 fontSize: 12,
-                                color: Colors.grey.shade800,
                                 fontWeight: FontWeight.w500,
                               ),
                             ),
                           ),
                         ],
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
+              ],
+            ),
+          ),
+          Image.asset(AppImages.confirmCar, height: 150, width: 220),
+
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(
+                color: Colors.black.withOpacity(0.08),
+                width: 1.2,
               ),
-              const SizedBox(height: 14),
-              _addressBox(),
-              const SizedBox(height: 14),
-              Obx(() {
-                final loading = c.driverSearchController.isCancelLoading.value;
-                return AppButtons.button(
-                  hasBorder: true,
-                  borderColor: AppColors.commonBlack.withOpacity(0.2),
-                  buttonColor: AppColors.commonWhite,
-                  textColor: AppColors.cancelRideColor,
-                  isLoading: loading,
-                  onTap:
-                      loading
-                          ? null
-                          : () {
-                            AppButtons.showCancelRideBottomSheet(
-                              context,
-                              onConfirmCancel: (String selectedReason) async {
-                                final id =
-                                    c
-                                        .driverSearchController
-                                        .carBooking
-                                        .value
-                                        ?.bookingId ??
-                                    c.bookingId;
-                                return _handleCancelRide(
-                                  bookingId: id,
-                                  selectedReason: selectedReason,
-                                );
-                              },
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.05),
+                  blurRadius: 16,
+                  offset: const Offset(0, 10),
+                ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  "What's happening",
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w800,
+                    color: Colors.black,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                buildStep(
+                  title: 'Requesting nearby drivers',
+                  isDone: step1Done,
+                  isActive: !step1Done,
+                ),
+                buildStep(
+                  title: 'Finding the best price',
+                  isDone: step2Done,
+                  isActive: step1Done && !step2Done,
+                ),
+                buildStep(
+                  title: 'Confirming your driver',
+                  isDone: step3Done,
+                  isActive: step2Done && !step3Done,
+                ),
+                const SizedBox(height: 6),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.04),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.info_outline, size: 18),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          "Keep your phone reachable. We'll confirm a driver shortly.",
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey.shade800,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+          _addressBox(),
+          const SizedBox(height: 14),
+          Obx(() {
+            final loading = c.driverSearchController.isCancelLoading.value;
+            return AppButtons.button(
+              hasBorder: true,
+              borderColor: AppColors.commonBlack.withOpacity(0.2),
+              buttonColor: AppColors.commonWhite,
+              textColor: AppColors.cancelRideColor,
+              isLoading: loading,
+              onTap:
+                  loading
+                      ? null
+                      : () {
+                        AppButtons.showCancelRideBottomSheet(
+                          context,
+                          onConfirmCancel: (String selectedReason) async {
+                            final id =
+                                c
+                                    .driverSearchController
+                                    .carBooking
+                                    .value
+                                    ?.bookingId ??
+                                c.bookingId;
+                            return _handleCancelRide(
+                              bookingId: id,
+                              selectedReason: selectedReason,
                             );
                           },
-                  text: 'Cancel Ride',
-                );
-              }),
-            ],
-          ),
-        );
-      },
+                        );
+                      },
+              text: 'Cancel Ride',
+            );
+          }),
+        ],
+      ),
     );
   }
 
