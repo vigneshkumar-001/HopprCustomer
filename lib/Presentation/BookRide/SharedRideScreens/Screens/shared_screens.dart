@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
-import 'dart:ui' as ui;
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/cupertino.dart';
@@ -60,6 +59,14 @@ class SharedScreens extends StatefulWidget {
   final LatLng pickupPosition; // initial pickup
   final LatLng dropPosition; // initial drop
 
+  /// When resuming an active booking, pass initial ride state so SharedScreens
+  /// doesn't fallback to pickup/waiting UI.
+  final String? initialStatus;
+  final bool initialRideStarted;
+  final bool initialDestinationReached;
+  final String? resumeDriverId;
+  final LatLng? initialDriverPosition;
+
   /// Optional initial route (decoded polyline from previous page)
   final List<LatLng> routePoints;
 
@@ -78,6 +85,11 @@ class SharedScreens extends StatefulWidget {
     required this.initialPosition,
     required this.pickupPosition,
     required this.dropPosition,
+    this.initialStatus,
+    this.initialRideStarted = false,
+    this.initialDestinationReached = false,
+    this.resumeDriverId,
+    this.initialDriverPosition,
     this.routePoints = const [],
     this.onCancel,
     required this.carType,
@@ -109,6 +121,8 @@ class _SharedScreensState extends State<SharedScreens>
   BitmapDescriptor? _dropIcon;
   BitmapDescriptor? _driverIcon;
   BitmapDescriptor? _pickupWaitingLabelIcon;
+  BitmapDescriptor? _pickupLabelIcon;
+  BitmapDescriptor? _dropLabelIcon;
 
   Set<Marker> _markers = <Marker>{};
   Set<Polyline> _polylines = <Polyline>{};
@@ -184,6 +198,8 @@ class _SharedScreensState extends State<SharedScreens>
   final int _maxQueue = 24;
   final Duration _motionStep = const Duration(milliseconds: 60);
   final Duration _visualDelay = const Duration(milliseconds: 700);
+  static const double _minMoveMeters = 0.3;
+  DateTime _lastDriverLocationLogAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   // ---------- CAMERA (order_confirm style) ----------
   double _currentZoomLevel = 16.6;
@@ -268,7 +284,7 @@ class _SharedScreensState extends State<SharedScreens>
       _locationToggleFit = false;
     });
 
-    _noDriverFoundTimer = Timer(const Duration(seconds: 30), () async {
+    _noDriverFoundTimer = Timer(const Duration(seconds: 60), () async {
       if (!mounted) return;
       if (isDriverConfirmed) return;
 
@@ -308,14 +324,17 @@ class _SharedScreensState extends State<SharedScreens>
   void initState() {
     super.initState();
 
+    _bootstrapFromInitialRideState();
     _loadMarkerIcons();
     _setupSocketListeners();
 
     _startController.text = widget.pickupAddress;
     _destController.text = widget.destinationAddress;
 
-    // Start waiting timer immediately for shared flow
-    startDriverSearch();
+    // Start waiting timer only for fresh bookings (no driver yet).
+    if (isWaitingForDriver && !isDriverConfirmed && !driverStartedRide) {
+      startDriverSearch();
+    }
   }
 
   @override
@@ -328,34 +347,12 @@ class _SharedScreensState extends State<SharedScreens>
   }
 
   // ---------- ASSET → BITMAP (resize) ----------
-  Future<BitmapDescriptor> _bitmapFromAsset(
-    String assetPath, {
-    double widthDp = 42,
-  }) async {
-    final dpr = ui.window.devicePixelRatio;
-    final targetWidth = (widthDp * dpr).round().clamp(1, 4096);
-    final data = await rootBundle.load(assetPath);
-    final bytes = data.buffer.asUint8List();
-
-    final codec = await ui.instantiateImageCodec(
-      bytes,
-      targetWidth: targetWidth,
-    );
-    final frame = await codec.getNextFrame();
-    final resizedBytes =
-        (await frame.image.toByteData(
-          format: ui.ImageByteFormat.png,
-        ))!.buffer.asUint8List();
-
-    return BitmapDescriptor.fromBytes(resizedBytes);
-  }
-
   Future<void> _loadMarkerIcons() async {
     // Compact pickup/drop pins (assets), keep driver icon custom.
     try {
       _pickupIcon = await CompactMarkerIcons.assetPin(
         assetPath: AppImages.pinLocation,
-        widthDp: 26,
+        widthDp: MapUiDefaults.pickupDropPinWidthDp,
       );
     } catch (_) {
       _pickupIcon = null;
@@ -363,22 +360,58 @@ class _SharedScreensState extends State<SharedScreens>
     try {
       _dropIcon = await CompactMarkerIcons.assetPin(
         assetPath: AppImages.rectangleDest,
-        widthDp: 22,
+        widthDp: MapUiDefaults.pickupDropPinWidthDp,
       );
     } catch (_) {
       _dropIcon = null;
     }
     try {
       _pickupWaitingLabelIcon = await CompactMarkerIcons.labeledPin(
-        label: 'Your pickup spot',
+        label: MapUiDefaults.placeLabel(
+          widget.pickupAddress,
+          fallback: 'Pickup',
+        ),
         assetPath: AppImages.pinLocation,
-        bubbleWidthDp: 126,
-        bubbleHeightDp: 38,
-        pinWidthDp: 26,
-        fontSizeDp: 11.5,
+        bubbleWidthDp: MapUiDefaults.pickupDropBubbleWidthDp,
+        bubbleHeightDp: MapUiDefaults.pickupDropBubbleHeightDp,
+        pinWidthDp: MapUiDefaults.pickupDropPinWidthDp,
+        fontSizeDp: MapUiDefaults.pickupDropFontSizeDp,
+        textAlign: TextAlign.left,
       );
     } catch (_) {
       _pickupWaitingLabelIcon = _pickupIcon;
+    }
+    try {
+      _pickupLabelIcon = await CompactMarkerIcons.labeledPin(
+        label: MapUiDefaults.placeLabel(
+          widget.pickupAddress,
+          fallback: 'Pickup',
+        ),
+        assetPath: AppImages.pinLocation,
+        bubbleWidthDp: MapUiDefaults.pickupDropBubbleWidthDp,
+        bubbleHeightDp: MapUiDefaults.pickupDropBubbleHeightDp,
+        pinWidthDp: MapUiDefaults.pickupDropPinWidthDp,
+        fontSizeDp: MapUiDefaults.pickupDropFontSizeDp,
+        textAlign: TextAlign.left,
+      );
+    } catch (_) {
+      _pickupLabelIcon = _pickupIcon;
+    }
+    try {
+      _dropLabelIcon = await CompactMarkerIcons.labeledPin(
+        label: MapUiDefaults.placeLabel(
+          widget.destinationAddress,
+          fallback: 'Drop',
+        ),
+        assetPath: AppImages.rectangleDest,
+        bubbleWidthDp: MapUiDefaults.pickupDropBubbleWidthDp,
+        bubbleHeightDp: MapUiDefaults.pickupDropBubbleHeightDp,
+        pinWidthDp: MapUiDefaults.pickupDropPinWidthDp,
+        fontSizeDp: MapUiDefaults.pickupDropFontSizeDp,
+        textAlign: TextAlign.left,
+      );
+    } catch (_) {
+      _dropLabelIcon = _dropIcon;
     }
 
     final t = widget.carType.toLowerCase();
@@ -386,7 +419,14 @@ class _SharedScreensState extends State<SharedScreens>
         (t.contains('bike') || t.contains('package'))
             ? AppImages.packageBike
             : AppImages.carHop;
-    _driverIcon = await _bitmapFromAsset(driverAsset, widthDp: 28);
+    try {
+      _driverIcon = await CompactMarkerIcons.assetCircleBadge(
+        assetPath: driverAsset,
+        diameterDp: MapUiDefaults.vehicleBadgeDiameterDp,
+      );
+    } catch (_) {
+      _driverIcon = null;
+    }
 
     _initRouteAndMarkers();
     if (!mounted) return;
@@ -395,11 +435,71 @@ class _SharedScreensState extends State<SharedScreens>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final mapState = _mapKey.currentState;
       if (mapState == null) return;
+      if (_driverLatLng != null) {
+        _updateDriverMarker(_driverLatLng!);
+      }
+      if (driverStartedRide) {
+        // Resumed ride: show pickup→drop route immediately.
+        _setRoutePickupToDrop();
+      } else if (isDriverConfirmed && _driverLatLng != null) {
+        // Driver assigned but ride not started yet.
+        _setRouteDriverToPickup();
+      }
       mapState.animateTo(
-        target: widget.pickupPosition,
+        target:
+            _driverLatLng ??
+            (driverStartedRide ? widget.dropPosition : widget.pickupPosition),
         zoom: MapUiDefaults.focusZoom,
       );
     });
+  }
+
+  bool _statusSuggestsRideStarted(String? status) {
+    final s = (status ?? '').trim().toUpperCase();
+    if (s.isEmpty) return false;
+    return s.contains('RIDE_IN_PROGRESS') ||
+        s.contains('TRIP_IN_PROGRESS') ||
+        s.contains('IN_PROGRESS') ||
+        s.contains('RIDE_STARTED');
+  }
+
+  bool _statusSuggestsDestinationReached(String? status) {
+    final s = (status ?? '').trim().toUpperCase();
+    if (s.isEmpty) return false;
+    return s.contains('DESTINATION_REACHED') ||
+        s.contains('COMPLETED') ||
+        s.contains('ENDED') ||
+        s.contains('FINISHED');
+  }
+
+  void _bootstrapFromInitialRideState() {
+    final bool hasInitialDriver =
+        (widget.resumeDriverId ?? '').toString().trim().isNotEmpty ||
+        widget.initialDriverPosition != null;
+
+    final bool started =
+        widget.initialRideStarted ||
+        _statusSuggestsRideStarted(widget.initialStatus);
+    final bool reached =
+        widget.initialDestinationReached ||
+        _statusSuggestsDestinationReached(widget.initialStatus);
+
+    if (widget.initialDriverPosition != null) {
+      _driverLatLng = widget.initialDriverPosition;
+    }
+
+    if (hasInitialDriver || started || reached) {
+      isDriverConfirmed = hasInitialDriver;
+      isWaitingForDriver = false;
+      noDriverFound = false;
+    }
+
+    if (reached) destinationReached = true;
+    if (started || reached) {
+      driverStartedRide = true;
+      _driverArrived = true;
+      _nearDestination = false;
+    }
   }
 
   // ---------- INITIAL MARKERS + ROUTE ----------
@@ -410,39 +510,41 @@ class _SharedScreensState extends State<SharedScreens>
       markerId: const MarkerId('pickup'),
       position: widget.pickupPosition,
       icon:
-          (waiting ? _pickupWaitingLabelIcon : _pickupIcon) ??
+          (waiting ? _pickupWaitingLabelIcon : _pickupLabelIcon) ??
+          _pickupIcon ??
           BitmapDescriptor.defaultMarkerWithHue(
             MapUiDefaults.pickupDropMarkerHueGreen,
           ),
       anchor: const Offset(0.5, 1.0),
+      infoWindow: InfoWindow.noText,
     );
 
     final dropMarker = Marker(
       markerId: const MarkerId('drop'),
       position: widget.dropPosition,
       icon:
+          _dropLabelIcon ??
           _dropIcon ??
           BitmapDescriptor.defaultMarkerWithHue(
             MapUiDefaults.pickupDropMarkerHueRed,
           ),
       anchor: const Offset(0.5, 1.0),
+      infoWindow: InfoWindow.noText,
     );
 
-    _markers = {pickupMarker, dropMarker};
+    final showPickup = !driverStartedRide && !destinationReached;
+    final showDrop = driverStartedRide || destinationReached;
+    final next = <Marker>{};
+    if (showPickup) next.add(pickupMarker);
+    if (showDrop) next.add(dropMarker);
+    _markers = next;
 
     if (widget.routePoints.isNotEmpty) {
       _activeRoute = widget.routePoints;
-      _polylines = {
-        Polyline(
-          polylineId: const PolylineId('route'),
-          points: widget.routePoints,
-          width: MapUiDefaults.polylineWidth,
-          color: Colors.black,
-          startCap: Cap.roundCap,
-          endCap: Cap.roundCap,
-          jointType: JointType.round,
-        ),
-      };
+      _polylines = MapUiDefaults.routePolylines(
+        widget.routePoints,
+        id: 'route',
+      );
     }
 
     _customerPickupLatLng = widget.pickupPosition;
@@ -456,16 +558,20 @@ class _SharedScreensState extends State<SharedScreens>
         isWaitingForDriver && !isDriverConfirmed && !driverStartedRide;
     setState(() {
       _markers.removeWhere((m) => m.markerId.value == 'pickup');
+      final showPickup = !driverStartedRide && !destinationReached;
+      if (!showPickup) return;
       _markers.add(
         Marker(
           markerId: const MarkerId('pickup'),
           position: pos,
           icon:
-              (waiting ? _pickupWaitingLabelIcon : _pickupIcon) ??
+              (waiting ? _pickupWaitingLabelIcon : _pickupLabelIcon) ??
+              _pickupIcon ??
               BitmapDescriptor.defaultMarkerWithHue(
                 MapUiDefaults.pickupDropMarkerHueGreen,
               ),
           anchor: const Offset(0.5, 1.0),
+          infoWindow: InfoWindow.noText,
         ),
       );
     });
@@ -475,16 +581,20 @@ class _SharedScreensState extends State<SharedScreens>
     _customerDropLatLng = pos;
     setState(() {
       _markers.removeWhere((m) => m.markerId.value == 'drop');
+      final showDrop = driverStartedRide || destinationReached;
+      if (!showDrop) return;
       _markers.add(
         Marker(
           markerId: const MarkerId('drop'),
           position: pos,
           icon:
+              _dropLabelIcon ??
               _dropIcon ??
               BitmapDescriptor.defaultMarkerWithHue(
                 MapUiDefaults.pickupDropMarkerHueRed,
               ),
           anchor: const Offset(0.5, 1.0),
+          infoWindow: InfoWindow.noText,
         ),
       );
     });
@@ -492,17 +602,7 @@ class _SharedScreensState extends State<SharedScreens>
 
   void updateRoute(List<LatLng> points) {
     setState(() {
-      _polylines = {
-        Polyline(
-          polylineId: const PolylineId('route'),
-          points: points,
-          width: MapUiDefaults.polylineWidth,
-          color: Colors.black,
-          startCap: Cap.roundCap,
-          endCap: Cap.roundCap,
-          jointType: JointType.round,
-        ),
-      };
+      _polylines = MapUiDefaults.routePolylines(points, id: 'route');
       _activeRoute = points;
     });
   }
@@ -520,6 +620,10 @@ class _SharedScreensState extends State<SharedScreens>
           anchor: const Offset(0.5, 0.72),
           rotation: bearing ?? 0,
           flat: true,
+          infoWindow: InfoWindow(
+            title: driverName.trim().isNotEmpty ? driverName.trim() : 'Driver',
+            snippet: carDetails.trim().isNotEmpty ? carDetails.trim() : null,
+          ),
         ),
       );
     });
@@ -625,17 +729,7 @@ class _SharedScreensState extends State<SharedScreens>
                 : (etaCore.isEmpty ? '' : '$etaCore away');
       }
       _distanceChipText = distCore;
-      _polylines = {
-        Polyline(
-          polylineId: const PolylineId('route'),
-          points: points,
-          width: MapUiDefaults.polylineWidth,
-          color: Colors.black,
-          startCap: Cap.roundCap,
-          endCap: Cap.roundCap,
-          jointType: JointType.round,
-        ),
-      };
+      _polylines = MapUiDefaults.routePolylines(points, id: 'route');
     });
   }
 
@@ -782,17 +876,7 @@ class _SharedScreensState extends State<SharedScreens>
                   : (etaCore.isEmpty ? '' : '$etaCore away');
         }
         _distanceChipText = distCore;
-        _polylines = {
-          Polyline(
-            polylineId: const PolylineId('route'),
-            points: newRoute,
-            width: MapUiDefaults.polylineWidth,
-            color: Colors.black,
-            startCap: Cap.roundCap,
-            endCap: Cap.roundCap,
-            jointType: JointType.round,
-          ),
-        };
+        _polylines = MapUiDefaults.routePolylines(newRoute, id: 'route');
       });
     }
   }
@@ -1169,6 +1253,16 @@ class _SharedScreensState extends State<SharedScreens>
       final String serverMsg = (payload['message'] ?? '').toString();
 
       final bool driverAccepted = payload['driver_accept_status'] == true;
+      final String serverStatus =
+          (payload['status'] ?? payload['bookingStatus'] ?? '').toString();
+      final bool serverRideStarted =
+          payload['rideStarted'] == true ||
+          payload['ride_started'] == true ||
+          _statusSuggestsRideStarted(serverStatus);
+      final bool serverDestinationReached =
+          payload['destinationReached'] == true ||
+          payload['destination_reached'] == true ||
+          _statusSuggestsDestinationReached(serverStatus);
 
       // customer pickup/drop
       final customerLoc = payload['customerLocation'];
@@ -1204,6 +1298,13 @@ class _SharedScreensState extends State<SharedScreens>
         isDriverConfirmed = hasDriver;
         isWaitingForDriver = !hasDriver;
         noDriverFound = false;
+        if (serverDestinationReached) destinationReached = true;
+        if (serverRideStarted || serverDestinationReached) {
+          driverStartedRide = true;
+          _driverArrived = true;
+          _nearDestination = false;
+          _markers.removeWhere((m) => m.markerId.value == 'pickup');
+        }
         driverName =
             rating > 0
                 ? '$driverFullName  ⭐ ${rating.toStringAsFixed(2)}'
@@ -1239,20 +1340,37 @@ class _SharedScreensState extends State<SharedScreens>
       }
 
       // draw DRIVER → PICKUP when accepted
-      if (hasDriver && _driverLatLng != null && _customerPickupLatLng != null) {
+      if (hasDriver && _driverLatLng != null) {
         final mapState = _mapKey.currentState;
         if (mapState != null) {
-          final d = _distanceMeters(_driverLatLng!, _customerPickupLatLng!);
-          if (d > 1200) {
-            mapState.fitPointsBounds(<LatLng>[
-              _driverLatLng!,
-              _customerPickupLatLng!,
-            ], padding: 120);
+          final focus =
+              driverStartedRide ? _customerDropLatLng : _customerPickupLatLng;
+          if (focus != null) {
+            final d = _distanceMeters(_driverLatLng!, focus);
+            final threshold = driverStartedRide ? 2200.0 : 1200.0;
+            if (d > threshold) {
+              mapState.fitPointsBounds(<LatLng>[
+                _driverLatLng!,
+                focus,
+              ], padding: 120);
+            } else {
+              mapState.animateTo(
+                target: _driverLatLng!,
+                zoom: _currentZoomLevel,
+              );
+            }
           } else {
             mapState.animateTo(target: _driverLatLng!, zoom: _currentZoomLevel);
           }
         }
-        await _setRouteDriverToPickup();
+
+        if (driverStartedRide) {
+          final drop = _customerDropLatLng ?? widget.dropPosition;
+          updateDrop(drop);
+          await _setRoutePickupToDrop();
+        } else if (_customerPickupLatLng != null) {
+          await _setRouteDriverToPickup();
+        }
       }
 
       if (driverId.trim().isNotEmpty) {
@@ -1295,6 +1413,8 @@ class _SharedScreensState extends State<SharedScreens>
 
       if (status) {
         // Now route from PICKUP → DROP
+        final drop = _customerDropLatLng ?? widget.dropPosition;
+        updateDrop(drop);
         await _setRoutePickupToDrop();
         final mapState = _mapKey.currentState;
         final driverPos = _driverLatLng;
@@ -1316,6 +1436,8 @@ class _SharedScreensState extends State<SharedScreens>
           destinationReached = true;
           _nearDestination = false;
         });
+        final drop = _customerDropLatLng ?? widget.dropPosition;
+        updateDrop(drop);
         final p = _driverLatLng;
         if (p != null) _updateLiveMetrics(p);
         Future.delayed(const Duration(seconds: 2), () {
@@ -1378,7 +1500,6 @@ class _SharedScreensState extends State<SharedScreens>
       if (ack != null) {
         ack({"status": true, "message": "Driver location $ack"});
       }
-      AppLogger.log.i("driver-location: $data");
 
       if (data == null) return;
 
@@ -1393,28 +1514,30 @@ class _SharedScreensState extends State<SharedScreens>
               ? (data['bearing'] as num).toDouble()
               : null;
 
-      DateTime ts;
-      if (data['timestamp'] is int) {
-        ts = DateTime.fromMillisecondsSinceEpoch(data['timestamp'] as int);
-      } else if (data['timestamp'] is String) {
-        ts = DateTime.tryParse(data['timestamp'] as String) ?? DateTime.now();
-      } else {
-        ts = DateTime.now();
+      DateTime ts = _parseServerTime(data['timestamp']);
+      final now0 = DateTime.now();
+      // If server clock is skewed too far into the future, treat it as "now"
+      // to avoid the animation waiting/stalling.
+      if (ts.isAfter(now0.add(const Duration(seconds: 12)))) {
+        ts = now0;
       }
 
       final newPos = LatLng(lat, lng);
       _driverLatLng = newPos;
 
       // jitter filter
-      if (_currentPose != null) {
-        final d = _distanceMeters(_currentPose!.position, newPos);
-        if (d < 0.8) return;
+      final LatLng? lastPos =
+          _poseQueue.isNotEmpty
+              ? _poseQueue.last.position
+              : _currentPose?.position;
+      if (lastPos != null) {
+        final d = _distanceMeters(lastPos, newPos);
+        if (d < _minMoveMeters) return;
       }
 
       // stale filter
-      if (DateTime.now().difference(ts).abs() > _maxStale) {
-        return;
-      }
+      final age = DateTime.now().difference(ts);
+      if (age > _maxStale) return;
 
       final pose = DriverPose(position: newPos, bearing: bearing, t: ts);
 
@@ -1447,7 +1570,36 @@ class _SharedScreensState extends State<SharedScreens>
       }
 
       _startMotionTicker();
+
+      if (kDebugMode) {
+        final now = DateTime.now();
+        if (now.difference(_lastDriverLocationLogAt) >
+            const Duration(seconds: 3)) {
+          _lastDriverLocationLogAt = now;
+          AppLogger.log.i("driver-location: $data");
+        }
+      }
     });
+  }
+
+  DateTime _parseServerTime(dynamic ts) {
+    try {
+      if (ts == null) return DateTime.now();
+      if (ts is int) {
+        // Some backends send seconds (10-digit). Some send milliseconds.
+        if (ts < 2000000000) {
+          return DateTime.fromMillisecondsSinceEpoch(ts * 1000);
+        }
+        return DateTime.fromMillisecondsSinceEpoch(ts);
+      }
+      if (ts is String) {
+        final parsed = DateTime.tryParse(ts);
+        if (parsed != null) return parsed.toLocal();
+      }
+      return DateTime.now();
+    } catch (_) {
+      return DateTime.now();
+    }
   }
 
   void _startMotionTicker() {
@@ -1825,10 +1977,9 @@ class _SharedScreensState extends State<SharedScreens>
               if (isDriverConfirmed && _etaChipText.isNotEmpty)
                 Positioned(
                   top: 102,
-                  left: 16,
-                  right: 88,
+                  right: 16,
                   child: Align(
-                    alignment: Alignment.centerLeft,
+                    alignment: Alignment.centerRight,
                     child: InkWell(
                       onTap: _showEtaDistanceSheet,
                       borderRadius: BorderRadius.circular(22),
@@ -1851,12 +2002,6 @@ class _SharedScreensState extends State<SharedScreens>
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            const Icon(
-                              Icons.schedule_rounded,
-                              size: 18,
-                              color: Colors.black,
-                            ),
-                            const SizedBox(width: 8),
                             Flexible(
                               child: Text(
                                 _etaChipText,
@@ -1890,9 +2035,9 @@ class _SharedScreensState extends State<SharedScreens>
                             ],
                             const SizedBox(width: 10),
                             const Icon(
-                              Icons.info_outline_rounded,
+                              Icons.timer_outlined,
                               size: 18,
-                              color: Colors.black54,
+                              color: Colors.black,
                             ),
                           ],
                         ),
@@ -2176,7 +2321,7 @@ class _SharedScreensState extends State<SharedScreens>
                                   child: InkWell(
                                     onTap: () async {
                                       try {
-                                        var rawNumber = CUSTOMERPHONE.trim();
+                                        var rawNumber = _driverPhone.trim();
                                         if (rawNumber.isEmpty) {
                                           AppToasts.showError(
                                             context,

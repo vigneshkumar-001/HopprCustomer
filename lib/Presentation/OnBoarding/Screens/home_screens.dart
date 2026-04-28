@@ -1,4 +1,5 @@
 // ========================= home_screens.dart (FULL UPDATED) =========================
+import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -14,6 +15,7 @@ import 'package:hopper/Presentation/BookRide/Models/active_booking_response.dart
 import 'package:hopper/Presentation/BookRide/Screens/book_map_screen.dart';
 import 'package:hopper/Presentation/BookRide/Screens/order_confirm_screen.dart';
 import 'package:hopper/Presentation/BookRide/Screens/search_screen.dart';
+import 'package:hopper/Presentation/BookRide/SharedRideScreens/Screens/shared_screens.dart';
 import 'package:hopper/Presentation/Drawer/screens/drawer_screen.dart';
 import 'package:hopper/Presentation/OnBoarding/Widgets/custom_bottomnavigation.dart';
 import 'package:hopper/Presentation/OnBoarding/Widgets/package_contoiner.dart';
@@ -22,8 +24,10 @@ import 'package:hopper/Presentation/OnBoarding/Screens/payment_screen.dart';
 import 'package:hopper/Presentation/OnBoarding/models/address_models.dart';
 import 'package:hopper/api/dataSource/apiDataSource.dart';
 import 'package:hopper/api/repository/request.dart';
+import 'package:hopper/api/repository/api_consents.dart';
 import 'package:hopper/uitls/netWorkHandling/network_handling_screen.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:hopper/uitls/websocket/shared_web_socket.dart';
 
 import '../Controller/home_map_controller.dart';
 
@@ -529,6 +533,53 @@ class _HomeScreensState extends State<HomeScreens>
       return;
     }
 
+    final serviceMode = ride.driverServiceMode.trim().toLowerCase();
+    final isShared =
+        ride.sharedBooking == true ||
+        serviceMode == 'shared' ||
+        serviceMode.contains('shared');
+
+    if (isShared) {
+      // Ensure shared socket joins the booking room before opening the screen.
+      final s = RideShareSocketService();
+      if (!s.connected) {
+        s.initSocket(ApiConsents.sharedBaseUrl);
+      }
+      s.setBooking(ride.bookingId);
+
+      await Get.to(
+        () => SharedScreens(
+          pickupAddress: ride.pickupAddress,
+          destinationAddress: ride.dropAddress,
+          initialPosition:
+              ride.driverLocation != null
+                  ? LatLng(
+                    ride.driverLocation!.latitude,
+                    ride.driverLocation!.longitude,
+                  )
+                  : LatLng(ride.fromLatitude, ride.fromLongitude),
+          pickupPosition: LatLng(ride.fromLatitude, ride.fromLongitude),
+          dropPosition: LatLng(ride.toLatitude, ride.toLongitude),
+          carType: ride.rideType.trim().isNotEmpty ? ride.rideType : 'car',
+          initialStatus: ride.status,
+          initialRideStarted: ride.rideStarted,
+          initialDestinationReached: ride.destinationReached,
+          resumeDriverId: ride.driverId.isEmpty ? null : ride.driverId,
+          initialDriverPosition:
+              ride.driverLocation != null
+                  ? LatLng(
+                    ride.driverLocation!.latitude,
+                    ride.driverLocation!.longitude,
+                  )
+                  : null,
+        ),
+      );
+
+      if (!mounted) return;
+      await _loadActiveRide();
+      return;
+    }
+
     final vehicle = ride.vehicle;
     final carType =
         vehicle?.carType.trim().isNotEmpty == true
@@ -568,6 +619,9 @@ class _HomeScreensState extends State<HomeScreens>
         bookingFee: ride.bookingFee,
         timeFare: ride.timeFare,
         initialAmount: ride.amount > 0 ? ride.amount : (ride.total ?? 0.0),
+        initialStatus: ride.status,
+        initialRideStarted: ride.rideStarted,
+        initialDestinationReached: ride.destinationReached,
       ),
     );
 
@@ -802,6 +856,10 @@ class _HomeScreensState extends State<HomeScreens>
                 );
               }),
             ),
+
+            // Smooth current-location pulse (Flutter overlay). Avoids map
+            // `circles` updates which can feel laggy on Android.
+            Positioned.fill(child: _HomePulseOverlay(mapC: mapC)),
 
             Positioned(
               top: topPad + 10,
@@ -1394,6 +1452,99 @@ class _HomeBottomSheet extends StatelessWidget {
         },
       ),
     );
+  }
+}
+
+class _HomePulseOverlay extends StatefulWidget {
+  final HomeMapController mapC;
+  const _HomePulseOverlay({required this.mapC});
+
+  @override
+  State<_HomePulseOverlay> createState() => _HomePulseOverlayState();
+}
+
+class _HomePulseOverlayState extends State<_HomePulseOverlay>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c;
+
+  @override
+  void initState() {
+    super.initState();
+    _c = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1600),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      ignoring: true,
+      child: Obx(() {
+        if (!widget.mapC.gate.isReady.value) return const SizedBox.shrink();
+        final o = widget.mapC.pulseOffset.value;
+        if (o == null) return const SizedBox.shrink();
+
+        return RepaintBoundary(
+          child: AnimatedBuilder(
+            animation: _c,
+            builder: (context, _) {
+              return CustomPaint(
+                painter: _PulsePainter(center: o, t: _c.value),
+              );
+            },
+          ),
+        );
+      }),
+    );
+  }
+}
+
+class _PulsePainter extends CustomPainter {
+  final Offset center;
+  final double t; // 0..1
+
+  const _PulsePainter({required this.center, required this.t});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const ringColor = Color(0xFF34C759);
+
+    // Ease in/out to reduce "steppy" feel.
+    final eased =
+        t < 0.5 ? 4 * t * t * t : 1 - math.pow(-2 * t + 2, 3).toDouble() / 2;
+
+    final radius = 8.0 + (26.0 * eased); // px
+    final alpha = (0.18 * (1.0 - eased)).clamp(0.0, 0.18);
+
+    final paint =
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2
+          ..color = ringColor.withOpacity(alpha);
+
+    // If offset is off-map, skip paint.
+    if (center.dx.isNaN ||
+        center.dy.isNaN ||
+        center.dx < -80 ||
+        center.dy < -80 ||
+        center.dx > size.width + 80 ||
+        center.dy > size.height + 80) {
+      return;
+    }
+
+    canvas.drawCircle(center, radius, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _PulsePainter oldDelegate) {
+    return oldDelegate.center != center || oldDelegate.t != t;
   }
 }
 

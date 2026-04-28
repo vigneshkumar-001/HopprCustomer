@@ -11,6 +11,7 @@ class SharedMap extends StatefulWidget {
   final LatLng? pickupPosition; // pulsing point
   final Set<Marker> markers;
   final Set<Polyline> polylines;
+  final Set<Circle> circles;
   final bool myLocationEnabled;
   final bool fitToBounds;
   final double initialZoom;
@@ -21,7 +22,10 @@ class SharedMap extends StatefulWidget {
   final Set<Factory<OneSequenceGestureRecognizer>> gestureRecognizers;
   final ValueChanged<CameraPosition>? onCameraMove;
   final VoidCallback? onCameraMoveStarted;
+  final VoidCallback? onCameraIdle;
   final ValueChanged<LatLng>? onTap;
+  final EdgeInsets padding;
+  final MapType mapType;
 
   const SharedMap({
     super.key,
@@ -29,6 +33,7 @@ class SharedMap extends StatefulWidget {
     this.pickupPosition,
     this.markers = const <Marker>{},
     this.polylines = const <Polyline>{},
+    this.circles = const <Circle>{},
     this.myLocationEnabled = true,
     this.fitToBounds = true,
     this.initialZoom = 14.9,
@@ -39,7 +44,10 @@ class SharedMap extends StatefulWidget {
     this.gestureRecognizers = const <Factory<OneSequenceGestureRecognizer>>{},
     this.onCameraMove,
     this.onCameraMoveStarted,
+    this.onCameraIdle,
     this.onTap,
+    this.padding = EdgeInsets.zero,
+    this.mapType = MapType.normal,
   });
 
   @override
@@ -395,6 +403,11 @@ class SharedMapState extends State<SharedMap>
 
   @override
   Widget build(BuildContext context) {
+    final mergedCircles = <Circle>{
+      ...widget.circles,
+      ..._buildPickupCircles(),
+    };
+
     return GoogleMap(
       initialCameraPosition: CameraPosition(
         target: widget.initialPosition,
@@ -403,7 +416,7 @@ class SharedMapState extends State<SharedMap>
       onMapCreated: _onMapCreated,
       markers: widget.markers,
       polylines: widget.polylines,
-      circles: _buildPickupCircles(),
+      circles: mergedCircles,
       myLocationEnabled: widget.myLocationEnabled,
       buildingsEnabled: false,
       indoorViewEnabled: false,
@@ -418,7 +431,10 @@ class SharedMapState extends State<SharedMap>
       gestureRecognizers: widget.gestureRecognizers,
       onCameraMove: widget.onCameraMove,
       onCameraMoveStarted: widget.onCameraMoveStarted,
+      onCameraIdle: widget.onCameraIdle,
       onTap: widget.onTap,
+      padding: widget.padding,
+      mapType: widget.mapType,
     );
   }
 }

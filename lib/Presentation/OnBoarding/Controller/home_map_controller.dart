@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
-import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
@@ -19,10 +18,18 @@ import 'package:hopper/Presentation/Authentication/controller/location_gate_cont
 import 'package:hopper/Presentation/OnBoarding/models/popular_address_model.dart';
 import 'package:hopper/Presentation/OnBoarding/models/recent_location_model.dart';
 import 'package:hopper/api/repository/api_consents.dart';
+import 'package:hopper/uitls/map/compact_marker_icons.dart';
+import 'package:hopper/uitls/map/map_ui_defaults.dart';
 import 'package:hopper/uitls/websocket/socket_io_client.dart';
 import 'package:hopper/uitls/websocket/shared_web_socket.dart';
 
-class HomeMapController extends GetxController {
+class HomeMapController extends GetxController with WidgetsBindingObserver {
+  // This custom pulse updates GoogleMap `circles`, which triggers frequent
+  // platform-view redraws on Android and can cause jank / `lockHardwareCanvas`
+  // spam on some devices. Enabled by request; emission is throttled inside
+  // `_refreshMyLocationPulseCircles()` to minimize churn.
+  static const bool _enableCustomLocationPulse = true;
+
   final LocationGateController gate = Get.find<LocationGateController>();
   final SocketService socketService = SocketService();
   final RideShareSocketService rideShareSocket = RideShareSocketService();
@@ -71,10 +78,18 @@ class HomeMapController extends GetxController {
   DateTime? _devicePositionAt;
   Timer? _persistDebounce;
   Timer? _pulseTimer;
-  DateTime _pulseStartAt = DateTime.fromMillisecondsSinceEpoch(0);
-  LatLng? _lastPulseCenter;
-  double _lastPulseRadius = -1;
-  double _lastPulseAlpha = -1;
+  DateTime _lastCameraMoveAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  // Overlay pulse (Flutter layer) uses this controller-provided screen offset.
+  // This avoids frequent platform-view updates (GoogleMap circles), which can
+  // feel laggy on Android.
+  final Rxn<Offset> pulseOffset = Rxn<Offset>();
+
+  Timer? _pulseOffsetDebounce;
+  LatLng? _lastPulseLatLng;
+  DateTime _lastPulseOffsetAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  static const int _pulseTickMs = 900; // recompute screen coordinate
 
   LatLng? get devicePosition => _devicePosition.value;
 
@@ -97,10 +112,10 @@ class HomeMapController extends GetxController {
   @override
   void onInit() {
     super.onInit();
+    WidgetsBinding.instance.addObserver(this);
     _preloadMapStyle();
     _startCompassListener();
     _restoreLastLocationFromPrefs();
-    _startMyLocationPulse();
 
     // If HomeMapController.start() runs before location permission is granted,
     // initLocation() will early-return. This ensures we fetch & center as soon as
@@ -108,10 +123,12 @@ class HomeMapController extends GetxController {
     _gateReadyWorker = ever<bool>(gate.isReady, (ready) {
       if (!ready) {
         _stopPositionStream();
+        _stopMyLocationPulse();
         return;
       }
 
       _startPositionStream();
+      _startMyLocationPulse();
       // If we previously restored a stale last-known map location (from prefs)
       // before permission was granted, we must still recenter to live GPS once
       // the gate becomes ready.
@@ -123,6 +140,7 @@ class HomeMapController extends GetxController {
 
   @override
   void onClose() {
+    WidgetsBinding.instance.removeObserver(this);
     _geocodeDebounce?.cancel();
     _publishDebounce?.cancel();
     _compassThrottle?.cancel();
@@ -131,6 +149,7 @@ class HomeMapController extends GetxController {
     _stopPositionStream();
     _persistDebounce?.cancel();
     _pulseTimer?.cancel();
+    _pulseOffsetDebounce?.cancel();
 
     for (final t in _moveTimers.values) {
       t.cancel();
@@ -140,19 +159,46 @@ class HomeMapController extends GetxController {
     super.onClose();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Avoid burning CPU / platform-view updates while backgrounded.
+    if (state == AppLifecycleState.resumed) {
+      if (gate.isReady.value) _startMyLocationPulse();
+    } else {
+      _stopMyLocationPulse();
+    }
+  }
+
   void _startMyLocationPulse() {
+    if (!_enableCustomLocationPulse) {
+      _stopMyLocationPulse();
+      return;
+    }
+    if (!gate.isReady.value) return;
     _pulseTimer?.cancel();
-    _pulseStartAt = DateTime.now();
-    // Keep the pulse smooth without over-updating the GoogleMap platform view.
-    _pulseTimer = Timer.periodic(const Duration(milliseconds: 120), (_) {
-      _refreshMyLocationPulseCircles();
-    });
+    // Keep the pulse light; frequent platform-view updates can cause jank/hangs
+    // on some Android devices (and spam `lockHardwareCanvas` in logcat).
+    _pulseTimer = Timer.periodic(
+      const Duration(milliseconds: _pulseTickMs),
+      (_) => _refreshMyLocationPulseCircles(),
+    );
+    _refreshMyLocationPulseCircles();
+  }
+
+  void _stopMyLocationPulse() {
+    _pulseTimer?.cancel();
+    _pulseTimer = null;
+    _pulseOffsetDebounce?.cancel();
+    _pulseOffsetDebounce = null;
+    if (circles.isNotEmpty) circles.clear();
+    pulseOffset.value = null;
   }
 
   void _refreshMyLocationPulseCircles() {
     // Only show when permission is granted (myLocationEnabled is on).
     if (!gate.isReady.value) {
       if (circles.isNotEmpty) circles.clear();
+      pulseOffset.value = null;
       return;
     }
 
@@ -171,51 +217,41 @@ class HomeMapController extends GetxController {
       return;
     }
 
-    final LatLng? center =
-        hasFreshDevicePos ? devicePosition : currentPosition;
+    final LatLng? center = hasFreshDevicePos ? devicePosition : currentPosition;
     if (center == null) {
       if (circles.isNotEmpty) circles.clear();
+      pulseOffset.value = null;
       return;
     }
 
-    const ringColor = Color(0xFF34C759); // light green
-    final elapsedMs = DateTime.now().difference(_pulseStartAt).inMilliseconds;
-    const periodMs = 1400;
-    final phase = ((elapsedMs % periodMs) / periodMs).clamp(0.0, 1.0);
+    // We no longer drive a pulsing ring via GoogleMap circles (platform view),
+    // because it feels laggy. Keep circles empty and compute the on-screen
+    // coordinate so a Flutter overlay can animate smoothly.
+    if (circles.isNotEmpty) circles.clear();
+    final mc = mapController;
+    if (mc == null) return;
 
-    // One ring: small -> medium -> large, and fade out.
-    final radius = 14.0 + (62.0 * phase);
-    final alpha = (0.34 * (1.0 - phase)).clamp(0.0, 0.34);
+    // While the user is actively panning/zooming the map, skip platform calls.
+    if (now.difference(_lastCameraMoveAt).inMilliseconds < 900) return;
 
-    // Skip emitting tiny updates to reduce platform-view churn (prevents
-    // visible stutter/jumps on some devices).
-    final prevCenter = _lastPulseCenter;
-    final centerMovedMeters =
-        prevCenter == null
-            ? double.infinity
-            : _haversineMeters(prevCenter, center);
-    final radiusChanged = (_lastPulseRadius - radius).abs();
-    final alphaChanged = (_lastPulseAlpha - alpha).abs();
-    final shouldEmit =
-        circles.isEmpty ||
-        centerMovedMeters >= 1.0 ||
-        radiusChanged >= 1.2 ||
-        alphaChanged >= 0.03;
-    if (!shouldEmit) return;
+    final moved =
+        _lastPulseLatLng == null ? double.infinity : _haversineMeters(_lastPulseLatLng!, center);
+    if (moved < 1.5 && now.difference(_lastPulseOffsetAt).inMilliseconds < 900) {
+      return;
+    }
 
-    _lastPulseCenter = center;
-    _lastPulseRadius = radius;
-    _lastPulseAlpha = alpha;
-
-    circles.assignAll({
-      Circle(
-        circleId: const CircleId('home_loc_ring'),
-        center: center,
-        radius: radius,
-        fillColor: Colors.transparent,
-        strokeColor: ringColor.withOpacity(alpha),
-        strokeWidth: 2,
-      ),
+    // Throttle coordinate lookups (async platform call).
+    _pulseOffsetDebounce?.cancel();
+    _pulseOffsetDebounce = Timer(const Duration(milliseconds: 120), () async {
+      final mc2 = mapController;
+      if (mc2 == null) return;
+      if (!gate.isReady.value) return;
+      try {
+        final sc = await mc2.getScreenCoordinate(center);
+        pulseOffset.value = Offset(sc.x.toDouble(), sc.y.toDouble());
+        _lastPulseLatLng = center;
+        _lastPulseOffsetAt = DateTime.now();
+      } catch (_) {}
     });
   }
 
@@ -228,11 +264,13 @@ class HomeMapController extends GetxController {
         distanceFilter: 2,
       );
 
-      _positionSub = Geolocator.getPositionStream(locationSettings: settings)
-          .listen((pos) {
-            _devicePosition.value = LatLng(pos.latitude, pos.longitude);
-            _devicePositionAt = DateTime.now();
-          });
+      _positionSub = Geolocator.getPositionStream(
+        locationSettings: settings,
+      ).listen((pos) {
+        _devicePosition.value = LatLng(pos.latitude, pos.longitude);
+        _devicePositionAt = DateTime.now();
+        if (_enableCustomLocationPulse) _refreshMyLocationPulseCircles();
+      });
     } catch (_) {
       // ignore stream errors; app should still work with getCurrentPosition()
     }
@@ -263,10 +301,17 @@ class HomeMapController extends GetxController {
       } catch (_) {}
     }
 
+    if (_enableCustomLocationPulse) {
+      _refreshMyLocationPulseCircles();
+    }
+
     // ✅ Important for home map: if currentPosition already available, move camera now
     if (currentPosition != null) {
       try {
-        _lastCamera = CameraPosition(target: currentPosition!, zoom: _homeInitZoom);
+        _lastCamera = CameraPosition(
+          target: currentPosition!,
+          zoom: _homeInitZoom,
+        );
         await mapController?.animateCamera(
           CameraUpdate.newLatLngZoom(currentPosition!, _homeInitZoom),
         );
@@ -278,6 +323,7 @@ class HomeMapController extends GetxController {
 
   void onCameraMove(CameraPosition position) {
     _lastCamera = position;
+    _lastCameraMoveAt = DateTime.now();
   }
 
   ScreenCoordinate _pinTipScreenCoordinate({
@@ -458,9 +504,13 @@ class HomeMapController extends GetxController {
       final ky = dy.abs() > 0.5 ? (movedY / dy) : 0.0;
 
       final dx2 =
-          (kx.abs() < 0.05) ? dxRemain1 : (dxRemain1 / kx).clamp(-1200.0, 1200.0);
+          (kx.abs() < 0.05)
+              ? dxRemain1
+              : (dxRemain1 / kx).clamp(-1200.0, 1200.0);
       final dy2 =
-          (ky.abs() < 0.05) ? dyRemain1 : (dyRemain1 / ky).clamp(-1200.0, 1200.0);
+          (ky.abs() < 0.05)
+              ? dyRemain1
+              : (dyRemain1 / ky).clamp(-1200.0, 1200.0);
 
       if (dx2.abs() + dy2.abs() < 1.0) return;
       _suppressNextIdle = true;
@@ -468,9 +518,7 @@ class HomeMapController extends GetxController {
     } catch (_) {}
   }
 
-  Future<void> alignCameraToPinTip({
-    required ScreenCoordinate pinTip,
-  }) async {
+  Future<void> alignCameraToPinTip({required ScreenCoordinate pinTip}) async {
     final pos = currentPosition;
     final controller = mapController;
     if (pos == null || controller == null) return;
@@ -498,9 +546,13 @@ class HomeMapController extends GetxController {
       final ky = dy.abs() > 0.5 ? (movedY / dy) : 0.0;
 
       final dx2 =
-          (kx.abs() < 0.05) ? dxRemain1 : (dxRemain1 / kx).clamp(-1200.0, 1200.0);
+          (kx.abs() < 0.05)
+              ? dxRemain1
+              : (dxRemain1 / kx).clamp(-1200.0, 1200.0);
       final dy2 =
-          (ky.abs() < 0.05) ? dyRemain1 : (dyRemain1 / ky).clamp(-1200.0, 1200.0);
+          (ky.abs() < 0.05)
+              ? dyRemain1
+              : (dyRemain1 / ky).clamp(-1200.0, 1200.0);
 
       if (dx2.abs() + dy2.abs() < 1.0) return;
       _suppressNextIdle = true;
@@ -740,7 +792,10 @@ class HomeMapController extends GetxController {
 
       currentPosition = LatLng(pos.latitude, pos.longitude);
       _restoredFromPrefs = false;
-      _lastCamera = CameraPosition(target: currentPosition!, zoom: _homeInitZoom);
+      _lastCamera = CameraPosition(
+        target: currentPosition!,
+        zoom: _homeInitZoom,
+      );
 
       try {
         await mapController?.animateCamera(
@@ -886,7 +941,8 @@ class HomeMapController extends GetxController {
 
     _lastGeocodedPos = pos;
 
-    final key = '${pos.latitude.toStringAsFixed(5)},${pos.longitude.toStringAsFixed(5)}';
+    final key =
+        '${pos.latitude.toStringAsFixed(5)},${pos.longitude.toStringAsFixed(5)}';
     final cached = _geocodeCache[key];
     if (cached != null) {
       address.value = cached;
@@ -934,18 +990,20 @@ class HomeMapController extends GetxController {
       );
       if (placemarks.isNotEmpty) {
         final p = placemarks.first;
-        final street = [
-          (p.subThoroughfare ?? '').trim(),
-          (p.thoroughfare ?? '').trim(),
-        ].where((e) => e.isNotEmpty).join(' ').trim();
+        final street =
+            [
+              (p.subThoroughfare ?? '').trim(),
+              (p.thoroughfare ?? '').trim(),
+            ].where((e) => e.isNotEmpty).join(' ').trim();
 
         final primary = street.isNotEmpty ? street : (p.name ?? '').trim();
 
-        final parts = <String>[
-          primary,
-          (p.subLocality ?? '').trim(),
-          (p.locality ?? '').trim(),
-        ].where((e) => e.isNotEmpty).toList();
+        final parts =
+            <String>[
+              primary,
+              (p.subLocality ?? '').trim(),
+              (p.locality ?? '').trim(),
+            ].where((e) => e.isNotEmpty).toList();
 
         final value = parts.join(', ');
         return value.isEmpty ? "Unknown Location" : value;
@@ -997,17 +1055,13 @@ class HomeMapController extends GetxController {
   }
 
   Future<void> _loadDriverIcons() async {
-    final dpr = ui.window.devicePixelRatio;
-
-    _carIcon = await _bitmapFromAssetSized(
-      AppImages.movingCar,
-      widthDp: 22,
-      dpr: dpr,
+    _carIcon = await CompactMarkerIcons.assetPin(
+      assetPath: AppImages.movingCar,
+      widthDp: MapUiDefaults.vehicleCarWidthDp,
     );
-    _bikeIcon = await _bitmapFromAssetSized(
-      AppImages.packageBike,
-      widthDp: 24,
-      dpr: dpr,
+    _bikeIcon = await CompactMarkerIcons.assetPin(
+      assetPath: AppImages.packageBike,
+      widthDp: MapUiDefaults.vehicleBikeWidthDp,
     );
 
     _driverMarkers.updateAll((id, old) {
@@ -1016,23 +1070,6 @@ class HomeMapController extends GetxController {
     });
 
     _publishMarkersDebounced();
-  }
-
-  Future<BitmapDescriptor> _bitmapFromAssetSized(
-    String assetPath, {
-    required double widthDp,
-    required double dpr,
-  }) async {
-    final targetWidthPx = (widthDp * dpr).round();
-
-    final byteData = await rootBundle.load(assetPath);
-    final codec = await ui.instantiateImageCodec(
-      byteData.buffer.asUint8List(),
-      targetWidth: targetWidthPx,
-    );
-    final frame = await codec.getNextFrame();
-    final bytes = await frame.image.toByteData(format: ui.ImageByteFormat.png);
-    return BitmapDescriptor.fromBytes(bytes!.buffer.asUint8List());
   }
 
   BitmapDescriptor _iconForRideType(String? raw) {
@@ -1716,4 +1753,3 @@ class HomeMapController extends GetxController {
 //     return (start + delta * t) % 360;
 //   }
 // }
-

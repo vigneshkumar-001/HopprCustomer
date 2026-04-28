@@ -40,6 +40,9 @@ class OrderConfirmScreen extends StatefulWidget {
   final String? initialDriverProfilePic;
   final String? initialCarDetails;
   final double? initialAmount;
+  final String? initialStatus;
+  final bool? initialRideStarted;
+  final bool? initialDestinationReached;
 
   const OrderConfirmScreen({
     super.key,
@@ -60,6 +63,9 @@ class OrderConfirmScreen extends StatefulWidget {
     this.initialDriverProfilePic,
     this.initialCarDetails,
     this.initialAmount,
+    this.initialStatus,
+    this.initialRideStarted,
+    this.initialDestinationReached,
   });
 
   @override
@@ -138,20 +144,48 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
       initialDriverProfilePic: widget.initialDriverProfilePic,
       initialCarDetails: widget.initialCarDetails,
       initialAmount: widget.initialAmount,
+      initialStatus: widget.initialStatus,
+      initialRideStarted: widget.initialRideStarted,
+      initialDestinationReached: widget.initialDestinationReached,
     );
 
     // IMPORTANT: bind context after first frame (so timer & API always works)
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       c.bindContext(context);
-      c.startDriverSearchTimer(); // timer will always update UI
+
+      final initialStatus = (widget.initialStatus ?? '').trim().toUpperCase();
+      final resumedIntoActive =
+          widget.initialDestinationReached == true ||
+          widget.initialRideStarted == true ||
+          initialStatus.contains('IN_PROGRESS') ||
+          initialStatus.contains('RIDE_IN_PROGRESS') ||
+          initialStatus.contains('RIDE_STARTED') ||
+          initialStatus.contains('TRIP_STARTED') ||
+          initialStatus.contains('STARTED');
+
+      if (!resumedIntoActive) {
+        c.startDriverSearchTimer(); // timer will always update UI
+      }
       _setupRideSideEffectsWorker();
     });
 
-    _searchingElapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
-      setState(() => _searchingElapsedSeconds += 1);
-    });
+    final initialStatus = (widget.initialStatus ?? '').trim().toUpperCase();
+    final resumedIntoActive =
+        widget.initialDestinationReached == true ||
+        widget.initialRideStarted == true ||
+        initialStatus.contains('IN_PROGRESS') ||
+        initialStatus.contains('RIDE_IN_PROGRESS') ||
+        initialStatus.contains('RIDE_STARTED') ||
+        initialStatus.contains('TRIP_STARTED') ||
+        initialStatus.contains('STARTED');
+
+    if (!resumedIntoActive) {
+      _searchingElapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (!mounted) return;
+        setState(() => _searchingElapsedSeconds += 1);
+      });
+    }
   }
 
   void _setupRideSideEffectsWorker() {
@@ -371,16 +405,19 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
 
               Positioned(
                 top: 102,
-                left: 16,
-                right: 88,
+                right: 16,
                 child: Obx(() {
                   if (!c.isDriverConfirmed.value ||
                       c.etaChipText.value.isEmpty) {
                     return const SizedBox.shrink();
                   }
                   return Align(
-                    alignment: Alignment.centerLeft,
-                    child: _etaChip(),
+                    alignment: Alignment.centerRight,
+                    child: InkWell(
+                      onTap: () => _showEtaDistanceSheet(),
+                      borderRadius: BorderRadius.circular(22),
+                      child: _etaChip(),
+                    ),
                   );
                 }),
               ),
@@ -546,6 +583,8 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
             _otpHighlightCard(),
           ],
           const SizedBox(height: 14),
+          _addressBox(),
+          const SizedBox(height: 14),
 
           Row(
             children: [
@@ -623,10 +662,42 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                   padding: const EdgeInsets.all(8.0),
                   child: InkWell(
                     onTap: () async {
-                      final phone = 'tel:${c.customerPhone.value}';
-                      final uri = Uri.parse(phone);
-                      if (await canLaunchUrl(uri)) {
-                        await launchUrl(uri);
+                      try {
+                        var rawNumber = c.driverPhone.value.trim();
+                        if (rawNumber.isEmpty) {
+                          AppToasts.showError(context, 'Driver number not set');
+                          return;
+                        }
+
+                        final hasPlus = rawNumber.startsWith('+');
+                        final digitsOnly = rawNumber.replaceAll(
+                          RegExp(r'[^0-9]'),
+                          '',
+                        );
+                        final normalized =
+                            hasPlus ? '+$digitsOnly' : digitsOnly;
+                        if (normalized.isEmpty) {
+                          AppToasts.showError(context, 'Invalid number');
+                          return;
+                        }
+
+                        final uri = Uri(scheme: 'tel', path: normalized);
+                        if (await canLaunchUrl(uri)) {
+                          final ok = await launchUrl(
+                            uri,
+                            mode: LaunchMode.externalApplication,
+                          );
+                          if (!ok) {
+                            AppToasts.showError(
+                              context,
+                              'Could not open dialer',
+                            );
+                          }
+                        } else {
+                          AppToasts.showError(context, 'Could not open dialer');
+                        }
+                      } catch (_) {
+                        AppToasts.showError(context, 'Failed to start call');
                       }
                     },
                     child: Image.asset(AppImages.call, height: 20, width: 20),
@@ -721,6 +792,12 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
   }
 
   Widget _etaChip() {
+    final raw = c.etaChipText.value;
+    final pieces =
+        raw.split('|').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+    final etaText = pieces.isNotEmpty ? pieces.first : raw.trim();
+    final distText = pieces.length >= 2 ? pieces.last : '';
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       decoration: BoxDecoration(
@@ -737,18 +814,107 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.schedule_rounded, size: 18, color: Colors.black),
-          const SizedBox(width: 8),
           Flexible(
             child: Text(
-              c.etaChipText.value,
+              etaText,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
             ),
           ),
+          if (distText.isNotEmpty) ...[
+            const SizedBox(width: 10),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.06),
+                borderRadius: BorderRadius.circular(18),
+              ),
+              child: Text(
+                distText,
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(width: 10),
+          const Icon(Icons.timer_outlined, size: 18, color: Colors.black),
         ],
       ),
+    );
+  }
+
+  Future<void> _showEtaDistanceSheet() async {
+    final raw = c.etaChipText.value;
+    final pieces =
+        raw.split('|').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+    final etaText = pieces.isNotEmpty ? pieces.first : raw.trim();
+    final distText = pieces.length >= 2 ? pieces.last : '';
+
+    if (etaText.isEmpty && distText.isEmpty) return;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (context) {
+        return SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 18),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Trip info',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 12),
+                if (etaText.isNotEmpty)
+                  Row(
+                    children: [
+                      const Icon(Icons.timer_outlined, size: 18),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          etaText,
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                if (etaText.isNotEmpty && distText.isNotEmpty)
+                  const SizedBox(height: 10),
+                if (distText.isNotEmpty)
+                  Row(
+                    children: [
+                      const Icon(Icons.route_rounded, size: 18),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          distText,
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -1652,7 +1818,7 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
             controller: _startController,
             containerColor: AppColors.commonWhite,
             leadingImage: AppImages.circleStart,
-            title: 'Search for an address or landmark',
+            title: 'Pickup location',
             hintStyle: const TextStyle(fontSize: 11),
             imgHeight: 17,
           ),
@@ -1667,7 +1833,7 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
             controller: _destController,
             containerColor: AppColors.commonWhite,
             leadingImage: AppImages.rectangleDest,
-            title: 'Enter destination',
+            title: 'Drop location',
             hintStyle: const TextStyle(fontSize: 11),
             imgHeight: 17,
           ),

@@ -17,6 +17,7 @@ import 'package:hopper/Core/Utility/app_loader.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:hopper/api/repository/api_consents.dart';
 import 'package:hopper/uitls/map/search_loaction.dart';
+import 'package:hopper/uitls/map/map_ui_defaults.dart';
 
 class LocateOnMapScreen extends StatefulWidget {
   final String searchQuery;
@@ -57,6 +58,8 @@ class _LocateOnMapScreenState extends State<LocateOnMapScreen>
   bool _isCameraMoving = false;
   bool _isDragging = false;
   bool _isFetchingAddress = false;
+  bool _locationToggleFit = false;
+  LatLng? _lastDeviceLatLng;
 
   String _selectedAddress = "Fetching address...";
 
@@ -380,11 +383,36 @@ class _LocateOnMapScreenState extends State<LocateOnMapScreen>
         desiredAccuracy: LocationAccuracy.high,
       ).timeout(const Duration(seconds: 6));
       final latLng = LatLng(pos.latitude, pos.longitude);
+      _lastDeviceLatLng = latLng;
       _mapController?.animateCamera(CameraUpdate.newLatLngZoom(latLng, 17));
       _getAddressFromLatLng(latLng); // async; map doesn’t wait
     } catch (_) {
       /* no-op */
     }
+  }
+
+  Future<void> _fitDeviceToTargetBounds() async {
+    if (_mapController == null) return;
+    final a = _lastDeviceLatLng;
+    final b = _targetLocation;
+    if (a == null || b == null) return;
+    try {
+      await _mapController!.animateCamera(
+        CameraUpdate.newLatLngBounds(MapUiDefaults.boundsFrom2(a, b), 120),
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _onLocationFabTap() async {
+    if (_mapController == null) return;
+    if (_locationToggleFit) {
+      _locationToggleFit = false;
+      await _fitDeviceToTargetBounds();
+      return;
+    }
+
+    _locationToggleFit = true;
+    _goToCurrentLocation();
   }
 
   // ====== CONFIRM ======
@@ -423,6 +451,7 @@ class _LocateOnMapScreenState extends State<LocateOnMapScreen>
                     onCameraMove: (CameraPosition position) {
                       _isCameraMoving = true;
                       _isDragging = true; // hide bubble while dragging
+                      _locationToggleFit = false;
                       _cameraPosition = position.target;
                       setState(() {});
                     },
@@ -446,7 +475,7 @@ class _LocateOnMapScreenState extends State<LocateOnMapScreen>
                     child: FloatingActionButton(
                       mini: true,
                       backgroundColor: Colors.white,
-                      onPressed: _goToCurrentLocation,
+                      onPressed: _onLocationFabTap,
                       child: const Icon(Icons.my_location, color: Colors.black),
                     ),
                   ),

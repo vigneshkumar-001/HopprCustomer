@@ -3,6 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 import 'package:flutter/services.dart';
 import 'package:hopper/Presentation/OnBoarding/Controller/package_controller.dart';
 import 'package:hopper/Presentation/OnBoarding/Screens/chat_screen.dart';
@@ -61,6 +62,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   BitmapDescriptor? _pickupPinIcon;
   BitmapDescriptor? _dropPinIcon;
   BitmapDescriptor? _pickupWaitingLabelIcon;
+  BitmapDescriptor? _pickupLabelIcon;
+  BitmapDescriptor? _dropLabelIcon;
   Set<Marker> _markers = {};
   Set<Circle> _circles = {};
   bool _isDriverConfirmed = false;
@@ -131,6 +134,26 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     if (v is int) return v.toDouble();
     if (v is num) return v.toDouble();
     return double.tryParse(v.toString());
+  }
+
+  DateTime _parseServerTime(dynamic ts) {
+    try {
+      if (ts == null) return DateTime.now();
+      if (ts is int) {
+        // seconds (10-digit) vs milliseconds (13-digit)
+        if (ts < 2000000000) {
+          return DateTime.fromMillisecondsSinceEpoch(ts * 1000);
+        }
+        return DateTime.fromMillisecondsSinceEpoch(ts);
+      }
+      if (ts is String) {
+        final parsed = DateTime.tryParse(ts);
+        if (parsed != null) return parsed.toLocal();
+      }
+      return DateTime.now();
+    } catch (_) {
+      return DateTime.now();
+    }
   }
 
   Map<String, dynamic> _asMap(dynamic v) {
@@ -275,10 +298,11 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     final asset = isCar ? AppImages.carHop : AppImages.packageBike;
 
     try {
-      final icon = await BitmapDescriptor.asset(
-        height: 46,
-        ImageConfiguration(size: Size(40, 40)),
-        asset,
+      final dpr = ui.window.devicePixelRatio;
+      final icon = await CompactMarkerIcons.assetCircleBadge(
+        assetPath: asset,
+        diameterDp: MapUiDefaults.vehicleBadgeDiameterDp,
+        dpr: dpr,
       );
       if (!mounted) return;
       setState(() => _carIcon = icon);
@@ -291,7 +315,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     try {
       _pickupPinIcon = await CompactMarkerIcons.assetPin(
         assetPath: AppImages.pinLocation,
-        widthDp: 26,
+        widthDp: MapUiDefaults.pickupDropPinWidthDp,
       );
     } catch (_) {
       _pickupPinIcon = null;
@@ -299,22 +323,49 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     try {
       _dropPinIcon = await CompactMarkerIcons.assetPin(
         assetPath: AppImages.rectangleDest,
-        widthDp: 22,
+        widthDp: MapUiDefaults.pickupDropPinWidthDp,
       );
     } catch (_) {
       _dropPinIcon = null;
     }
     try {
       _pickupWaitingLabelIcon = await CompactMarkerIcons.labeledPin(
-        label: 'Your pickup spot',
+        label: MapUiDefaults.placeLabel(PickupAddress, fallback: 'Pickup'),
         assetPath: AppImages.pinLocation,
-        bubbleWidthDp: 126,
-        bubbleHeightDp: 38,
-        pinWidthDp: 26,
-        fontSizeDp: 11.5,
+        bubbleWidthDp: MapUiDefaults.pickupDropBubbleWidthDp,
+        bubbleHeightDp: MapUiDefaults.pickupDropBubbleHeightDp,
+        pinWidthDp: MapUiDefaults.pickupDropPinWidthDp,
+        fontSizeDp: MapUiDefaults.pickupDropFontSizeDp,
+        textAlign: TextAlign.left,
       );
     } catch (_) {
       _pickupWaitingLabelIcon = _pickupPinIcon;
+    }
+    try {
+      _pickupLabelIcon = await CompactMarkerIcons.labeledPin(
+        label: MapUiDefaults.placeLabel(PickupAddress, fallback: 'Pickup'),
+        assetPath: AppImages.pinLocation,
+        bubbleWidthDp: MapUiDefaults.pickupDropBubbleWidthDp,
+        bubbleHeightDp: MapUiDefaults.pickupDropBubbleHeightDp,
+        pinWidthDp: MapUiDefaults.pickupDropPinWidthDp,
+        fontSizeDp: MapUiDefaults.pickupDropFontSizeDp,
+        textAlign: TextAlign.left,
+      );
+    } catch (_) {
+      _pickupLabelIcon = _pickupPinIcon;
+    }
+    try {
+      _dropLabelIcon = await CompactMarkerIcons.labeledPin(
+        label: MapUiDefaults.placeLabel(DropAddress, fallback: 'Drop'),
+        assetPath: AppImages.rectangleDest,
+        bubbleWidthDp: MapUiDefaults.pickupDropBubbleWidthDp,
+        bubbleHeightDp: MapUiDefaults.pickupDropBubbleHeightDp,
+        pinWidthDp: MapUiDefaults.pickupDropPinWidthDp,
+        fontSizeDp: MapUiDefaults.pickupDropFontSizeDp,
+        textAlign: TextAlign.left,
+      );
+    } catch (_) {
+      _dropLabelIcon = _dropPinIcon;
     }
   }
 
@@ -365,8 +416,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     final drop = _customerToLatLang;
     if (pickup == null && drop == null) return;
 
-    // UX: during "waiting for pickup/driver", show only the pickup pin.
-    // Once the package is collected / in transit, show the destination pin.
+    final showPickup = !driverStartedRide && !destinationReached;
     final showDrop = driverStartedRide || destinationReached;
 
     final next = <Marker>{
@@ -377,7 +427,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       ),
     };
 
-    if (pickup != null) {
+    if (showPickup && pickup != null) {
       next.add(
         Marker(
           markerId: const MarkerId("pickup_marker"),
@@ -385,11 +435,13 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
           icon:
               (isWaitingForDriver && !_isDriverConfirmed
                   ? _pickupWaitingLabelIcon
-                  : _pickupPinIcon) ??
+                  : _pickupLabelIcon) ??
+              _pickupPinIcon ??
               BitmapDescriptor.defaultMarkerWithHue(
                 MapUiDefaults.pickupDropMarkerHueGreen,
               ),
-          infoWindow: const InfoWindow(title: "Pickup"),
+          infoWindow: InfoWindow.noText,
+          anchor: const Offset(0.5, 1.0),
         ),
       );
     }
@@ -400,11 +452,13 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
           markerId: const MarkerId("drop_marker"),
           position: drop,
           icon:
+              _dropLabelIcon ??
               _dropPinIcon ??
               BitmapDescriptor.defaultMarkerWithHue(
                 MapUiDefaults.pickupDropMarkerHueRed,
               ),
-          infoWindow: const InfoWindow(title: "Drop"),
+          infoWindow: InfoWindow.noText,
+          anchor: const Offset(0.5, 1.0),
         ),
       );
     }
@@ -451,11 +505,13 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
           icon:
               (isWaitingForDriver && !_isDriverConfirmed
                   ? _pickupWaitingLabelIcon
-                  : _pickupPinIcon) ??
+                  : _pickupLabelIcon) ??
+              _pickupPinIcon ??
               BitmapDescriptor.defaultMarkerWithHue(
                 MapUiDefaults.pickupDropMarkerHueGreen,
               ),
-          infoWindow: const InfoWindow(title: "Pickup"),
+          infoWindow: InfoWindow.noText,
+          anchor: const Offset(0.5, 1.0),
         ),
       );
     }
@@ -466,11 +522,13 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
           markerId: const MarkerId("drop_marker"),
           position: drop,
           icon:
+              _dropLabelIcon ??
               _dropPinIcon ??
               BitmapDescriptor.defaultMarkerWithHue(
                 MapUiDefaults.pickupDropMarkerHueRed,
               ),
-          infoWindow: const InfoWindow(title: "Drop"),
+          infoWindow: InfoWindow.noText,
+          anchor: const Offset(0.5, 1.0),
         ),
       );
     }
@@ -595,7 +653,10 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   LatLng? _pendingDriverTarget;
   double _lastBearing = 0.0;
   final double _hardJumpMeters = 120.0;
-  final double _minMoveMeters = 1.2;
+  // Allow slow movement to animate; reduce "stuck" feeling in traffic.
+  final double _minMoveMeters = 0.3;
+  final Duration _maxStale = const Duration(seconds: 6);
+  DateTime _lastDriverLocationLogAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   // ---------- polyline throttle ----------
   DateTime _lastPolylineAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -742,10 +803,14 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     // Seed pickup/drop immediately from the data we already have, so the
     // "Your pickup spot" marker is reliable even if socket payload is delayed
     // or missing coordinates.
-    _customerLatLng =
-        LatLng(widget.senderData.latitude, widget.senderData.longitude);
-    _customerToLatLang =
-        LatLng(widget.receiverData.latitude, widget.receiverData.longitude);
+    _customerLatLng = LatLng(
+      widget.senderData.latitude,
+      widget.senderData.longitude,
+    );
+    _customerToLatLang = LatLng(
+      widget.receiverData.latitude,
+      widget.receiverData.longitude,
+    );
     PickupAddress =
         widget.senderData.mapAddress.isNotEmpty
             ? widget.senderData.mapAddress
@@ -894,8 +959,10 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       AppLogger.log.i("🚕 driverAccepted ==  $driverAccepted");
 
       _loadCustomMarkerForVehicle(type.toString());
-      _seedPickupDropMarkers();
-      _syncPhaseMarkers();
+      _loadPickupDropIcons().whenComplete(() {
+        _seedPickupDropMarkers();
+        _syncPhaseMarkers();
+      });
 
       // Start real-time tracking
       if (driverId.trim().isNotEmpty) {
@@ -908,7 +975,14 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     });
 
     socketService.on('driver-location', (data) {
-      AppLogger.log.i('📦 driver-location-updated: $data');
+      if (kDebugMode) {
+        final now = DateTime.now();
+        if (now.difference(_lastDriverLocationLogAt) >
+            const Duration(seconds: 3)) {
+          _lastDriverLocationLogAt = now;
+          AppLogger.log.i('📦 driver-location-updated: $data');
+        }
+      }
 
       final lat = _toDouble(data['latitude']);
       final lng = _toDouble(data['longitude']);
@@ -917,6 +991,12 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         return;
       }
       final newDriverLatLng = LatLng(lat, lng);
+
+      final ts = _parseServerTime(data['timestamp']);
+      final now0 = DateTime.now();
+      final safeTs =
+          ts.isAfter(now0.add(const Duration(seconds: 12))) ? now0 : ts;
+      if (now0.difference(safeTs) > _maxStale) return;
 
       if (_currentDriverLatLng == null) {
         _currentDriverLatLng = newDriverLatLng;
@@ -1176,6 +1256,10 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
           BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
       anchor: const Offset(0.5, 0.5),
       flat: true,
+      infoWindow: InfoWindow(
+        title: driverName.trim().isNotEmpty ? driverName.trim() : 'Driver',
+        snippet: carDetails.trim().isNotEmpty ? carDetails.trim() : null,
+      ),
     );
 
     if (!mounted) return;
@@ -1259,19 +1343,9 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
             _routeSeconds = seconds;
             _routeMetricsFromSocket = false;
           }
-          _polylines = {
-            Polyline(
-              polylineId: PolylineId(
-                driverStartedRide ? "driver_to_drop" : "driver_to_pickup",
-              ),
-              points: points,
-              color: Colors.black,
-              width: MapUiDefaults.polylineWidth,
-              jointType: JointType.round,
-              startCap: Cap.roundCap,
-              endCap: Cap.roundCap,
-            ),
-          };
+          final polyId =
+              driverStartedRide ? 'driver_to_drop' : 'driver_to_pickup';
+          _polylines = MapUiDefaults.routePolylines(points, id: polyId);
         });
       } else {
         AppLogger.log.e("Directions error: ${data['status']}");
@@ -1328,6 +1402,134 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     final h = mins ~/ 60;
     final m = mins % 60;
     return m == 0 ? '${h}h' : '${h}h ${m}m';
+  }
+
+  Widget _etaChip() {
+    final etaText =
+        (_routeSeconds != null) ? _formatDuration(_routeSeconds!) : '';
+    final distText =
+        (_routeMeters != null) ? _formatDistance(_routeMeters!) : '';
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        boxShadow: const [
+          BoxShadow(
+            color: Colors.black12,
+            blurRadius: 10,
+            offset: Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (etaText.isNotEmpty)
+            Flexible(
+              child: Text(
+                etaText,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          if (etaText.isNotEmpty && distText.isNotEmpty)
+            const SizedBox(width: 10),
+          if (distText.isNotEmpty)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.06),
+                borderRadius: BorderRadius.circular(18),
+              ),
+              child: Text(
+                distText,
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+          const SizedBox(width: 10),
+          const Icon(Icons.timer_outlined, size: 18, color: Colors.black),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showEtaDistanceSheet() async {
+    final etaText =
+        (_routeSeconds != null) ? _formatDuration(_routeSeconds!) : '';
+    final distText =
+        (_routeMeters != null) ? _formatDistance(_routeMeters!) : '';
+    if (etaText.isEmpty && distText.isEmpty) return;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (context) {
+        return SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 18),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Trip info',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 12),
+                if (etaText.isNotEmpty)
+                  Row(
+                    children: [
+                      const Icon(Icons.timer_outlined, size: 18),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          etaText,
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                if (etaText.isNotEmpty && distText.isNotEmpty)
+                  const SizedBox(height: 10),
+                if (distText.isNotEmpty)
+                  Row(
+                    children: [
+                      const Icon(Icons.route_rounded, size: 18),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          distText,
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 
   final DriverSearchController driverSearchController = Get.put(
@@ -1650,6 +1852,21 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                   ),
                 ),
               ),
+
+              if (_isDriverConfirmed &&
+                  (_routeMeters != null || _routeSeconds != null))
+                Positioned(
+                  top: 102,
+                  right: 16,
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: InkWell(
+                      onTap: _showEtaDistanceSheet,
+                      borderRadius: BorderRadius.circular(22),
+                      child: _etaChip(),
+                    ),
+                  ),
+                ),
 
               DraggableScrollableSheet(
                 key: ValueKey(_isDriverConfirmed),

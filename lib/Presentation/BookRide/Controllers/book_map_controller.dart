@@ -14,6 +14,7 @@ import 'package:http/http.dart' as http;
 import 'package:hopper/Core/Consents/app_logger.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/api/repository/api_consents.dart';
+import 'package:hopper/uitls/map/map_ui_defaults.dart';
 
 class BookMapController extends GetxController {
   // Map refs
@@ -35,6 +36,9 @@ class BookMapController extends GetxController {
 
   // Ride toggle (true = normal, false = shared)
   final RxBool isRideOnly = true.obs;
+
+  // Location button: 1st tap focus, 2nd tap fit-bounds.
+  bool _locationToggleFit = false;
 
   // Debounce timers
   Timer? _cameraIdleDebounce;
@@ -65,6 +69,8 @@ class BookMapController extends GetxController {
   Future<void> initPositions({
     required LatLng pickup,
     required LatLng destination,
+    required String pickupLabel,
+    required String dropLabel,
   }) async {
     pickupPosition = pickup;
     destinationPosition = destination;
@@ -74,8 +80,8 @@ class BookMapController extends GetxController {
 
     // default markers without time (can be updated later)
     await setPickupDropMarkers(
-      pickupLabel: '',
-      dropLabel: '',
+      pickupLabel: pickupLabel.trim().isEmpty ? 'Pickup' : pickupLabel.trim(),
+      dropLabel: dropLabel.trim().isEmpty ? 'Drop' : dropLabel.trim(),
       estimatedMin: '',
       pickupAsset: AppImages.circleStart,
       dropAsset: AppImages.rectangleDest,
@@ -105,6 +111,24 @@ class BookMapController extends GetxController {
   }
 
   // ---------- CAMERA ----------
+  void onUserMapGesture() {
+    _locationToggleFit = false;
+  }
+
+  Future<void> onLocationButtonTap() async {
+    final mc = mapController;
+    if (mc == null) return;
+
+    if (_locationToggleFit) {
+      _locationToggleFit = false;
+      await fitBounds();
+      return;
+    }
+
+    _locationToggleFit = true;
+    await goToCurrentLocation();
+  }
+
   void onCameraIdle() {
     _cameraIdleDebounce?.cancel();
     _cameraIdleDebounce = Timer(const Duration(milliseconds: 350), () async {
@@ -178,14 +202,7 @@ class BookMapController extends GetxController {
         final encoded = data['routes'][0]['overview_polyline']['points'];
         final points = _decodePolyline(encoded);
 
-        polylines.assignAll({
-          Polyline(
-            polylineId: const PolylineId("route"),
-            points: points,
-            color: Colors.black,
-            width: 3,
-          ),
-        });
+        polylines.assignAll(MapUiDefaults.routePolylines(points, id: 'route'));
       } else {
         AppLogger.log.w("Directions error: ${data['status']}");
       }
@@ -260,13 +277,13 @@ class BookMapController extends GetxController {
 
     final startIcon = await _createCustomMarkerWithLabel(
       timeText: estimatedMin.isNotEmpty ? '$estimatedMin MIN' : null,
-      label: pickupLabel,
+      label: MapUiDefaults.placeLabel(pickupLabel, fallback: 'Pickup'),
       assetPath: pickupAsset,
     );
 
     final destIcon = await _createCustomMarkerWithLabel(
       timeText: null,
-      label: dropLabel,
+      label: MapUiDefaults.placeLabel(dropLabel, fallback: 'Drop'),
       assetPath: dropAsset,
     );
 
@@ -275,11 +292,15 @@ class BookMapController extends GetxController {
         markerId: const MarkerId("pickup"),
         icon: startIcon,
         position: pickupPosition!,
+        anchor: const Offset(0.5, 1.0),
+        infoWindow: InfoWindow.noText,
       ),
       Marker(
         markerId: const MarkerId("destination"),
         icon: destIcon,
         position: destinationPosition!,
+        anchor: const Offset(0.5, 1.0),
+        infoWindow: InfoWindow.noText,
       ),
     });
   }
@@ -288,31 +309,49 @@ class BookMapController extends GetxController {
     required String label,
     required String assetPath,
     String? timeText,
-    double width = 300,
-    double height = 100,
-    double iconSize = 50,
+    double bubbleWidthDp = MapUiDefaults.pickupDropBubbleWidthDp,
+    double bubbleHeightDp = MapUiDefaults.pickupDropBubbleHeightDp,
+    double pinWidthDp = MapUiDefaults.pickupDropPinWidthDp,
+    double fontSizeDp = MapUiDefaults.pickupDropFontSizeDp,
+    double? dpr,
   }) async {
+    final resolvedDpr = (dpr ?? ui.window.devicePixelRatio).clamp(1.0, 4.0);
+    final width = (bubbleWidthDp * resolvedDpr).round().clamp(140, 1400);
+    final height = (bubbleHeightDp * resolvedDpr).round().clamp(36, 600);
+    final pinW = (pinWidthDp * resolvedDpr).round().clamp(18, 260);
+    final pad = (10 * resolvedDpr).round().clamp(8, 90);
+    final gap = (4 * resolvedDpr).round().clamp(2, 40);
+
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
     final paint = Paint();
 
-    const double padding = 10;
-    const double timeBoxWidth = 60;
+    final timeBoxWidth = (54 * resolvedDpr).round().clamp(44, 260).toDouble();
 
     final bool showTime = timeText != null;
-    final double labelBoxWidth =
-    showTime ? width - timeBoxWidth - (padding * 3) : width - (padding * 2);
-    final double totalHeight = height + iconSize + 10;
+    final double labelBoxWidth = showTime
+        ? width - timeBoxWidth - (pad * 3)
+        : width - (pad * 2);
 
     // Background
     paint.color = Colors.white;
-    canvas.drawRect(Rect.fromLTWH(0, 0, width, height), paint);
+    canvas.drawRect(
+      Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()),
+      paint,
+    );
+    canvas.drawRect(
+      Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()),
+      Paint()
+        ..color = const Color(0xFFE5E7EB)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = (1.0 * resolvedDpr).clamp(1.0, 3.0),
+    );
 
     // Time Box
     if (showTime) {
       paint.color = Colors.black;
       canvas.drawRect(
-        Rect.fromLTWH(0, 0, padding + timeBoxWidth, height),
+        Rect.fromLTWH(0, 0, pad + timeBoxWidth, height.toDouble()),
         paint,
       );
 
@@ -322,30 +361,34 @@ class BookMapController extends GetxController {
         ..pushStyle(
           ui.TextStyle(
             color: Colors.white,
-            fontSize: 22,
-            fontWeight: FontWeight.w400,
+            fontSize: (12.5 * resolvedDpr).clamp(12.0, 40.0),
+            fontWeight: FontWeight.w700,
           ),
         )
         ..addText(timeText!.replaceAll(" ", "\n"));
 
       final timeParagraph = timePara.build();
-      timeParagraph.layout(const ui.ParagraphConstraints(width: timeBoxWidth));
+      timeParagraph.layout(ui.ParagraphConstraints(width: timeBoxWidth));
 
       canvas.drawParagraph(
         timeParagraph,
-        Offset(padding, (height - timeParagraph.height) / 2),
+        Offset(pad.toDouble(), (height - timeParagraph.height) / 2),
       );
     }
 
     // Label
     final labelPara = ui.ParagraphBuilder(
-      ui.ParagraphStyle(textAlign: TextAlign.center, maxLines: 2),
+       ui.ParagraphStyle(
+        textAlign: TextAlign.left,
+        maxLines: 2,
+        ellipsis: '...',
+      ),
     )
       ..pushStyle(
         ui.TextStyle(
           color: Colors.black,
-          fontSize: 29,
-          fontWeight: FontWeight.w600,
+          fontSize: (fontSizeDp * resolvedDpr).clamp(12.0, 48.0),
+          fontWeight: FontWeight.w800,
         ),
       )
       ..addText(label);
@@ -353,7 +396,7 @@ class BookMapController extends GetxController {
     final labelParagraph = labelPara.build();
     labelParagraph.layout(ui.ParagraphConstraints(width: labelBoxWidth));
 
-    final labelOffsetX = showTime ? padding + timeBoxWidth + padding : padding;
+    final labelOffsetX = showTime ? (pad + timeBoxWidth + pad) : pad.toDouble();
     canvas.drawParagraph(
       labelParagraph,
       Offset(labelOffsetX, (height - labelParagraph.height) / 2),
@@ -361,11 +404,18 @@ class BookMapController extends GetxController {
 
     // Marker Icon
     final data = await rootBundle.load(assetPath);
-    final codec = await ui.instantiateImageCodec(data.buffer.asUint8List());
+    final codec = await ui.instantiateImageCodec(
+      data.buffer.asUint8List(),
+      targetWidth: pinW,
+    );
     final frame = await codec.getNextFrame();
     final markerImage = frame.image;
 
-    final imageOffset = Offset((width - iconSize) / 2, height + 5);
+    final pinH =
+        (pinW * (markerImage.height / markerImage.width)).round().clamp(18, 520);
+    final totalHeight = height + pinH + gap;
+    final imageOffset =
+        Offset((width - pinW) / 2, (height + gap).toDouble());
     canvas.drawImageRect(
       markerImage,
       Rect.fromLTWH(
@@ -374,15 +424,18 @@ class BookMapController extends GetxController {
         markerImage.width.toDouble(),
         markerImage.height.toDouble(),
       ),
-      Rect.fromLTWH(imageOffset.dx, imageOffset.dy, iconSize, iconSize),
-      Paint(),
+      Rect.fromLTWH(
+        imageOffset.dx.toDouble(),
+        imageOffset.dy.toDouble(),
+        pinW.toDouble(),
+        pinH.toDouble(),
+      ),
+      Paint()..filterQuality = FilterQuality.high,
     );
 
     final picture = recorder.endRecording();
-    final finalImage =
-    await picture.toImage(width.toInt(), totalHeight.toInt());
-    final byteData =
-    await finalImage.toByteData(format: ui.ImageByteFormat.png);
+    final finalImage = await picture.toImage(width, totalHeight);
+    final byteData = await finalImage.toByteData(format: ui.ImageByteFormat.png);
 
     return BitmapDescriptor.fromBytes(byteData!.buffer.asUint8List());
   }

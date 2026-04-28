@@ -114,6 +114,8 @@ class _BookMapScreenState extends State<BookMapScreen> {
       await mapC.initPositions(
         pickup: resolvedPickup,
         destination: resolvedDestination,
+        pickupLabel: widget.pickupAddress,
+        dropLabel: widget.destinationAddress,
       );
 
       // Prefetch both once
@@ -181,6 +183,8 @@ class _BookMapScreenState extends State<BookMapScreen> {
                             },
 
                             onCameraIdle: mapC.onCameraIdle,
+                            onCameraMoveStarted: mapC.onUserMapGesture,
+                            onTap: (_) => mapC.onUserMapGesture(),
 
                             polylines: mapC.polylines.toSet(),
                             markers: mapC.markers.toSet(),
@@ -199,7 +203,7 @@ class _BookMapScreenState extends State<BookMapScreen> {
                           child: FloatingActionButton(
                             mini: true,
                             backgroundColor: Colors.white,
-                            onPressed: () => mapC.goToCurrentLocation(),
+                            onPressed: () => mapC.onLocationButtonTap(),
                             child: const Icon(
                               Icons.my_location,
                               color: Colors.black,

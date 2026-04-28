@@ -27,7 +27,7 @@ class DriverPose {
 }
 
 class OrderConfirmController extends GetxController
-    with GetSingleTickerProviderStateMixin {
+    with GetSingleTickerProviderStateMixin, WidgetsBindingObserver {
   // ---------- inputs ----------
   late final String bookingId;
   late final String pickupAddress;
@@ -63,6 +63,9 @@ class OrderConfirmController extends GetxController
     String? initialDriverProfilePic,
     String? initialCarDetails,
     double? initialAmount,
+    String? initialStatus,
+    bool? initialRideStarted,
+    bool? initialDestinationReached,
   }) {
     this.bookingId = bookingId;
     this.pickupAddress = pickupAddress;
@@ -88,6 +91,32 @@ class OrderConfirmController extends GetxController
     if (initialAmount != null && initialAmount > 0) {
       amount.value = initialAmount;
     }
+
+    if ((initialStatus ?? '').trim().isNotEmpty) {
+      latestRideStatus.value = initialStatus!.trim();
+    }
+
+    final statusUpper = latestRideStatus.value.trim().toUpperCase();
+    final started =
+        initialRideStarted == true ||
+        _isRideStartedStatus(statusUpper) ||
+        statusUpper.contains('IN_PROGRESS');
+    final reached =
+        initialDestinationReached == true ||
+        statusUpper.contains('DESTINATION_REACHED') ||
+        statusUpper.contains('COMPLETED');
+
+    if (reached) destinationReached.value = true;
+    if (started) driverStartedRide.value = true;
+
+    final confirmed = (resumeDriverId ?? '').trim().isNotEmpty;
+    if (confirmed) isDriverConfirmed.value = true;
+
+    isWaitingForDriver.value =
+        !isDriverConfirmed.value &&
+        !driverStartedRide.value &&
+        !destinationReached.value &&
+        !isTripCancelled.value;
 
     // Ensure pickup point is available immediately for "Finding a driver" UI,
     // even before socket returns `customerLocation`.
@@ -150,6 +179,7 @@ class OrderConfirmController extends GetxController
   final RxString profilePic = "".obs;
   final RxString carExteriorPhotos = "".obs;
   final RxString driverName = "".obs;
+  final RxString driverPhone = "".obs;
   final RxString carDetails = "".obs;
   final RxString customerPhone = "".obs;
   final RxString cartypeFromServer = "".obs;
@@ -179,6 +209,8 @@ class OrderConfirmController extends GetxController
   BitmapDescriptor? pickupPinIcon;
   BitmapDescriptor? dropPinIcon;
   BitmapDescriptor? pickupWaitingLabelIcon;
+  BitmapDescriptor? pickupLabelIcon;
+  BitmapDescriptor? dropLabelIcon;
 
   String _pickupMarkerVariant = 'dot';
   bool _locationToggleFit = false;
@@ -232,7 +264,8 @@ class OrderConfirmController extends GetxController
   // Hard filter to stop "teleport jump"
   final double _hardJumpMeters =
       120.0; // if server point jumps > 120m => ignore
-  final double _minMoveMeters = 1.2; // ignore micro jitter
+  // Ignore micro-jitter, but still allow slow traffic movement to feel "alive".
+  final double _minMoveMeters = 0.3;
 
   // =================================================================
   //                        POLYLINE CONTROL
@@ -251,6 +284,7 @@ class OrderConfirmController extends GetxController
   @override
   void onInit() {
     super.onInit();
+    WidgetsBinding.instance.addObserver(this);
     _moveCtrl = AnimationController(vsync: this);
     _dir = DirectionsHelper(apiKey: ApiConsents.googleMapApiKey);
     _loadMapStyle();
@@ -261,7 +295,7 @@ class OrderConfirmController extends GetxController
     await _ensureSocketReady();
     await _loadCustomMarkers();
     _iconsReady = true;
-    _syncPickupMarkerForSearch(force: true);
+    _seedStaticMarkers(forceRecreate: true);
     _startPulseAnimation();
     _setupSocketListeners();
     if ((resumeDriverId ?? '').trim().isNotEmpty) {
@@ -304,9 +338,22 @@ class OrderConfirmController extends GetxController
     _searchTimer?.cancel();
     _pulseTimer?.cancel();
     _driverMarkerFlushTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     if (_activeTick != null) _moveCtrl.removeListener(_activeTick!);
     _moveCtrl.dispose();
     super.onClose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Don't keep pulsing the map while backgrounded.
+    if (state == AppLifecycleState.resumed) {
+      _startPulseAnimation();
+    } else {
+      _pulseTimer?.cancel();
+      _pulseTimer = null;
+      if (circles.isNotEmpty) circles.clear();
+    }
   }
 
   // ---------- map callbacks ----------
@@ -462,11 +509,10 @@ class OrderConfirmController extends GetxController
     final dpr = ui.window.devicePixelRatio;
 
     try {
-      carIcon = await _bitmapFromAssetSized(
-        AppImages.carHop,
-        widthDp: 28,
+      carIcon = await CompactMarkerIcons.assetCircleBadge(
+        assetPath: AppImages.carHop,
+        diameterDp: MapUiDefaults.vehicleBadgeDiameterDp,
         dpr: dpr,
-        circleBadge: true,
       );
     } catch (_) {
       carIcon = BitmapDescriptor.defaultMarkerWithHue(
@@ -475,11 +521,10 @@ class OrderConfirmController extends GetxController
     }
 
     try {
-      bikeIcon = await _bitmapFromAssetSized(
-        AppImages.packageBike,
-        widthDp: 28,
+      bikeIcon = await CompactMarkerIcons.assetCircleBadge(
+        assetPath: AppImages.packageBike,
+        diameterDp: MapUiDefaults.vehicleBadgeDiameterDp,
         dpr: dpr,
-        circleBadge: true,
       );
     } catch (_) {
       bikeIcon = BitmapDescriptor.defaultMarkerWithHue(
@@ -491,7 +536,7 @@ class OrderConfirmController extends GetxController
     try {
       pickupPinIcon = await CompactMarkerIcons.assetPin(
         assetPath: AppImages.pinLocation,
-        widthDp: 26,
+        widthDp: MapUiDefaults.pickupDropPinWidthDp,
         dpr: dpr,
       );
     } catch (_) {
@@ -500,7 +545,7 @@ class OrderConfirmController extends GetxController
     try {
       dropPinIcon = await CompactMarkerIcons.assetPin(
         assetPath: AppImages.rectangleDest,
-        widthDp: 22,
+        widthDp: MapUiDefaults.pickupDropPinWidthDp,
         dpr: dpr,
       );
     } catch (_) {
@@ -508,16 +553,45 @@ class OrderConfirmController extends GetxController
     }
     try {
       pickupWaitingLabelIcon = await CompactMarkerIcons.labeledPin(
-        label: 'Your pickup spot',
+        label: MapUiDefaults.placeLabel(pickupAddress, fallback: 'Pickup'),
         assetPath: AppImages.pinLocation,
-        bubbleWidthDp: 126,
-        bubbleHeightDp: 38,
-        pinWidthDp: 26,
-        fontSizeDp: 11.5,
+        bubbleWidthDp: MapUiDefaults.pickupDropBubbleWidthDp,
+        bubbleHeightDp: MapUiDefaults.pickupDropBubbleHeightDp,
+        pinWidthDp: MapUiDefaults.pickupDropPinWidthDp,
+        fontSizeDp: MapUiDefaults.pickupDropFontSizeDp,
+        textAlign: TextAlign.left,
         dpr: dpr,
       );
     } catch (_) {
       pickupWaitingLabelIcon = pickupPinIcon;
+    }
+    try {
+      pickupLabelIcon = await CompactMarkerIcons.labeledPin(
+        label: MapUiDefaults.placeLabel(pickupAddress, fallback: 'Pickup'),
+        assetPath: AppImages.pinLocation,
+        bubbleWidthDp: MapUiDefaults.pickupDropBubbleWidthDp,
+        bubbleHeightDp: MapUiDefaults.pickupDropBubbleHeightDp,
+        pinWidthDp: MapUiDefaults.pickupDropPinWidthDp,
+        fontSizeDp: MapUiDefaults.pickupDropFontSizeDp,
+        textAlign: TextAlign.left,
+        dpr: dpr,
+      );
+    } catch (_) {
+      pickupLabelIcon = pickupPinIcon;
+    }
+    try {
+      dropLabelIcon = await CompactMarkerIcons.labeledPin(
+        label: MapUiDefaults.placeLabel(destinationAddress, fallback: 'Drop'),
+        assetPath: AppImages.rectangleDest,
+        bubbleWidthDp: MapUiDefaults.pickupDropBubbleWidthDp,
+        bubbleHeightDp: MapUiDefaults.pickupDropBubbleHeightDp,
+        pinWidthDp: MapUiDefaults.pickupDropPinWidthDp,
+        fontSizeDp: MapUiDefaults.pickupDropFontSizeDp,
+        textAlign: TextAlign.left,
+        dpr: dpr,
+      );
+    } catch (_) {
+      dropLabelIcon = dropPinIcon;
     }
   }
 
@@ -529,67 +603,6 @@ class OrderConfirmController extends GetxController
     if (driverStartedRide.value) return;
 
     _seedStaticMarkers(forceRecreate: force);
-  }
-
-  Future<BitmapDescriptor> _bitmapFromAssetSized(
-    String assetPath, {
-    required double widthDp,
-    required double dpr,
-    bool circleBadge = false,
-  }) async {
-    final targetPx = (widthDp * dpr).round();
-    final sourceWidth = circleBadge ? (targetPx * 0.56).round() : targetPx;
-    final byteData = await rootBundle.load(assetPath);
-    final codec = await ui.instantiateImageCodec(
-      byteData.buffer.asUint8List(),
-      targetWidth: sourceWidth,
-    );
-    final frame = await codec.getNextFrame();
-
-    if (!circleBadge) {
-      final bytes = await frame.image.toByteData(
-        format: ui.ImageByteFormat.png,
-      );
-      return BitmapDescriptor.fromBytes(bytes!.buffer.asUint8List());
-    }
-
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder);
-    final size = Size(targetPx.toDouble(), targetPx.toDouble());
-    final rect = Offset.zero & size;
-    final center = rect.center;
-    final radius = targetPx / 2;
-
-    canvas.drawCircle(center, radius * 0.88, Paint()..color = Colors.white);
-    canvas.drawCircle(
-      center,
-      radius * 0.88,
-      Paint()
-        ..color = const Color(0xFFE5E7EB)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = targetPx * 0.06,
-    );
-
-    final imageRect = Rect.fromCenter(
-      center: center,
-      width: frame.image.width.toDouble(),
-      height: frame.image.height.toDouble(),
-    );
-    canvas.drawImageRect(
-      frame.image,
-      Rect.fromLTWH(
-        0,
-        0,
-        frame.image.width.toDouble(),
-        frame.image.height.toDouble(),
-      ),
-      imageRect,
-      Paint()..filterQuality = FilterQuality.high,
-    );
-
-    final composed = await recorder.endRecording().toImage(targetPx, targetPx);
-    final bytes = await composed.toByteData(format: ui.ImageByteFormat.png);
-    return BitmapDescriptor.fromBytes(bytes!.buffer.asUint8List());
   }
 
   BitmapDescriptor _iconForVehicleType(String? type) {
@@ -727,6 +740,7 @@ class OrderConfirmController extends GetxController
       final vehicle = data['vehicle'] ?? {};
       final String driverId = (data['driverId'] ?? '').toString();
       final String driverFullName = (data['driverName'] ?? '').toString();
+      final String driverPhoneStr = (data['driverPhone'] ?? '').toString();
       final String customerPhoneStr = (data['customerPhone'] ?? '').toString();
       final double rating =
           double.tryParse((data['driverRating'] ?? '0').toString()) ?? 0.0;
@@ -780,6 +794,7 @@ class OrderConfirmController extends GetxController
       driverName.value = '$driverFullName ⭐️ $rating';
       carDetails.value = '$color - $brand';
       isDriverConfirmed.value = hasDriver;
+      driverPhone.value = driverPhoneStr;
       customerPhone.value = customerPhoneStr;
       cartypeFromServer.value = vehicleType;
       amount.value = amt;
@@ -1254,7 +1269,7 @@ class OrderConfirmController extends GetxController
       // Waiting screen: show a compact pin with a small label above.
       final useWaitingLabel =
           isWaitingForDriver.value && !isDriverConfirmed.value;
-      final variant = useWaitingLabel ? 'wait_label' : 'pin';
+      final variant = useWaitingLabel ? 'wait_label' : 'label';
       final shouldReplace =
           forceRecreate ||
           !_seededPickupMarker ||
@@ -1268,7 +1283,8 @@ class OrderConfirmController extends GetxController
             position: customerLatLng!,
             infoWindow: InfoWindow.noText,
             icon:
-                (useWaitingLabel ? pickupWaitingLabelIcon : pickupPinIcon) ??
+                (useWaitingLabel ? pickupWaitingLabelIcon : pickupLabelIcon) ??
+                pickupPinIcon ??
                 BitmapDescriptor.defaultMarkerWithHue(
                   MapUiDefaults.pickupDropMarkerHueGreen,
                 ),
@@ -1290,24 +1306,36 @@ class OrderConfirmController extends GetxController
       }
     }
 
-    if (driverStartedRide.value &&
-        customerToLatLng != null &&
-        !_seededDropMarker) {
-      set.add(
-        Marker(
-          markerId: const MarkerId('drop_marker'),
-          position: customerToLatLng!,
-          infoWindow: InfoWindow.noText,
-          icon:
-              dropPinIcon ??
-              BitmapDescriptor.defaultMarkerWithHue(
-                MapUiDefaults.pickupDropMarkerHueRed,
-              ),
-          anchor: const Offset(0.5, 1.0),
-          flat: true,
-        ),
-      );
-      _seededDropMarker = true;
+    final shouldShowDrop = driverStartedRide.value && customerToLatLng != null;
+    if (!shouldShowDrop) {
+      if (set.any((m) => m.markerId.value == 'drop_marker')) {
+        set.removeWhere((m) => m.markerId.value == 'drop_marker');
+        _seededDropMarker = false;
+      }
+    } else {
+      final shouldReplaceDrop =
+          forceRecreate ||
+          !_seededDropMarker ||
+          !set.any((m) => m.markerId.value == 'drop_marker');
+      if (shouldReplaceDrop) {
+        set.removeWhere((m) => m.markerId.value == 'drop_marker');
+        set.add(
+          Marker(
+            markerId: const MarkerId('drop_marker'),
+            position: customerToLatLng!,
+            infoWindow: InfoWindow.noText,
+            icon:
+                dropLabelIcon ??
+                dropPinIcon ??
+                BitmapDescriptor.defaultMarkerWithHue(
+                  MapUiDefaults.pickupDropMarkerHueRed,
+                ),
+            anchor: const Offset(0.5, 1.0),
+            flat: true,
+          ),
+        );
+        _seededDropMarker = true;
+      }
     }
 
     markers
@@ -1439,6 +1467,14 @@ class OrderConfirmController extends GetxController
       icon: _iconForVehicleType(cartypeFromServer.value),
       anchor: const Offset(0.5, 0.72),
       flat: true,
+      infoWindow: InfoWindow(
+        title:
+            driverName.value.trim().isNotEmpty
+                ? driverName.value.trim()
+                : 'Driver',
+        snippet:
+            carDetails.value.trim().isNotEmpty ? carDetails.value.trim() : null,
+      ),
     );
 
     markers.removeWhere((m) => m.markerId.value == "driver_marker");
@@ -1771,26 +1807,7 @@ class OrderConfirmController extends GetxController
       final pts = _simplifyPolyline(route.points);
       if (pts.length < 2) return;
 
-      polylines.assignAll({
-        Polyline(
-          polylineId: PolylineId('${polyId}_outline'),
-          points: pts,
-          color: const Color(0xFFE5E7EB),
-          width: 5,
-          startCap: Cap.roundCap,
-          endCap: Cap.roundCap,
-          jointType: JointType.round,
-        ),
-        Polyline(
-          polylineId: PolylineId(polyId),
-          points: pts,
-          color: Colors.black,
-          width: MapUiDefaults.polylineWidth,
-          startCap: Cap.roundCap,
-          endCap: Cap.roundCap,
-          jointType: JointType.round,
-        ),
-      });
+      polylines.assignAll(MapUiDefaults.routePolylines(pts, id: polyId));
       _activePolyId = polyId;
     } catch (e) {
       AppLogger.log.e("Polyline error: $e");
@@ -1915,7 +1932,7 @@ class OrderConfirmController extends GetxController
     _pulseTimer?.cancel();
     _pulseStartAt = DateTime.now();
     // Smooth pulse without over-updating the map.
-    _pulseTimer = Timer.periodic(const Duration(milliseconds: 120), (_) {
+    _pulseTimer = Timer.periodic(const Duration(milliseconds: 320), (_) {
       _refreshPulseCircles();
     });
   }

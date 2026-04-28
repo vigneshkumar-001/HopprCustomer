@@ -13,6 +13,7 @@ import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Core/Utility/app_loader.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:hopper/api/repository/api_consents.dart';
+import 'package:hopper/uitls/map/map_ui_defaults.dart';
 import 'package:hopper/uitls/map/search_loaction.dart';
 import 'package:http/http.dart' as http;
 import 'package:geolocator/geolocator.dart';
@@ -69,6 +70,8 @@ class _MapScreenState extends State<MapScreen>
   bool _isFetchingAddress = false;
 
   bool _isCameraMoving = false;
+  bool _locationToggleFit = false;
+  LatLng? _lastDeviceLatLng;
 
   bool receiveWithOtp = true;
   List<String> parcelTypes = ['Home', 'Work', 'Other'];
@@ -597,8 +600,32 @@ class _MapScreenState extends State<MapScreen>
     );
 
     final latLng = LatLng(position.latitude, position.longitude);
+    _lastDeviceLatLng = latLng;
 
     _mapController?.animateCamera(CameraUpdate.newLatLngZoom(latLng, 17));
+  }
+
+  Future<void> _fitDeviceToTargetBounds() async {
+    if (_mapController == null) return;
+    final a = _lastDeviceLatLng;
+    final b = _targetLocation;
+    if (a == null || b == null) return;
+    try {
+      await _mapController!.animateCamera(
+        CameraUpdate.newLatLngBounds(MapUiDefaults.boundsFrom2(a, b), 120),
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _onLocationFabTap() async {
+    if (_mapController == null) return;
+    if (_locationToggleFit) {
+      _locationToggleFit = false;
+      await _fitDeviceToTargetBounds();
+      return;
+    }
+    _locationToggleFit = true;
+    _goToCurrentLocation();
   }
 
   @override
@@ -620,6 +647,7 @@ class _MapScreenState extends State<MapScreen>
                     onCameraMove: (CameraPosition position) {
                       _isCameraMoving = true;
                       _isDragging = true; // hide the bubble
+                      _locationToggleFit = false;
                       _cameraPosition = position.target;
                       // ⚠️ avoid setState on every frame; it's heavy and can cause jank
                     },
@@ -645,7 +673,7 @@ class _MapScreenState extends State<MapScreen>
                     child: FloatingActionButton(
                       mini: true,
                       backgroundColor: Colors.white,
-                      onPressed: _goToCurrentLocation,
+                      onPressed: _onLocationFabTap,
                       child: const Icon(Icons.my_location, color: Colors.black),
                     ),
                   ),
