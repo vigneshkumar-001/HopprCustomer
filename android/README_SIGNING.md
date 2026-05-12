@@ -48,3 +48,14 @@ Edit `android/key.properties` and set:
 ```bash
 flutter build appbundle --release
 ```
+
+## CI (GitHub Actions) - recommended
+
+Do not commit the keystore or `android/key.properties` to git. Store them as GitHub Actions secrets:
+
+- `ANDROID_KEYSTORE_B64` - base64 of `android/keystore/upload-keystore.jks`
+- `KEYSTORE_PASSWORD`
+- `KEY_PASSWORD`
+- `KEY_ALIAS`
+
+Workflow: `.github/workflows/android-release.yml`
