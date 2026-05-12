@@ -1,0 +1,7 @@
+# Copy this file to `android/key.properties` and fill in the values.
+# Do not commit `android/key.properties` or any `*.jks` / `*.keystore` files to git.
+
+storePassword=123456
+keyPassword=123456
+keyAlias=hoppercustoner
+storeFile=keystore/upload-keystore.jks

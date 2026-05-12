@@ -69,6 +69,7 @@ app.*.map.json
 *.jks
 *.keystore
 key.properties
+upload_certificate.pem
 google-services.json
 GoogleService-Info.plist
 

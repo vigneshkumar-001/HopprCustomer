@@ -9,7 +9,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("dev.flutter.flutter-gradle-plugin")
-    id("com.google.gms.google-services")
+    id("com.google.gms.google-services") apply false
 }
 
 val keystoreProperties = Properties()
@@ -17,6 +17,9 @@ val keystorePropertiesFile = rootProject.file("key.properties")
 if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
+
+val isReleaseTaskRequested =
+    gradle.startParameter.taskNames.any { it.contains("release", ignoreCase = true) }
 
 android {
     namespace = "com.hopper.customer.hopper"
@@ -33,18 +36,36 @@ android {
 
     signingConfigs {
         create("release") {
-            if (!keystorePropertiesFile.exists()) {
-                throw GradleException("key.properties not found in android/. Cannot build release.")
+            val requiredKeys = listOf("keyAlias", "keyPassword", "storeFile", "storePassword")
+            val missing = buildList {
+                if (!keystorePropertiesFile.exists()) {
+                    add("key.properties (file missing)")
+                } else {
+                    for (k in requiredKeys) {
+                        if (keystoreProperties.getProperty(k).isNullOrBlank()) add(k)
+                    }
+                }
             }
 
-            fun req(key: String): String =
-                keystoreProperties.getProperty(key)
-                    ?: throw GradleException("Missing '$key' in key.properties")
+            if (missing.isNotEmpty()) {
+                if (isReleaseTaskRequested) {
+                    throw GradleException(
+                        "Release signing config is incomplete. Missing: ${missing.joinToString(", ")}"
+                    )
+                } else {
+                    // Allow debug builds without requiring release signing credentials.
+                    logger.warn(
+                        "Release signing config not set (missing: ${missing.joinToString(", ")}). " +
+                            "Debug builds will still work; release builds will fail until configured."
+                    )
+                    return@create
+                }
+            }
 
-            keyAlias = req("keyAlias")
-            keyPassword = req("keyPassword")
-            storeFile = file(req("storeFile"))
-            storePassword = req("storePassword")
+            keyAlias = keystoreProperties.getProperty("keyAlias").trim()
+            keyPassword = keystoreProperties.getProperty("keyPassword")
+            storeFile = file(keystoreProperties.getProperty("storeFile").trim())
+            storePassword = keystoreProperties.getProperty("storePassword")
         }
     }
 
@@ -82,6 +103,20 @@ android {
 
 flutter {
     source = "../.."
+}
+
+// Apply Google Services only when google-services.json exists.
+// This prevents debug builds from failing in environments where the file isn't present.
+val googleServicesCandidates = listOf(
+    file("google-services.json"),
+    file("src/google-services.json"),
+    file("src/debug/google-services.json"),
+    file("src/release/google-services.json"),
+)
+if (googleServicesCandidates.any { it.exists() }) {
+    apply(plugin = "com.google.gms.google-services")
+} else {
+    logger.warn("google-services.json not found; skipping com.google.gms.google-services plugin.")
 }
 
 dependencies {
