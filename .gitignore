@@ -65,11 +65,7 @@ app.*.map.json
 # Web
 /web/build/
 
-# Firebase / secrets / signing
-*.jks
-*.keystore
-key.properties
-upload_certificate.pem
+
 GoogleService-Info.plist
 
 # Archive files
