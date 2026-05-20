@@ -44,6 +44,15 @@ android {
                     for (k in requiredKeys) {
                         if (keystoreProperties.getProperty(k).isNullOrBlank()) add(k)
                     }
+
+                    // Fail fast if key.properties exists but the referenced keystore file doesn't.
+                    val storeFileProp = keystoreProperties.getProperty("storeFile")?.trim()
+                    if (!storeFileProp.isNullOrBlank()) {
+                        val resolvedStoreFile = file(storeFileProp)
+                        if (!resolvedStoreFile.exists()) {
+                            add("storeFile (not found at ${resolvedStoreFile.absolutePath})")
+                        }
+                    }
                 }
             }
 

@@ -1,8 +1,8 @@
 class ApiConsents {
   static const String baseUrl =
-      'https://hoppr-face-two-dbe557472d7f.herokuapp.com';
+      'https://bk.myhoppr.com';
   static const String sharedBaseUrl =
-      'https://hoppr-share-ride-85bbca49cbeb.herokuapp.com';
+      'https://bck.myhoppr.com';
 
   // static String baseUrl = 'https://q29l3cr9-5000.inc1.devtunnels.ms';
   // static String sharedBaseUrl = 'https://q29l3cr9-6000.inc1.devtunnels.ms';
