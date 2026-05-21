@@ -243,7 +243,7 @@ class _ChatScreenState extends State<ChatScreen> {
     await _loadCustomerAndDriverInfo();
 
     socketService.initSocket(
-      'https://hoppr-face-two-dbe557472d7f.herokuapp.com',
+      'https://bk.myhoppr.com',
     );
 
     socketService.onConnect(() {

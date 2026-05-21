@@ -657,6 +657,14 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   final double _minMoveMeters = 0.3;
   final Duration _maxStale = const Duration(seconds: 6);
   DateTime _lastDriverLocationLogAt = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime? _lastDriverServerTs;
+  DateTime? _lastDriverPacketTs;
+  DateTime _lastDriverPaintAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  late final AnimationController _driverMoveController;
+  LatLng? _driverAnimFrom;
+  LatLng? _driverAnimTo;
+  LatLng? _driverAnimPrev;
 
   // ---------- polyline throttle ----------
   DateTime _lastPolylineAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -824,6 +832,14 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       vsync: this,
       duration: const Duration(milliseconds: 1600),
     )..repeat();
+
+    _driverMoveController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1),
+    )
+      ..addListener(_onDriverAnimTick)
+      ..addStatusListener(_onDriverAnimStatus);
+
     _searchingElapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       setState(() => _searchingElapsedSeconds += 1);
@@ -998,6 +1014,14 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
           ts.isAfter(now0.add(const Duration(seconds: 12))) ? now0 : ts;
       if (now0.difference(safeTs) > _maxStale) return;
 
+      // Drop out-of-order packets (prevents marker jumping backwards).
+      final lastPkt = _lastDriverPacketTs;
+      if (lastPkt != null &&
+          safeTs.isBefore(lastPkt.subtract(const Duration(milliseconds: 500)))) {
+        return;
+      }
+      _lastDriverPacketTs = safeTs;
+
       if (_currentDriverLatLng == null) {
         _currentDriverLatLng = newDriverLatLng;
         _updateDriverMarker(newDriverLatLng, _lastBearing);
@@ -1007,7 +1031,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       }
 
       // ✅ Animate movement
-      _enqueueDriverMove(newDriverLatLng);
+      _enqueueDriverMove(newDriverLatLng, serverTs: safeTs);
 
       // polyline handled by _enqueueDriverMove()
 
@@ -1596,7 +1620,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     );
   }
 
-  void _enqueueDriverMove(LatLng to) {
+  void _enqueueDriverMove(LatLng to, {DateTime? serverTs}) {
     final from = _currentDriverLatLng;
     if (from == null) {
       _currentDriverLatLng = to;
@@ -1616,6 +1640,13 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     if (dist < _minMoveMeters) return;
 
     if (dist > _hardJumpMeters) {
+      _driverMoveController.stop();
+      _driverAnimFrom = null;
+      _driverAnimTo = null;
+      _driverAnimPrev = null;
+      _isAnimatingDriver = false;
+      _pendingDriverTarget = null;
+
       _currentDriverLatLng = to;
       _lastBearing = _smoothBearing(
         _lastBearing,
@@ -1633,54 +1664,132 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       return;
     }
 
-    _animateDriverSegment(from: from, to: to);
+    _startDriverAnimation(
+      from: from,
+      to: to,
+      distMeters: dist,
+      serverTs: serverTs,
+    );
   }
 
-  Future<void> _animateDriverSegment({
+  int _computeDriverSegmentDurationMs({
+    required double distMeters,
+    required DateTime? serverTs,
+  }) {
+    // Base duration scales gently with distance.
+    int base =
+        (450 + (distMeters / 2).clamp(0, 650)).round().clamp(420, 1100);
+
+    // If server timestamps are reliable, keep the animation time aligned to
+    // the update cadence so movement doesn't "freeze" between packets.
+    if (serverTs != null) {
+      final prev = _lastDriverServerTs;
+      _lastDriverServerTs = serverTs;
+      if (prev != null) {
+        final dt = serverTs.difference(prev).inMilliseconds;
+        if (dt > 0) {
+          // Finish slightly before the next update is expected.
+          final aligned = (dt * 0.9).round();
+          base = base.clamp(320, aligned.clamp(320, 1400));
+        }
+      }
+    }
+
+    return base;
+  }
+
+  void _startDriverAnimation({
     required LatLng from,
     required LatLng to,
-  }) async {
+    required double distMeters,
+    required DateTime? serverTs,
+  }) {
     _isAnimatingDriver = true;
+    _driverAnimFrom = from;
+    _driverAnimTo = to;
+    _driverAnimPrev = from;
 
-    final dist = Geolocator.distanceBetween(
-      from.latitude,
-      from.longitude,
-      to.latitude,
-      to.longitude,
+    final durationMs = _computeDriverSegmentDurationMs(
+      distMeters: distMeters,
+      serverTs: serverTs,
     );
-    final steps = (6 + (dist / 10).clamp(0, 10)).round().clamp(8, 16);
-    final durationMs = (450 + (dist / 2).clamp(0, 650)).round().clamp(
-      450,
-      1100,
-    );
-    final interval = Duration(milliseconds: (durationMs / steps).round());
 
-    for (int i = 1; i <= steps; i++) {
-      await Future.delayed(interval);
-      if (!mounted) break;
+    _driverMoveController
+      ..stop()
+      ..duration = Duration(milliseconds: durationMs)
+      ..value = 0.0
+      ..forward();
+  }
 
-      final t = i / steps;
-      final lat = _lerp(from.latitude, to.latitude, t);
-      final lng = _lerp(from.longitude, to.longitude, t);
-      final pos = LatLng(lat, lng);
+  void _onDriverAnimTick() {
+    if (!mounted) return;
+    final from = _driverAnimFrom;
+    final to = _driverAnimTo;
+    if (from == null || to == null) return;
 
-      final rawBearing = _getBearing(from, pos);
-      _lastBearing = _smoothBearing(_lastBearing, rawBearing);
-      _updateDriverMarker(pos, _lastBearing);
-      _maybeAutoFollow(pos);
+    // Avoid excessive setState churn; 30fps is plenty for marker smoothness.
+    final now = DateTime.now();
+    final isLastFrame = _driverMoveController.value >= 0.999;
+    if (!isLastFrame &&
+        now.difference(_lastDriverPaintAt) <
+            const Duration(milliseconds: 33)) {
+      return;
     }
+    _lastDriverPaintAt = now;
+
+    final t = _driverMoveController.value.clamp(0.0, 1.0);
+    final pos = LatLng(
+      _lerp(from.latitude, to.latitude, t),
+      _lerp(from.longitude, to.longitude, t),
+    );
+
+    final prev = _driverAnimPrev ?? from;
+    final movedMeters = Geolocator.distanceBetween(
+      prev.latitude,
+      prev.longitude,
+      pos.latitude,
+      pos.longitude,
+    );
+    if (!isLastFrame && movedMeters < 0.05) return;
+
+    final rawBearing = _getBearing(prev, pos);
+    _lastBearing = _smoothBearing(_lastBearing, rawBearing);
+    _driverAnimPrev = pos;
+
+    _updateDriverMarker(pos, _lastBearing);
+    _maybeAutoFollow(pos);
+  }
+
+  void _onDriverAnimStatus(AnimationStatus status) async {
+    if (status != AnimationStatus.completed) return;
+    final to = _driverAnimTo;
+    if (to == null) return;
 
     _currentDriverLatLng = to;
     _isAnimatingDriver = false;
+    _driverAnimFrom = null;
+    _driverAnimTo = null;
+    _driverAnimPrev = null;
 
     _maybeUpdatePolyline(to);
     _syncPhaseMarkers();
 
     final pending = _pendingDriverTarget;
-    if (pending != null) {
+    if (pending != null && mounted) {
       _pendingDriverTarget = null;
-      if (mounted) {
-        await _animateDriverSegment(from: to, to: pending);
+      final dist = Geolocator.distanceBetween(
+        to.latitude,
+        to.longitude,
+        pending.latitude,
+        pending.longitude,
+      );
+      if (dist >= _minMoveMeters) {
+        _startDriverAnimation(
+          from: to,
+          to: pending,
+          distMeters: dist,
+          serverTs: null,
+        );
       }
     }
   }
@@ -1702,6 +1811,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     _paymentNavTimer?.cancel();
     _searchingElapsedTimer?.cancel();
     _searchingAnimController.dispose();
+    _driverMoveController.dispose();
     _mapController?.dispose();
     super.dispose();
   }

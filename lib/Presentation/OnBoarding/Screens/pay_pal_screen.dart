@@ -43,7 +43,7 @@ class _PaypalWebviewPageState extends State<PaypalWebviewPage> {
   @override
   Widget build(BuildContext context) {
     final String url =
-        "https://hoppr-face-two-dbe557472d7f.herokuapp.com/api/paypal?amount=${widget.amount}&userBookingId=${widget.bookingId}";
+        "https://bk.myhoppr.com/api/paypal?amount=${widget.amount}&userBookingId=${widget.bookingId}";
 
     return Scaffold(
       appBar: AppBar(

@@ -13,18 +13,11 @@ import 'package:hopper/Core/Consents/app_logger.dart';
 import 'package:hopper/api/repository/api_consents.dart';
 import 'package:hopper/Presentation/BookRide/Controllers/driver_search_controller.dart';
 import 'package:hopper/uitls/map/direction_helper.dart';
+import 'package:hopper/uitls/map/driver_motion_engine.dart';
 import 'package:hopper/uitls/websocket/socket_io_client.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:hopper/uitls/map/map_ui_defaults.dart';
 import 'package:hopper/uitls/map/compact_marker_icons.dart';
-
-class DriverPose {
-  final LatLng latLng;
-  final DateTime t;
-  final double? bearing;
-  DriverPose(this.latLng, {DateTime? t, this.bearing})
-    : t = t ?? DateTime.now();
-}
 
 class OrderConfirmController extends GetxController
     with GetSingleTickerProviderStateMixin, WidgetsBindingObserver {
@@ -236,36 +229,10 @@ class OrderConfirmController extends GetxController
   // =================================================================
   //                  SMOOTH DRIVER ENGINE
   // =================================================================
-  final Duration _playbackDelay = const Duration(milliseconds: 600);
-  final List<DriverPose> _poseQueue = <DriverPose>[];
-  late final AnimationController _moveCtrl;
-
-  bool _isAnimatingSegment = false;
-
-  LatLng? _lastReceivedPos;
+  late final DriverMotionEngine _driverMotion;
   LatLng? _displayPos;
-
-  final int _maxQueue = 10;
-  final Duration _maxStale = const Duration(seconds: 20); // little relaxed
-  final Duration _minSeg = const Duration(milliseconds: 450);
-  final Duration _maxSeg = const Duration(milliseconds: 1200);
-
   LatLng? _emaPos;
-  final double _emaAlphaSlow = 0.12;
-  final double _emaAlphaFast = 0.30;
-
   double _lastBearing = 0.0;
-  final double _bearingEmaAlpha = 0.20;
-  final double _maxTurnDegPerSec = 220.0;
-
-  final Curve _ease = Curves.easeInOutCubic;
-  VoidCallback? _activeTick;
-
-  // Hard filter to stop "teleport jump"
-  final double _hardJumpMeters =
-      120.0; // if server point jumps > 120m => ignore
-  // Ignore micro-jitter, but still allow slow traffic movement to feel "alive".
-  final double _minMoveMeters = 0.3;
 
   // =================================================================
   //                        POLYLINE CONTROL
@@ -285,7 +252,18 @@ class OrderConfirmController extends GetxController
   void onInit() {
     super.onInit();
     WidgetsBinding.instance.addObserver(this);
-    _moveCtrl = AnimationController(vsync: this);
+    _driverMotion = DriverMotionEngine(
+      vsync: this,
+      onUpdate: (pos, bearing) {
+        _emaPos = pos;
+        _displayPos = pos;
+        _lastBearing = bearing;
+        _updateDriverMarker(pos, bearing);
+      },
+      onFrameSideEffects: (pos) {
+        _autoCameraUpdate();
+      },
+    );
     _dir = DirectionsHelper(apiKey: ApiConsents.googleMapApiKey);
     _loadMapStyle();
     _boot();
@@ -339,8 +317,7 @@ class OrderConfirmController extends GetxController
     _pulseTimer?.cancel();
     _driverMarkerFlushTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
-    if (_activeTick != null) _moveCtrl.removeListener(_activeTick!);
-    _moveCtrl.dispose();
+    _driverMotion.dispose();
     super.onClose();
   }
 
@@ -817,9 +794,8 @@ class OrderConfirmController extends GetxController
         final initialDriverPos = LatLng(driverLat, driverLng);
         _displayPos = initialDriverPos;
         _emaPos = initialDriverPos;
-        _lastReceivedPos = initialDriverPos;
         _lastBearing = 0.0;
-        _updateDriverMarker(initialDriverPos, _lastBearing);
+        _driverMotion.reset(initialDriverPos, bearing: 0.0);
       }
 
       _refreshPulseCircles();
@@ -897,8 +873,6 @@ class OrderConfirmController extends GetxController
       final newPos = LatLng(lat, lng);
 
       final rawTs = _parseServerTime(data['timestamp']);
-      final age = DateTime.now().difference(rawTs);
-      if (age > _maxStale) return;
 
       final srvBearing = _toDouble(data['bearing']);
       final liveRideType =
@@ -924,25 +898,12 @@ class OrderConfirmController extends GetxController
           );
         }
       }
-      // Jump filter (teleport)
-      if (_lastReceivedPos != null) {
-        final distJump = Geolocator.distanceBetween(
-          _lastReceivedPos!.latitude,
-          _lastReceivedPos!.longitude,
-          newPos.latitude,
-          newPos.longitude,
-        );
-        if (distJump < _minMoveMeters) return;
-        if (distJump > _hardJumpMeters) return;
-      }
-      _lastReceivedPos = newPos;
-
       // first point -> show immediately
       if (_displayPos == null) {
         _displayPos = newPos;
         _emaPos = newPos;
         _lastBearing = srvBearing ?? 0.0;
-        _updateDriverMarker(newPos, _lastBearing);
+        _driverMotion.reset(newPos, bearing: _lastBearing);
 
         // Ola like: while waiting, show driver + pickup together
         _fitDriverAndPickupOnce();
@@ -959,12 +920,8 @@ class OrderConfirmController extends GetxController
         return;
       }
 
-      // enqueue for smooth motion
-      final shiftedTs = rawTs.add(_playbackDelay);
-      _poseQueue.add(DriverPose(newPos, t: shiftedTs, bearing: srvBearing));
-      if (_poseQueue.length > _maxQueue) {
-        _poseQueue.removeRange(0, _poseQueue.length - _maxQueue);
-      }
+      // enqueue for smooth motion (shared helper)
+      _driverMotion.ingest(newPos, serverTs: rawTs, bearing: srvBearing);
 
       // polyline update rarely
       if (!driverStartedRide.value &&
@@ -987,7 +944,7 @@ class OrderConfirmController extends GetxController
         );
       }
 
-      _pumpMotion();
+      // Motion ticks are handled inside DriverMotionEngine.
     });
 
     socketService.on('driver-arrived', (data) {
@@ -1343,97 +1300,6 @@ class OrderConfirmController extends GetxController
       ..addAll(set);
 
     _refreshPulseCircles();
-  }
-
-  // =================================================================
-  //                      MOTION
-  // =================================================================
-  void _pumpMotion() {
-    if (_isAnimatingSegment) return;
-    if (_poseQueue.isEmpty) return;
-    if (_displayPos == null) return;
-
-    final from = _displayPos!;
-    final toPose = _poseQueue.removeAt(0);
-    final to = toPose.latLng;
-
-    final dist = Geolocator.distanceBetween(
-      from.latitude,
-      from.longitude,
-      to.latitude,
-      to.longitude,
-    );
-    if (dist < _minMoveMeters) return;
-
-    int dur = (500 + (dist * 20)).toInt();
-    dur = dur.clamp(_minSeg.inMilliseconds, _maxSeg.inMilliseconds);
-    final segDur = Duration(milliseconds: dur);
-
-    final targetBearing = toPose.bearing ?? _getBearing(from, to);
-    final startBearing = _lastBearing;
-    final bearingDelta = _shortestAngleDelta(startBearing, targetBearing);
-
-    _isAnimatingSegment = true;
-
-    _moveCtrl
-      ..stop()
-      ..reset()
-      ..duration = segDur;
-
-    if (_activeTick != null) _moveCtrl.removeListener(_activeTick!);
-    _activeTick = () => _onTick(from, to, startBearing, bearingDelta);
-    _moveCtrl.addListener(_activeTick!);
-
-    _moveCtrl.forward().whenComplete(() {
-      _displayPos = to;
-      _lastBearing = _wrap360(startBearing + bearingDelta);
-      _updateDriverMarker(_emaPos ?? to, _lastBearing);
-
-      _isAnimatingSegment = false;
-      if (_poseQueue.isNotEmpty) _pumpMotion();
-    });
-  }
-
-  void _onTick(
-    LatLng from,
-    LatLng to,
-    double startBearing,
-    double bearingDelta,
-  ) {
-    final t = _ease.transform(_moveCtrl.value);
-
-    final rawPos = LatLng(
-      _lerp(from.latitude, to.latitude, t),
-      _lerp(from.longitude, to.longitude, t),
-    );
-
-    final rawDist = Geolocator.distanceBetween(
-      from.latitude,
-      from.longitude,
-      to.latitude,
-      to.longitude,
-    );
-    final segSeconds = (_moveCtrl.duration?.inMilliseconds ?? 1) / 1000.0;
-    final speedMps = (segSeconds > 0) ? (rawDist / segSeconds) : 0.0;
-    final emaAlpha = (speedMps > 8.0) ? _emaAlphaFast : _emaAlphaSlow;
-
-    _emaPos =
-        (_emaPos == null) ? rawPos : _emaLatLng(_emaPos!, rawPos, emaAlpha);
-
-    final targetB = _wrap360(startBearing + bearingDelta * t);
-    final emaB = _emaAngle(_lastBearing, targetB, _bearingEmaAlpha);
-
-    _lastBearing = _clampTurnRate(
-      _lastBearing,
-      emaB,
-      1 / 60.0,
-      _maxTurnDegPerSec,
-    );
-
-    _updateDriverMarker(_emaPos!, _lastBearing);
-
-    // Ola-like camera update (NOT every tick + NOT over zoom)
-    _autoCameraUpdate();
   }
 
   void _updateDriverMarker(LatLng position, double bearing) {
@@ -1819,67 +1685,7 @@ class OrderConfirmController extends GetxController
   // =================================================================
   //                         MATH
   // =================================================================
-  double _lerp(double a, double b, double t) => a + (b - a) * t;
 
-  double _getBearing(LatLng start, LatLng end) {
-    final lat1 = start.latitude * math.pi / 180;
-    final lon1 = start.longitude * math.pi / 180;
-    final lat2 = end.latitude * math.pi / 180;
-    final lon2 = end.longitude * math.pi / 180;
-
-    final dLon = lon2 - lon1;
-    final y = math.sin(dLon) * math.cos(lat2);
-    final x =
-        math.cos(lat1) * math.sin(lat2) -
-        math.sin(lat1) * math.cos(lat2) * math.cos(dLon);
-
-    final bearing = math.atan2(y, x);
-    return (bearing * 180 / math.pi + 360) % 360;
-  }
-
-  double _wrap360(double a) {
-    a %= 360.0;
-    if (a < 0) a += 360.0;
-    return a;
-  }
-
-  double _shortestAngleDelta(double from, double to) {
-    double diff = _wrap360(to) - _wrap360(from);
-    if (diff > 180) diff -= 360;
-    if (diff < -180) diff += 360;
-    return diff;
-  }
-
-  double _signedDelta(double from, double to) {
-    double diff = _wrap360(to) - _wrap360(from);
-    if (diff > 180) diff -= 360;
-    if (diff < -180) diff += 360;
-    return diff;
-  }
-
-  double _emaAngle(double prevDeg, double targetDeg, double alpha) {
-    final d = _signedDelta(prevDeg, targetDeg);
-    return _wrap360(prevDeg + alpha * d);
-  }
-
-  LatLng _emaLatLng(LatLng prev, LatLng next, double alpha) {
-    return LatLng(
-      prev.latitude + (next.latitude - prev.latitude) * alpha,
-      prev.longitude + (next.longitude - prev.longitude) * alpha,
-    );
-  }
-
-  double _clampTurnRate(
-    double current,
-    double target,
-    double dtSec,
-    double maxDegPerSec,
-  ) {
-    final d = _signedDelta(current, target);
-    final maxDelta = maxDegPerSec * dtSec;
-    final clamped = d.clamp(-maxDelta, maxDelta);
-    return _wrap360(current + clamped);
-  }
 
   // =================================================================
   //                         EXPOSED

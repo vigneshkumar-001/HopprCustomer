@@ -541,7 +541,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
       if (transactionId != null) {
         final response = await http.post(
           Uri.parse(
-            'https://hoppr-face-two-dbe557472d7f.herokuapp.com/api/customer/confirm-stripe-payment-response',
+            'https://bk.myhoppr.com/api/customer/confirm-stripe-payment-response',
           ),
           headers: {
             'Content-Type': 'application/json',
@@ -584,7 +584,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
       final response = await http.post(
         Uri.parse(
-          'https://hoppr-face-two-dbe557472d7f.herokuapp.com/api/customer/confirm-stripe-payment-intents',
+          'https://bk.myhoppr.com/api/customer/confirm-stripe-payment-intents',
         ),
         headers: {
           'Content-Type': 'application/json',
@@ -665,7 +665,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
       String? token = prefs.getString('token');
       final response = await http.post(
         Uri.parse(
-          'https://hoppr-face-two-dbe557472d7f.herokuapp.com/api/flutterwave/initialize',
+          'https://bk.myhoppr.com/api/flutterwave/initialize',
         ),
         headers: {
           "Content-Type": "application/json",
@@ -886,7 +886,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
       String? token = prefs.getString('token');
       final response = await http.post(
         Uri.parse(
-          'https://hoppr-face-two-dbe557472d7f.herokuapp.com/api/paystack/init',
+          'https://bk.myhoppr.com/api/paystack/init',
         ),
         headers: {
           "Content-Type": "application/json",

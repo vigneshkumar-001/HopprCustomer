@@ -23,6 +23,7 @@ import 'package:hopper/Presentation/OnBoarding/Screens/home_screens.dart';
 
 import 'package:hopper/Presentation/OnBoarding/Screens/payment_screen.dart';
 import 'package:hopper/api/repository/api_consents.dart';
+import 'package:hopper/uitls/map/driver_motion_engine.dart';
 import 'package:hopper/uitls/map/shared_map.dart';
 import 'package:hopper/uitls/netWorkHandling/network_handling_screen.dart';
 import 'package:hopper/uitls/websocket/shared_web_socket.dart';
@@ -34,15 +35,6 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:hopper/Presentation/CustomerSupport/screens/customer_support_list_screen.dart';
 
 import 'package:http/http.dart' as http;
-
-class DriverPose {
-  final LatLng position;
-  final double? bearing;
-  final DateTime t;
-
-  DriverPose({required this.position, this.bearing, DateTime? t})
-    : t = t ?? DateTime.now();
-}
 
 class SharedScreens extends StatefulWidget {
   final String pickupAddress;
@@ -190,15 +182,7 @@ class _SharedScreensState extends State<SharedScreens>
   bool _isFetchingRoute = false;
 
   // ---------- SMOOTH MOTION STATE ----------
-  DriverPose? _currentPose;
-  final List<DriverPose> _poseQueue = <DriverPose>[];
-  Timer? _motionTimer;
-
-  final Duration _maxStale = const Duration(seconds: 6);
-  final int _maxQueue = 24;
-  final Duration _motionStep = const Duration(milliseconds: 60);
-  final Duration _visualDelay = const Duration(milliseconds: 700);
-  static const double _minMoveMeters = 0.3;
+  late final DriverMotionEngine _driverMotion;
   DateTime _lastDriverLocationLogAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   // ---------- CAMERA (order_confirm style) ----------
@@ -325,6 +309,25 @@ class _SharedScreensState extends State<SharedScreens>
     super.initState();
 
     _bootstrapFromInitialRideState();
+
+    _driverMotion = DriverMotionEngine(
+      vsync: this,
+      // Shared screen uses setState markers; keep update rate capped in engine.
+      onUpdate: (pos, bearing) {
+        _driverLatLng = pos;
+        _updateDriverMarker(pos, bearing: bearing);
+      },
+      onFrameSideEffects: (pos) {
+        _autoCameraUpdate(pos);
+        _updateLiveMetrics(pos);
+      },
+      maxStale: const Duration(seconds: 6),
+      playbackDelay: const Duration(milliseconds: 650),
+      maxQueue: 24,
+    );
+    if (_driverLatLng != null) {
+      _driverMotion.reset(_driverLatLng!, bearing: 0.0);
+    }
     _loadMarkerIcons();
     _setupSocketListeners();
 
@@ -339,7 +342,7 @@ class _SharedScreensState extends State<SharedScreens>
 
   @override
   void dispose() {
-    _motionTimer?.cancel();
+    _driverMotion.dispose();
     _searchingElapsedTimer?.cancel();
     _noDriverFoundTimer?.cancel();
     _searchingElapsedSecondsVN?.dispose();
@@ -1525,34 +1528,8 @@ class _SharedScreensState extends State<SharedScreens>
       final newPos = LatLng(lat, lng);
       _driverLatLng = newPos;
 
-      // jitter filter
-      final LatLng? lastPos =
-          _poseQueue.isNotEmpty
-              ? _poseQueue.last.position
-              : _currentPose?.position;
-      if (lastPos != null) {
-        final d = _distanceMeters(lastPos, newPos);
-        if (d < _minMoveMeters) return;
-      }
-
-      // stale filter
-      final age = DateTime.now().difference(ts);
-      if (age > _maxStale) return;
-
-      final pose = DriverPose(position: newPos, bearing: bearing, t: ts);
-
-      // keep queue ordered by time
-      final int idx = _poseQueue.indexWhere((p) => p.t.isAfter(ts));
-      if (idx == -1) {
-        _poseQueue.add(pose);
-      } else {
-        _poseQueue.insert(idx, pose);
-      }
-
-      // trim queue
-      if (_poseQueue.length > _maxQueue) {
-        _poseQueue.removeRange(0, _poseQueue.length - _maxQueue);
-      }
+      // Smooth marker motion (Uber/Ola-like) using shared engine.
+      _driverMotion.ingest(newPos, serverTs: ts, bearing: bearing);
 
       // Trim route according to driver progress
       if (_activeRoute.isNotEmpty) {
@@ -1568,8 +1545,6 @@ class _SharedScreensState extends State<SharedScreens>
           }
         }
       }
-
-      _startMotionTicker();
 
       if (kDebugMode) {
         final now = DateTime.now();
@@ -1602,73 +1577,6 @@ class _SharedScreensState extends State<SharedScreens>
     }
   }
 
-  void _startMotionTicker() {
-    if (_motionTimer != null && _motionTimer!.isActive) return;
-
-    _motionTimer = Timer.periodic(_motionStep, (timer) {
-      if (_poseQueue.isEmpty) {
-        timer.cancel();
-        return;
-      }
-
-      final now = DateTime.now().subtract(_visualDelay);
-
-      _currentPose ??= _poseQueue.first;
-
-      while (_poseQueue.length >= 2 && _poseQueue[1].t.isBefore(now)) {
-        _currentPose = _poseQueue.removeAt(0);
-      }
-
-      if (_poseQueue.isEmpty) {
-        _updateDriverMarker(
-          _currentPose!.position,
-          bearing: _currentPose!.bearing,
-        );
-        _autoCameraUpdate(_currentPose!.position);
-        _updateLiveMetrics(_currentPose!.position);
-        return;
-      }
-
-      final nextPose = _poseQueue.first;
-
-      final int totalMs = nextPose.t.difference(_currentPose!.t).inMilliseconds;
-      if (totalMs <= 0) {
-        _updateDriverMarker(nextPose.position, bearing: nextPose.bearing);
-        _autoCameraUpdate(nextPose.position);
-        _updateLiveMetrics(nextPose.position);
-        _currentPose = nextPose;
-        _poseQueue.removeAt(0);
-        return;
-      }
-
-      final int elapsedMs = now.difference(_currentPose!.t).inMilliseconds;
-      double t = elapsedMs / totalMs;
-      t = t.clamp(0.0, 1.0);
-
-      final double interpLat = _lerp(
-        _currentPose!.position.latitude,
-        nextPose.position.latitude,
-        t,
-      );
-      final double interpLng = _lerp(
-        _currentPose!.position.longitude,
-        nextPose.position.longitude,
-        t,
-      );
-
-      final LatLng interpPos = LatLng(interpLat, interpLng);
-
-      // smooth bearing based on movement direction (left / right / U-turns)
-      final double bearing = _computeBearing(_currentPose!.position, interpPos);
-
-      _updateDriverMarker(interpPos, bearing: bearing);
-      _autoCameraUpdate(interpPos);
-      _updateLiveMetrics(interpPos);
-    });
-  }
-
-  double _lerp(double a, double b, double t) => a + (b - a) * t;
-
   double _distanceMeters(LatLng a, LatLng b) {
     const double R = 6371000.0;
     final double dLat = _deg2rad(b.latitude - a.latitude);
@@ -1684,19 +1592,6 @@ class _SharedScreensState extends State<SharedScreens>
   }
 
   double _deg2rad(double d) => d * math.pi / 180.0;
-
-  double _computeBearing(LatLng from, LatLng to) {
-    final double lat1 = _deg2rad(from.latitude);
-    final double lat2 = _deg2rad(to.latitude);
-    final double dLon = _deg2rad(to.longitude - from.longitude);
-
-    final double y = math.sin(dLon) * math.cos(lat2);
-    final double x =
-        math.cos(lat1) * math.sin(lat2) -
-        math.sin(lat1) * math.cos(lat2) * math.cos(dLon);
-    final double brng = math.atan2(y, x);
-    return (brng * 180.0 / math.pi + 360.0) % 360.0;
-  }
 
   /// Decode Google encoded polyline to points
   List<LatLng> _decodePolyline(String encoded) {

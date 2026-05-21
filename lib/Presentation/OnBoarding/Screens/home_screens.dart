@@ -245,7 +245,7 @@ class _HomeScreensState extends State<HomeScreens>
 
     try {
       const url =
-          'https://hoppr-face-two-dbe557472d7f.herokuapp.com/api/customer/advertisement-banners';
+          'https://bk.myhoppr.com/api/customer/advertisement-banners';
       final res = await Request.sendGetRequest(
         url,
         {'placement': 'HOME_HERO', 'limit': 5},
