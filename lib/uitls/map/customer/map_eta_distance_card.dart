@@ -5,6 +5,7 @@ class MapEtaDistanceCard extends StatefulWidget {
   final String distanceText;
   final String? statusText;
   final VoidCallback? onTap;
+  final bool iconOnlyCollapsed;
 
   const MapEtaDistanceCard({
     super.key,
@@ -12,6 +13,7 @@ class MapEtaDistanceCard extends StatefulWidget {
     required this.distanceText,
     this.statusText,
     this.onTap,
+    this.iconOnlyCollapsed = true,
   });
 
   @override
@@ -35,6 +37,8 @@ class _MapEtaDistanceCardState extends State<MapEtaDistanceCard>
 
     if (title.isEmpty && dist.isEmpty) return const SizedBox.shrink();
 
+    final collapsed = !_expanded && widget.iconOnlyCollapsed;
+
     return SafeArea(
       child: Material(
         color: Colors.transparent,
@@ -44,7 +48,10 @@ class _MapEtaDistanceCardState extends State<MapEtaDistanceCard>
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 240),
             curve: Curves.easeOutCubic,
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            padding:
+                collapsed
+                    ? const EdgeInsets.all(10)
+                    : const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             decoration: BoxDecoration(
               color: Colors.white,
               borderRadius: BorderRadius.circular(22),
@@ -61,53 +68,65 @@ class _MapEtaDistanceCardState extends State<MapEtaDistanceCard>
               curve: Curves.easeOutCubic,
               alignment: Alignment.topCenter,
               child: ConstrainedBox(
-                constraints: const BoxConstraints(minWidth: 180, maxWidth: 280),
+                constraints:
+                    collapsed
+                        ? const BoxConstraints.tightFor(width: 42, height: 42)
+                        : const BoxConstraints(minWidth: 210, maxWidth: 300),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Expanded(
-                          child: Text(
-                            title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
+                    if (collapsed)
+                      const Center(
+                        child: Icon(
+                          Icons.timer_outlined,
+                          size: 20,
+                          color: Colors.black,
                         ),
-                        if (dist.isNotEmpty) ...[
-                          const SizedBox(width: 10),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 10,
-                              vertical: 6,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.black.withOpacity(0.06),
-                              borderRadius: BorderRadius.circular(18),
-                            ),
+                      )
+                    else
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Expanded(
                             child: Text(
-                              dist,
+                              title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                               style: const TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w800,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w700,
                               ),
                             ),
                           ),
+                          if (dist.isNotEmpty) ...[
+                            const SizedBox(width: 10),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 6,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withOpacity(0.06),
+                                borderRadius: BorderRadius.circular(18),
+                              ),
+                              child: Text(
+                                dist,
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                            ),
+                          ],
+                          const SizedBox(width: 10),
+                          const Icon(
+                            Icons.timer_outlined,
+                            size: 18,
+                            color: Colors.black,
+                          ),
                         ],
-                        const SizedBox(width: 10),
-                        const Icon(
-                          Icons.timer_outlined,
-                          size: 18,
-                          color: Colors.black,
-                        ),
-                      ],
-                    ),
+                      ),
                     if (_expanded) ...[
                       const SizedBox(height: 10),
                       if (status.isNotEmpty)
@@ -141,4 +160,3 @@ class _MapEtaDistanceCardState extends State<MapEtaDistanceCard>
     );
   }
 }
-

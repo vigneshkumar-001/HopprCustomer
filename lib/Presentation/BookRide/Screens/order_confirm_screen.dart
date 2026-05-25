@@ -321,7 +321,8 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                               ? icon_cache.VehicleType.bike
                               : icon_cache.VehicleType.car,
                       driverLocation: c.driverLocation.value,
-                      routePoints: c.activeRoutePoints,
+                      // Ensure Obx rebuilds when route points mutate.
+                      routePoints: c.activeRoutePoints.toList(growable: false),
                       pickup: c.customerLatLng ?? _pickupLatLng,
                       drop: c.customerToLatLng ?? _dropLatLng,
                       mode:

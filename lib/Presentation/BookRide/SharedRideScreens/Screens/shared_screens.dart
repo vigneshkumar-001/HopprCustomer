@@ -624,7 +624,9 @@ class _SharedScreensState extends State<SharedScreens>
     if (pts.isNotEmpty) _setActiveRoute(pts);
   }
 
-  /// Trim route so that only "remaining" path ahead of driver is drawn.
+  /// Update remaining meters/ETA based on driver's progress along the route.
+  /// Note: map polyline trimming is handled by `CustomerRideMapView` so we do
+  /// NOT mutate `_activeRoute` here (mutating causes flicker / missing polylines).
   void _trimRouteForDriver(LatLng driverPos) {
     if (_activeRoute.length < 2) return;
 
@@ -640,10 +642,9 @@ class _SharedScreensState extends State<SharedScreens>
     }
 
     if (closestIndex > 0 && closestIndex < _activeRoute.length) {
-      final newRoute = _activeRoute.sublist(closestIndex);
+      final remaining = _activeRoute.sublist(closestIndex);
       setState(() {
-        _activeRoute = newRoute;
-        _routeRemainingMeters = _computeRouteMeters(newRoute);
+        _routeRemainingMeters = _computeRouteMeters(remaining);
         _routeRemainingSeconds = _estimateRemainingSeconds(
           meters: _routeRemainingMeters,
           totalMeters: _routeTotalMeters,
@@ -1531,7 +1532,7 @@ class _SharedScreensState extends State<SharedScreens>
                             ? icon_cache.VehicleType.bike
                             : icon_cache.VehicleType.car,
                     driverLocation: _driverLatLng,
-                    routePoints: _activeRoute,
+                    routePoints: List<LatLng>.from(_activeRoute),
                     pickup: _customerPickupLatLng ?? widget.pickupPosition,
                     drop: _customerDropLatLng ?? widget.dropPosition,
                     mode: driverStartedRide ? RideMapMode.toDrop : RideMapMode.toPickup,

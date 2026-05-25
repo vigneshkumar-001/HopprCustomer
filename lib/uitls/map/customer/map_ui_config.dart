@@ -18,8 +18,10 @@ class MapUiConfig {
   static const Duration cameraFollowInterval = Duration(milliseconds: 900);
 
   // Marker sizing (logical px / dp)
+  // Keep the badge diameter consistent across vehicle types so car/bike
+  // never looks "big/small" between screens.
   static const double carMarkerSizeDp = 48;
-  static const double bikeMarkerSizeDp = 44;
+  static const double bikeMarkerSizeDp = 48;
 
   static const double pickupDropPinWidthDp = 26;
 
@@ -30,4 +32,3 @@ class MapUiConfig {
   // Map padding (sheet)
   static const double defaultBottomPadding = 210;
 }
-

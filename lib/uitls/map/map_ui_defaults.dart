@@ -52,15 +52,20 @@ class MapUiDefaults {
   static const double minZoom = 11.0;
   static const double maxZoom = 17.0;
 
-  static const int polylineWidth = 3;
-  static const int polylineOutlineWidth = 5;
+  // Route polyline styling (customer-side): thicker + high-contrast so it
+  // never blends into the map style.
+  static const int polylineWidth = 6;
+  static const int polylineOutlineWidth = 10;
   static const Color polylineColor = Colors.black;
-  static const Color polylineOutlineColor = Color(0xFFE5E7EB);
+  static const Color polylineOutlineColor = Color(0xFFFFFFFF);
 
-  // Vehicle marker sizing (dp). Keep consistent across ride/tracking screens.
-  static const double vehicleBadgeDiameterDp = 28;
-  static const double vehicleCarWidthDp = 22;
-  static const double vehicleBikeWidthDp = 24;
+  // Vehicle marker sizing (dp).
+  // - Ride/tracking screens use `vehicleBadgeDiameterDp` (circle badge).
+  // - Home screen uses `vehicleCarWidthDp`/`vehicleBikeWidthDp` (asset pin)
+  //   and should stay smaller to avoid clutter.
+  static const double vehicleBadgeDiameterDp = 48;
+  static const double vehicleCarWidthDp = 26;
+  static const double vehicleBikeWidthDp = 28;
 
   static Set<Polyline> routePolylines(
     List<LatLng> points, {

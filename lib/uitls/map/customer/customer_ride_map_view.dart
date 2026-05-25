@@ -129,11 +129,16 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       _loadIcons();
     }
 
-    if (!listEquals(oldWidget.routePoints, widget.routePoints)) {
+    // routePoints may be mutated in-place (RxList). Compare a lightweight
+    // signature instead of relying on list identity.
+    if (_computeRouteSig(widget.routePoints) != _routeSig) {
       _syncRoute(force: true);
     }
 
     if (oldWidget.pickup != widget.pickup || oldWidget.drop != widget.drop) {
+      _syncMarkers(force: true);
+    }
+    if (oldWidget.mode != widget.mode) {
       _syncMarkers(force: true);
     }
 
@@ -171,13 +176,22 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
 
   void _syncRoute({required bool force}) {
     final pts = widget.routePoints;
-    if (!force && listEquals(_fullRoute, pts)) return;
+    final sig = _computeRouteSig(pts);
+    if (!force && sig == _routeSig) return;
 
-    _fullRoute = List<LatLng>.unmodifiable(pts);
+    _routeSig = sig;
+    _fullRoute = List<LatLng>.unmodifiable(List<LatLng>.from(pts));
     _trimIndex = 0;
     _completedRoute = const <LatLng>[];
     _remainingRoute = _fullRoute;
     _rebuildPolylines();
+  }
+
+  String _computeRouteSig(List<LatLng> pts) {
+    if (pts.length < 2) return 'len:${pts.length}';
+    final a = pts.first;
+    final b = pts.last;
+    return 'len:${pts.length}|a:${a.latitude.toStringAsFixed(6)},${a.longitude.toStringAsFixed(6)}|b:${b.latitude.toStringAsFixed(6)},${b.longitude.toStringAsFixed(6)}';
   }
 
   void _rebuildPolylines() {
@@ -238,22 +252,24 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     }
 
     final markers = <Marker>{
-      Marker(
-        markerId: const MarkerId('pickup'),
-        position: widget.pickup,
-        icon: _pickupIcon ?? BitmapDescriptor.defaultMarker,
-        anchor: const Offset(0.5, MapUiConfig.pickupDropAnchorY),
-        zIndex: 3,
-        infoWindow: InfoWindow.noText,
-      ),
-      Marker(
-        markerId: const MarkerId('drop'),
-        position: widget.drop,
-        icon: _dropIcon ?? BitmapDescriptor.defaultMarker,
-        anchor: const Offset(0.5, MapUiConfig.pickupDropAnchorY),
-        zIndex: 3,
-        infoWindow: InfoWindow.noText,
-      ),
+      if (widget.mode != RideMapMode.toDrop)
+        Marker(
+          markerId: const MarkerId('pickup'),
+          position: widget.pickup,
+          icon: _pickupIcon ?? BitmapDescriptor.defaultMarker,
+          anchor: const Offset(0.5, MapUiConfig.pickupDropAnchorY),
+          zIndex: 3,
+          infoWindow: InfoWindow.noText,
+        ),
+      if (widget.mode != RideMapMode.toPickup)
+        Marker(
+          markerId: const MarkerId('drop'),
+          position: widget.drop,
+          icon: _dropIcon ?? BitmapDescriptor.defaultMarker,
+          anchor: const Offset(0.5, MapUiConfig.pickupDropAnchorY),
+          zIndex: 3,
+          infoWindow: InfoWindow.noText,
+        ),
     };
 
     // Include the vehicle marker once icons are ready.
@@ -311,7 +327,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
         flat: true,
         anchor: const Offset(0.5, MapUiConfig.vehicleAnchorY),
         icon: _vehIcon ?? BitmapDescriptor.defaultMarker,
-        zIndex: 4,
+          zIndex: 4,
         infoWindow: InfoWindow.noText,
       ),
     );
@@ -449,10 +465,11 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
             etaText: widget.etaText,
             distanceText: widget.distanceText,
             statusText: widget.statusText,
+            iconOnlyCollapsed: true,
           ),
         ),
       ],
     );
   }
 }
-
+  String _routeSig = '';

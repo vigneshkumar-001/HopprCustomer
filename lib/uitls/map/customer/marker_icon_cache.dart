@@ -15,7 +15,10 @@ class MarkerIconCache {
     final sizeDp =
         type == VehicleType.bike ? MapUiConfig.bikeMarkerSizeDp : MapUiConfig.carMarkerSizeDp;
     final asset = type == VehicleType.bike ? AppImages.packageBike : AppImages.carHop;
-    final key = 'veh|$asset|$sizeDp|$resolvedDpr';
+    // Bike assets often have more whitespace; scale them slightly up inside the badge
+    // so car/bike look visually consistent.
+    final imageScale = type == VehicleType.bike ? 0.62 : 0.56;
+    final key = 'veh|$asset|$sizeDp|$imageScale|$resolvedDpr';
     final cached = _cache[key];
     if (cached != null) return cached;
 
@@ -23,6 +26,7 @@ class MarkerIconCache {
       assetPath: asset,
       diameterDp: sizeDp,
       dpr: resolvedDpr,
+      imageScale: imageScale,
     );
     _cache[key] = icon;
     return icon;
@@ -56,4 +60,3 @@ class MarkerIconCache {
     return icon;
   }
 }
-

@@ -52,7 +52,7 @@ class PackageMapConfirmScreen extends StatefulWidget {
 }
 
 class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   bool isExpanded = false;
   GoogleMapController? _mapController;
   final socketService = SocketService();
@@ -116,6 +116,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     if (v == null) return false;
     if (v is bool) return v;
     if (v is num) return v != 0;
+    if (v is Map) return v.isNotEmpty;
+    if (v is Iterable) return v.isNotEmpty;
     final s = v.toString().trim().toLowerCase();
     if (s.isEmpty) return false;
     return s == 'true' || s == '1' || s == 'yes' || s == 'y';
@@ -160,6 +162,26 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     if (v is Map<String, dynamic>) return v;
     if (v is Map) return v.map((k, val) => MapEntry(k.toString(), val));
     return const <String, dynamic>{};
+  }
+
+  Map<String, dynamic> _normalizeSocketPayload(dynamic data) {
+    try {
+      // socket.io can send ACK style payloads: [payload, (ackFn)].
+      if (data is List) {
+        for (final item in data) {
+          final m = _normalizeSocketPayload(item);
+          if (m.isNotEmpty) return m;
+        }
+        return const <String, dynamic>{};
+      }
+      if (data is String) {
+        final decoded = json.decode(data);
+        return _normalizeSocketPayload(decoded);
+      }
+      return _asMap(data);
+    } catch (_) {
+      return const <String, dynamic>{};
+    }
   }
 
   String _extractCancelTitle(dynamic payload, {required String fallback}) {
@@ -876,20 +898,64 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       AppLogger.log.i("✅ Socket connected on booking screen");
     });
 
+    socketService.on('booking-update', (data) {
+      if (!mounted) return;
+      final payload = _normalizeSocketPayload(data);
+      if (payload.isEmpty) return;
+
+      final status = (payload['status'] ?? '').toString().trim().toUpperCase();
+      final driverId = (payload['driverId'] ?? '').toString().trim();
+
+      final isAccepted =
+          status == 'DRIVER_ACCEPTED' ||
+          status == 'ACCEPTED' ||
+          status == 'DRIVER_ASSIGNED';
+      if (!isAccepted) return;
+
+      setState(() {
+        _isDriverConfirmed = true;
+        isWaitingForDriver = false;
+        noDriverFound = false;
+      });
+      _syncPhaseMarkers();
+
+      if (driverId.isNotEmpty) {
+        AppLogger.log.i("📍 Tracking driver (booking-update): $driverId");
+        socketService.joinBooking(
+          bookingId: widget.bookingId,
+          driverId: driverId,
+        );
+      }
+    });
+
     socketService.on('joined-booking', (data) {
       if (!mounted) return;
       AppLogger.log.i("Package Joined booking data: $data");
-      final vehicle = (data['vehicle'] as Map?) ?? {};
-      final String driverId = (data['driverId'] ?? '').toString();
-      final String driverFullName = (data['driverName'] ?? '').toString();
-      final String customerPhone = (data['customerPhone'] ?? '').toString();
+
+      final payload = _normalizeSocketPayload(data);
+
+      // Vehicle might also be nested JSON.
+      Map vehicle = <String, dynamic>{};
+      try {
+        final rawVeh = payload['vehicle'];
+        if (rawVeh is Map) {
+          vehicle = rawVeh;
+        } else if (rawVeh is String) {
+          final decodedVeh = json.decode(rawVeh);
+          vehicle = (decodedVeh is Map) ? decodedVeh : <String, dynamic>{};
+        }
+      } catch (_) {}
+
+      final String driverId = (payload['driverId'] ?? '').toString();
+      final String driverFullName = (payload['driverName'] ?? '').toString();
+      final String customerPhone = (payload['customerPhone'] ?? '').toString();
       final double rating =
-          double.tryParse(data['driverRating'].toString()) ?? 0.0;
+          double.tryParse(payload['driverRating'].toString()) ?? 0.0;
       final String color = vehicle['color'] ?? '';
       final String model = vehicle['model'] ?? '';
       final String brand = vehicle['brand'] ?? '';
       final String carType = vehicle['carType'] ?? '';
-      final rideHistory = (data['rideStatusHistory'] as List?) ?? const [];
+      final rideHistory = (payload['rideStatusHistory'] as List?) ?? const [];
       final acceptedFromHistory = rideHistory.any((e) {
         final m = e as Map?;
         final st = (m?['status'] ?? '').toString().toUpperCase();
@@ -897,24 +963,24 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       });
 
       final bool driverAccepted =
-          data['driver_accept_status'] == true ||
-          data['orderConfirmationStatus'] == true ||
+          payload['driver_accept_status'] == true ||
+          payload['orderConfirmationStatus'] == true ||
           acceptedFromHistory;
       final String type = vehicle['type'] ?? '';
       final String plate = vehicle['plateNumber'] ?? '';
       final customerLoc =
-          (data['customerLocation'] as Map?) ??
-          ((data['basePayload'] as Map?)?['customerLocation'] as Map?) ??
+          (payload['customerLocation'] as Map?) ??
+          ((payload['basePayload'] as Map?)?['customerLocation'] as Map?) ??
           {};
-      final amount = data['amount'];
-      final String profilePic = (data['profilePic'] ?? '').toString();
-      final String bookingId = (data['bookingId'] ?? '').toString();
+      final amount = payload['amount'];
+      final String profilePic = (payload['profilePic'] ?? '').toString();
+      final String bookingId = (payload['bookingId'] ?? '').toString();
       final int maxWeight =
-          (data['maxWeight'] is num)
-              ? (data['maxWeight'] as num).toInt()
-              : int.tryParse((data['maxWeight'] ?? '').toString()) ?? 0;
-      final String pickupAddress = (data['pickupAddress'] ?? '').toString();
-      final String dropAddress = (data['dropAddress'] ?? '').toString();
+          (payload['maxWeight'] is num)
+              ? (payload['maxWeight'] as num).toInt()
+              : int.tryParse((payload['maxWeight'] ?? '').toString()) ?? 0;
+      final String pickupAddress = (payload['pickupAddress'] ?? '').toString();
+      final String dropAddress = (payload['dropAddress'] ?? '').toString();
 
       final fromLat =
           (customerLoc['fromLatitude'] is num)
@@ -949,15 +1015,15 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         carDetails = '$color - $brand';
         _isDriverConfirmed = driverAccepted;
         driverStartedRide =
-            data['packageCollected'] == true ||
-            data['inTransit'] == true ||
-            data['outForDelivery'] == true;
-        _isOrderConfirmed = data['orderConfirmationStatus'] ?? false;
-        _isEnRoute = data['enRoute'] ?? false;
-        _isPackagePickup = data['packagePickup'] ?? false;
-        _isPackageCollected = data['packageCollected'] ?? false;
-        _isInTransit = data['inTransit'] ?? false;
-        _isOutForDelivery = data['outForDelivery'] ?? false;
+            payload['packageCollected'] == true ||
+            payload['inTransit'] == true ||
+            payload['outForDelivery'] == true;
+        _isOrderConfirmed = payload['orderConfirmationStatus'] ?? false;
+        _isEnRoute = payload['enRoute'] ?? false;
+        _isPackagePickup = payload['packagePickup'] ?? false;
+        _isPackageCollected = payload['packageCollected'] ?? false;
+        _isInTransit = payload['inTransit'] ?? false;
+        _isOutForDelivery = payload['outForDelivery'] ?? false;
         CUSTOMERPHONE = customerPhone;
         CARTYPE = carType;
         ProfilePic = profilePic;
@@ -1044,10 +1110,21 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       final basePayload = data['basePayload'] ?? {};
       final estimate = basePayload['getEstimateTime'] ?? {};
       final prevStarted = driverStartedRide;
+      final latestStatus =
+          (data['latestStatus'] ?? basePayload['latestStatus'] ?? data['status'])
+              .toString()
+              .trim()
+              .toUpperCase();
+      final startedFromStatus =
+          latestStatus == 'STARTED' ||
+          latestStatus == 'IN_TRANSIT' ||
+          latestStatus == 'OUT_FOR_DELIVERY' ||
+          latestStatus == 'DELIVERING';
       final nextStarted =
-          basePayload['packageCollected'] == true ||
-          basePayload['inTransit'] == true ||
-          basePayload['outForDelivery'] == true;
+          startedFromStatus ||
+          _isTruthy(basePayload['packageCollected']) ||
+          _isTruthy(basePayload['inTransit']) ||
+          _isTruthy(basePayload['outForDelivery']);
 
       final socketMeters = _parseInt(
         data[nextStarted ? 'dropDistanceInMeters' : 'pickupDistanceInMeters'],
@@ -1058,12 +1135,12 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       if (!mounted) return;
       setState(() {
         driverStartedRide = nextStarted;
-        _isOrderConfirmed = basePayload['orderConfirmationStatus'] ?? false;
-        _isEnRoute = basePayload['enRoute'] ?? false;
-        _isPackagePickup = basePayload['packagePickup'] ?? false;
-        _isPackageCollected = basePayload['packageCollected'] ?? false;
-        _isInTransit = basePayload['inTransit'] ?? false;
-        _isOutForDelivery = basePayload['outForDelivery'] ?? false;
+        _isOrderConfirmed = _isTruthy(basePayload['orderConfirmationStatus']);
+        _isEnRoute = _isTruthy(basePayload['enRoute']);
+        _isPackagePickup = _isTruthy(basePayload['packagePickup']);
+        _isPackageCollected = _isTruthy(basePayload['packageCollected']);
+        _isInTransit = _isTruthy(basePayload['inTransit']);
+        _isOutForDelivery = _isTruthy(basePayload['outForDelivery']);
         _estimateStt1 = estimate['stt1'] ?? '';
         _estimateStt2 = estimate['stt2'] ?? '';
 
@@ -1078,6 +1155,11 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
           _routeMetricsFromSocket = true;
           _routeMetricsFromSocketAt = DateTime.now();
         }
+
+        // driver-location should always be treated as driver assigned/confirmed.
+        _isDriverConfirmed = true;
+        isWaitingForDriver = false;
+        noDriverFound = false;
       });
 
       if (prevStarted != nextStarted) {
@@ -1797,6 +1879,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   @override
   void dispose() {
     try {
+      socketService.off('booking-update');
       socketService.off('joined-booking');
       socketService.off('driver-location');
       socketService.off('driver-arrived');
