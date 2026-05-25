@@ -23,12 +23,10 @@ import 'package:hopper/Presentation/OnBoarding/Screens/home_screens.dart';
 
 import 'package:hopper/Presentation/OnBoarding/Screens/payment_screen.dart';
 import 'package:hopper/api/repository/api_consents.dart';
-import 'package:hopper/uitls/map/driver_motion_engine.dart';
-import 'package:hopper/uitls/map/shared_map.dart';
 import 'package:hopper/uitls/netWorkHandling/network_handling_screen.dart';
 import 'package:hopper/uitls/websocket/shared_web_socket.dart';
-import 'package:hopper/uitls/map/map_ui_defaults.dart';
-import 'package:hopper/uitls/map/compact_marker_icons.dart';
+import 'package:hopper/Presentation/BookRide/Widgets/ride_tracking_map.dart'
+    as ride_map;
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -107,17 +105,8 @@ class _SharedScreensState extends State<SharedScreens>
   final TextEditingController _destController = TextEditingController();
 
   // ---------- MAP CONTROL ----------
-  final GlobalKey<SharedMapState> _mapKey = GlobalKey<SharedMapState>();
-
-  BitmapDescriptor? _pickupIcon;
-  BitmapDescriptor? _dropIcon;
-  BitmapDescriptor? _driverIcon;
-  BitmapDescriptor? _pickupWaitingLabelIcon;
-  BitmapDescriptor? _pickupLabelIcon;
-  BitmapDescriptor? _dropLabelIcon;
-
-  Set<Marker> _markers = <Marker>{};
-  Set<Polyline> _polylines = <Polyline>{};
+  final GlobalKey<ride_map.RideTrackingMapState> _mapKey =
+      GlobalKey<ride_map.RideTrackingMapState>();
 
   // ---------- RIDE STATE ----------
   bool isWaitingForDriver = true;
@@ -156,7 +145,6 @@ class _SharedScreensState extends State<SharedScreens>
   DateTime _lastMetricsAt = DateTime.fromMillisecondsSinceEpoch(0);
   final Duration _metricsInterval = const Duration(milliseconds: 1200);
   bool _didExitToHome = false;
-  bool _locationToggleFit = false;
 
   // ---------- POSITIONS ----------
   LatLng? _customerPickupLatLng;
@@ -182,15 +170,9 @@ class _SharedScreensState extends State<SharedScreens>
   bool _isFetchingRoute = false;
 
   // ---------- SMOOTH MOTION STATE ----------
-  late final DriverMotionEngine _driverMotion;
   DateTime _lastDriverLocationLogAt = DateTime.fromMillisecondsSinceEpoch(0);
 
-  // ---------- CAMERA (order_confirm style) ----------
-  double _currentZoomLevel = 16.6;
-  DateTime _pauseAutoFollowUntil = DateTime.fromMillisecondsSinceEpoch(0);
-  DateTime _lastCameraMoveAt = DateTime.fromMillisecondsSinceEpoch(0);
-  final Duration _cameraInterval = const Duration(milliseconds: 900);
-  final Duration _userGesturePause = const Duration(seconds: 4);
+  // Camera follow is handled by [RideTrackingMap].
 
   String _effectiveBookingId() {
     final fromSocket = _bookingId.trim();
@@ -263,9 +245,8 @@ class _SharedScreensState extends State<SharedScreens>
       if (!isWaitingForDriver || isDriverConfirmed || driverStartedRide) return;
       final mapState = _mapKey.currentState;
       final pickup = _customerPickupLatLng ?? widget.pickupPosition;
-      mapState?.animateTo(target: pickup, zoom: MapUiDefaults.focusZoom);
+      mapState?.fitRouteBounds(padding: 150);
       updatePickup(pickup);
-      _locationToggleFit = false;
     });
 
     _noDriverFoundTimer = Timer(const Duration(seconds: 60), () async {
@@ -310,25 +291,6 @@ class _SharedScreensState extends State<SharedScreens>
 
     _bootstrapFromInitialRideState();
 
-    _driverMotion = DriverMotionEngine(
-      vsync: this,
-      // Shared screen uses setState markers; keep update rate capped in engine.
-      onUpdate: (pos, bearing) {
-        _driverLatLng = pos;
-        _updateDriverMarker(pos, bearing: bearing);
-      },
-      onFrameSideEffects: (pos) {
-        _autoCameraUpdate(pos);
-        _updateLiveMetrics(pos);
-      },
-      maxStale: const Duration(seconds: 6),
-      playbackDelay: const Duration(milliseconds: 650),
-      maxQueue: 24,
-    );
-    if (_driverLatLng != null) {
-      _driverMotion.reset(_driverLatLng!, bearing: 0.0);
-    }
-    _loadMarkerIcons();
     _setupSocketListeners();
 
     _startController.text = widget.pickupAddress;
@@ -342,7 +304,6 @@ class _SharedScreensState extends State<SharedScreens>
 
   @override
   void dispose() {
-    _driverMotion.dispose();
     _searchingElapsedTimer?.cancel();
     _noDriverFoundTimer?.cancel();
     _searchingElapsedSecondsVN?.dispose();
@@ -350,24 +311,14 @@ class _SharedScreensState extends State<SharedScreens>
   }
 
   // ---------- ASSET → BITMAP (resize) ----------
+  // ignore: unused_element
   Future<void> _loadMarkerIcons() async {
-    // Compact pickup/drop pins (assets), keep driver icon custom.
-    try {
-      _pickupIcon = await CompactMarkerIcons.assetPin(
-        assetPath: AppImages.pinLocation,
-        widthDp: MapUiDefaults.pickupDropPinWidthDp,
-      );
-    } catch (_) {
-      _pickupIcon = null;
-    }
-    try {
-      _dropIcon = await CompactMarkerIcons.assetPin(
-        assetPath: AppImages.rectangleDest,
-        widthDp: MapUiDefaults.pickupDropPinWidthDp,
-      );
-    } catch (_) {
-      _dropIcon = null;
-    }
+    // Deprecated: map rendering is owned by RideTrackingMap.
+    _initRouteAndMarkers();
+    if (mounted) setState(() {});
+  }
+
+  /*
     try {
       _pickupWaitingLabelIcon = await CompactMarkerIcons.labeledPin(
         label: MapUiDefaults.placeLabel(
@@ -457,6 +408,8 @@ class _SharedScreensState extends State<SharedScreens>
     });
   }
 
+  */
+
   bool _statusSuggestsRideStarted(String? status) {
     final s = (status ?? '').trim().toUpperCase();
     if (s.isEmpty) return false;
@@ -505,200 +458,36 @@ class _SharedScreensState extends State<SharedScreens>
     }
   }
 
-  // ---------- INITIAL MARKERS + ROUTE ----------
+  // ---------- INITIAL ROUTE ----------
   void _initRouteAndMarkers() {
-    final waiting =
-        isWaitingForDriver && !isDriverConfirmed && !driverStartedRide;
-    final pickupMarker = Marker(
-      markerId: const MarkerId('pickup'),
-      position: widget.pickupPosition,
-      icon:
-          (waiting ? _pickupWaitingLabelIcon : _pickupLabelIcon) ??
-          _pickupIcon ??
-          BitmapDescriptor.defaultMarkerWithHue(
-            MapUiDefaults.pickupDropMarkerHueGreen,
-          ),
-      anchor: const Offset(0.5, 1.0),
-      infoWindow: InfoWindow.noText,
-    );
-
-    final dropMarker = Marker(
-      markerId: const MarkerId('drop'),
-      position: widget.dropPosition,
-      icon:
-          _dropLabelIcon ??
-          _dropIcon ??
-          BitmapDescriptor.defaultMarkerWithHue(
-            MapUiDefaults.pickupDropMarkerHueRed,
-          ),
-      anchor: const Offset(0.5, 1.0),
-      infoWindow: InfoWindow.noText,
-    );
-
-    final showPickup = !driverStartedRide && !destinationReached;
-    final showDrop = driverStartedRide || destinationReached;
-    final next = <Marker>{};
-    if (showPickup) next.add(pickupMarker);
-    if (showDrop) next.add(dropMarker);
-    _markers = next;
-
-    if (widget.routePoints.isNotEmpty) {
-      _activeRoute = widget.routePoints;
-      _polylines = MapUiDefaults.routePolylines(
-        widget.routePoints,
-        id: 'route',
-      );
-    }
-
+    _activeRoute = widget.routePoints;
     _customerPickupLatLng = widget.pickupPosition;
     _customerDropLatLng = widget.dropPosition;
   }
 
-  // ---------- GENERAL MARKER HELPERS ----------
+  // ---------- LOCATION HELPERS ----------
   void updatePickup(LatLng pos) {
     _customerPickupLatLng = pos;
-    final waiting =
-        isWaitingForDriver && !isDriverConfirmed && !driverStartedRide;
-    setState(() {
-      _markers.removeWhere((m) => m.markerId.value == 'pickup');
-      final showPickup = !driverStartedRide && !destinationReached;
-      if (!showPickup) return;
-      _markers.add(
-        Marker(
-          markerId: const MarkerId('pickup'),
-          position: pos,
-          icon:
-              (waiting ? _pickupWaitingLabelIcon : _pickupLabelIcon) ??
-              _pickupIcon ??
-              BitmapDescriptor.defaultMarkerWithHue(
-                MapUiDefaults.pickupDropMarkerHueGreen,
-              ),
-          anchor: const Offset(0.5, 1.0),
-          infoWindow: InfoWindow.noText,
-        ),
-      );
-    });
+    if (mounted) setState(() {});
   }
 
   void updateDrop(LatLng pos) {
     _customerDropLatLng = pos;
-    setState(() {
-      _markers.removeWhere((m) => m.markerId.value == 'drop');
-      final showDrop = driverStartedRide || destinationReached;
-      if (!showDrop) return;
-      _markers.add(
-        Marker(
-          markerId: const MarkerId('drop'),
-          position: pos,
-          icon:
-              _dropLabelIcon ??
-              _dropIcon ??
-              BitmapDescriptor.defaultMarkerWithHue(
-                MapUiDefaults.pickupDropMarkerHueRed,
-              ),
-          anchor: const Offset(0.5, 1.0),
-          infoWindow: InfoWindow.noText,
-        ),
-      );
-    });
+    if (mounted) setState(() {});
   }
 
   void updateRoute(List<LatLng> points) {
-    setState(() {
-      _polylines = MapUiDefaults.routePolylines(points, id: 'route');
-      _activeRoute = points;
-    });
+    _activeRoute = points;
+    if (mounted) setState(() {});
   }
 
-  void _updateDriverMarker(LatLng pos, {double? bearing}) {
-    setState(() {
-      _markers.removeWhere((m) => m.markerId.value == 'driver');
-      _markers.add(
-        Marker(
-          markerId: const MarkerId('driver'),
-          position: pos,
-          icon:
-              _driverIcon ??
-              BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
-          anchor: const Offset(0.5, 0.72),
-          rotation: bearing ?? 0,
-          flat: true,
-          infoWindow: InfoWindow(
-            title: driverName.trim().isNotEmpty ? driverName.trim() : 'Driver',
-            snippet: carDetails.trim().isNotEmpty ? carDetails.trim() : null,
-          ),
-        ),
-      );
-    });
-  }
-
-  void _onUserMapGesture() {
-    _pauseAutoFollowUntil = DateTime.now().add(_userGesturePause);
+  void _updateDriverMarker(LatLng pos) {
+    _driverLatLng = pos;
+    if (mounted) setState(() {});
   }
 
   Future<void> _onLocationFabTap() async {
-    final mapState = _mapKey.currentState;
-    if (mapState == null) return;
-
-    if (_locationToggleFit) {
-      if (mounted) {
-        setState(() => _locationToggleFit = false);
-      } else {
-        _locationToggleFit = false;
-      }
-      final pickup = _customerPickupLatLng ?? widget.pickupPosition;
-      final drop = _customerDropLatLng ?? widget.dropPosition;
-      await mapState.fitPointsBounds(<LatLng>[pickup, drop], padding: 150);
-      return;
-    }
-
-    if (mounted) {
-      setState(() => _locationToggleFit = true);
-    } else {
-      _locationToggleFit = true;
-    }
-    final target =
-        _driverLatLng ?? _customerPickupLatLng ?? widget.pickupPosition;
-    await mapState.animateTo(
-      target: target,
-      zoom: math.max(_currentZoomLevel, MapUiDefaults.focusZoom),
-    );
-  }
-
-  void _autoCameraUpdate(LatLng driverPos, {bool force = false}) {
-    final mapState = _mapKey.currentState;
-    if (mapState == null) return;
-
-    final now = DateTime.now();
-    if (!force) {
-      if (now.isBefore(_pauseAutoFollowUntil)) return;
-      if (now.difference(_lastCameraMoveAt) < _cameraInterval) return;
-      _lastCameraMoveAt = now;
-    } else {
-      _lastCameraMoveAt = now;
-    }
-
-    final LatLng? focusTarget =
-        driverStartedRide ? _customerDropLatLng : _customerPickupLatLng;
-
-    // Uber/Ola like: keep a closer follow-zoom so roads are readable.
-    const double followZoom = 16.6;
-
-    // Smart fit: if driver is far from pickup/drop, show both once in a while.
-    if (focusTarget != null) {
-      final d = _distanceMeters(driverPos, focusTarget);
-      final threshold = driverStartedRide ? 2200.0 : 1200.0;
-      if (d > threshold) {
-        mapState.fitPointsBounds(<LatLng>[
-          driverPos,
-          focusTarget,
-        ], padding: 120);
-        return;
-      }
-    }
-
-    final double z = _currentZoomLevel.clamp(15.5, 17.8).toDouble();
-    mapState.animateTo(target: driverPos, zoom: z.isFinite ? z : followZoom);
+    await _mapKey.currentState?.recenterOnVehicle();
   }
 
   // ---------- ROUTE MANAGEMENT ----------
@@ -732,7 +521,6 @@ class _SharedScreensState extends State<SharedScreens>
                 : (etaCore.isEmpty ? '' : '$etaCore away');
       }
       _distanceChipText = distCore;
-      _polylines = MapUiDefaults.routePolylines(points, id: 'route');
     });
   }
 
@@ -879,7 +667,6 @@ class _SharedScreensState extends State<SharedScreens>
                   : (etaCore.isEmpty ? '' : '$etaCore away');
         }
         _distanceChipText = distCore;
-        _polylines = MapUiDefaults.routePolylines(newRoute, id: 'route');
       });
     }
   }
@@ -1306,7 +1093,6 @@ class _SharedScreensState extends State<SharedScreens>
           driverStartedRide = true;
           _driverArrived = true;
           _nearDestination = false;
-          _markers.removeWhere((m) => m.markerId.value == 'pickup');
         }
         driverName =
             rating > 0
@@ -1344,28 +1130,7 @@ class _SharedScreensState extends State<SharedScreens>
 
       // draw DRIVER → PICKUP when accepted
       if (hasDriver && _driverLatLng != null) {
-        final mapState = _mapKey.currentState;
-        if (mapState != null) {
-          final focus =
-              driverStartedRide ? _customerDropLatLng : _customerPickupLatLng;
-          if (focus != null) {
-            final d = _distanceMeters(_driverLatLng!, focus);
-            final threshold = driverStartedRide ? 2200.0 : 1200.0;
-            if (d > threshold) {
-              mapState.fitPointsBounds(<LatLng>[
-                _driverLatLng!,
-                focus,
-              ], padding: 120);
-            } else {
-              mapState.animateTo(
-                target: _driverLatLng!,
-                zoom: _currentZoomLevel,
-              );
-            }
-          } else {
-            mapState.animateTo(target: _driverLatLng!, zoom: _currentZoomLevel);
-          }
-        }
+        _mapKey.currentState?.fitRouteBounds(padding: 120);
 
         if (driverStartedRide) {
           final drop = _customerDropLatLng ?? widget.dropPosition;
@@ -1409,8 +1174,6 @@ class _SharedScreensState extends State<SharedScreens>
         if (status) {
           _driverArrived = true;
           _nearDestination = false;
-          // Uber/Ola flow: once ride starts, pickup pin shouldn't dominate the map
-          _markers.removeWhere((m) => m.markerId.value == 'pickup');
         }
       });
 
@@ -1419,12 +1182,7 @@ class _SharedScreensState extends State<SharedScreens>
         final drop = _customerDropLatLng ?? widget.dropPosition;
         updateDrop(drop);
         await _setRoutePickupToDrop();
-        final mapState = _mapKey.currentState;
         final driverPos = _driverLatLng;
-        if (mapState != null && driverPos != null) {
-          _pauseAutoFollowUntil = DateTime.fromMillisecondsSinceEpoch(0);
-          mapState.animateTo(target: driverPos, zoom: _currentZoomLevel);
-        }
         if (driverPos != null) _updateLiveMetrics(driverPos);
       }
     });
@@ -1512,10 +1270,6 @@ class _SharedScreensState extends State<SharedScreens>
       final double lng =
           (data['longitude'] as num?)?.toDouble() ??
           widget.pickupPosition.longitude;
-      final double? bearing =
-          (data['bearing'] != null)
-              ? (data['bearing'] as num).toDouble()
-              : null;
 
       DateTime ts = _parseServerTime(data['timestamp']);
       final now0 = DateTime.now();
@@ -1527,9 +1281,6 @@ class _SharedScreensState extends State<SharedScreens>
 
       final newPos = LatLng(lat, lng);
       _driverLatLng = newPos;
-
-      // Smooth marker motion (Uber/Ola-like) using shared engine.
-      _driverMotion.ingest(newPos, serverTs: ts, bearing: bearing);
 
       // Trim route according to driver progress
       if (_activeRoute.isNotEmpty) {
@@ -1773,34 +1524,20 @@ class _SharedScreensState extends State<SharedScreens>
                 height: 550,
                 width: double.infinity,
                 child: RepaintBoundary(
-                  child: SharedMap(
+                  child: ride_map.RideTrackingMap(
                     key: _mapKey,
-                    initialPosition: widget.initialPosition,
-                    pickupPosition:
-                        driverStartedRide ? null : _customerPickupLatLng,
-                    markers: _markers,
-                    polylines: _polylines,
-                    myLocationEnabled: false,
-                    fitToBounds: false,
-                    initialZoom: _currentZoomLevel,
-                    minMaxZoomPreference: const MinMaxZoomPreference(
-                      11.0,
-                      17.0,
-                    ),
-                    compassEnabled: true,
-                    rotateGesturesEnabled: false,
-                    tiltGesturesEnabled: false,
-                    onCameraMove:
-                        (pos) =>
-                            _currentZoomLevel =
-                                pos.zoom.clamp(11.0, 17.0).toDouble(),
-                    onCameraMoveStarted: _onUserMapGesture,
-                    onTap: (_) => _onUserMapGesture(),
-                    gestureRecognizers: {
-                      Factory<OneSequenceGestureRecognizer>(
-                        () => EagerGestureRecognizer(),
-                      ),
-                    },
+                    rideType: ride_map.RideType.shared,
+                    vehicleType:
+                        widget.carType.toLowerCase().contains('bike')
+                            ? ride_map.VehicleType.bike
+                            : ride_map.VehicleType.car,
+                    currentLocation: _driverLatLng,
+                    routePoints: _activeRoute,
+                    pickupLocation:
+                        _customerPickupLatLng ?? widget.pickupPosition,
+                    destinationLocation:
+                        _customerDropLatLng ?? widget.dropPosition,
+                    mapPadding: const EdgeInsets.only(bottom: 210),
                   ),
                 ),
               ),
@@ -1835,10 +1572,7 @@ class _SharedScreensState extends State<SharedScreens>
                           a.longitude == b.longitude) {
                         return;
                       }
-                      _pauseAutoFollowUntil = DateTime.now().add(
-                        const Duration(seconds: 4),
-                      );
-                      mapState.fitPointsBounds(<LatLng>[a, b], padding: 120);
+                      _mapKey.currentState?.fitRouteBounds(padding: 120);
                     },
                     child: Container(
                       height: 42,
@@ -1858,9 +1592,7 @@ class _SharedScreensState extends State<SharedScreens>
                         ),
                       ),
                       child: Icon(
-                        _locationToggleFit
-                            ? Icons.zoom_out_map_rounded
-                            : Icons.my_location,
+                        Icons.my_location,
                         size: 22,
                         color: Colors.black87,
                       ),

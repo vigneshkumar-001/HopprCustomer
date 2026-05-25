@@ -8,6 +8,7 @@ import 'package:get/get.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Presentation/BookRide/Controllers/order_confrim_controller.dart';
+import 'package:hopper/Presentation/BookRide/Widgets/ride_tracking_map.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -81,6 +82,10 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
   bool get wantKeepAlive => true;
 
   late final OrderConfirmController c;
+  final GlobalKey<RideTrackingMapState> _mapKey =
+      GlobalKey<RideTrackingMapState>();
+  late final LatLng _pickupLatLng;
+  late final LatLng _dropLatLng;
 
   final TextEditingController _startController = TextEditingController();
   final TextEditingController _destController = TextEditingController();
@@ -110,6 +115,8 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
     _destController.text = widget.destinationAddress;
 
     c = Get.put(OrderConfirmController(), tag: widget.bookingId);
+    // Map UI/camera is owned by RideTrackingMap for consistent behavior.
+    c.externalCameraControl = true;
 
     final pickupLat =
         _toDouble(widget.pickupData['lat']) ??
@@ -123,6 +130,15 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
     final dropLng =
         _toDouble(widget.destinationData['lng']) ??
         _toDouble(widget.destinationData['longitude']);
+
+    _pickupLatLng = LatLng(
+      pickupLat ?? 9.9144908,
+      pickupLng ?? 78.0970899,
+    );
+    _dropLatLng = LatLng(
+      dropLat ?? 9.9144908,
+      dropLng ?? 78.0970899,
+    );
 
     c.init(
       bookingId: widget.bookingId,
@@ -286,50 +302,21 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                 width: double.infinity,
                 child: RepaintBoundary(
                   child: Obx(
-                    () => GoogleMap(
-                      compassEnabled: true,
-                      rotateGesturesEnabled: false,
-                      tiltGesturesEnabled: false,
-
-                      myLocationEnabled: false,
-                      buildingsEnabled: false,
-                      indoorViewEnabled: false,
-                      myLocationButtonEnabled: false,
-                      zoomControlsEnabled: false,
-
-                      onCameraMove: c.onCameraMove,
-                      onCameraMoveStarted: () => c.onUserMapGesture(),
-                      onTap: (_) => c.onUserMapGesture(),
-
-                      initialCameraPosition: CameraPosition(
-                        target:
-                            c.customerLatLng ??
-                            c.currentPosition ??
-                            const LatLng(9.9144908, 78.0970899),
-                        zoom: c.currentZoomLevel,
-                        bearing: 0,
-                        tilt: 0,
-                      ),
-
-                      markers: c.markers.toSet(),
-                      polylines: c.polylines.toSet(),
-                      circles: c.circles.toSet(),
-                      minMaxZoomPreference: const MinMaxZoomPreference(
-                        11.0,
-                        17.0,
-                      ),
-
-                      onMapCreated: (controller) async {
-                        // final style = await DefaultAssetBundle.of(context)
-                        //     .loadString('assets/map_style/map_style1.json');
-                        c.onMapCreated(controller /*style*/);
-                      },
-
-                      gestureRecognizers: {
-                        Factory<OneSequenceGestureRecognizer>(
-                          () => EagerGestureRecognizer(),
-                        ),
-                      },
+                    () => RideTrackingMap(
+                      key: _mapKey,
+                      rideType: RideType.single,
+                      vehicleType:
+                          widget.carType.toLowerCase().contains('bike')
+                              ? VehicleType.bike
+                              : VehicleType.car,
+                      currentLocation: c.driverLocation.value,
+                      routePoints: c.activeRoutePoints,
+                      pickupLocation: c.customerLatLng ?? _pickupLatLng,
+                      destinationLocation: c.customerToLatLng ?? _dropLatLng,
+                      onMapReady: (controller) => c.onMapCreated(controller),
+                      // Bottom sheet overlays the lower portion; keep map padding
+                      // so Google logo/controls never overlap the sheet.
+                      mapPadding: const EdgeInsets.only(bottom: 210),
                     ),
                   ),
                 ),
@@ -342,7 +329,7 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                   heroTag: 'ride_my_location_${widget.bookingId}',
                   mini: true,
                   backgroundColor: Colors.white,
-                  onPressed: () => c.onLocationButtonTap(),
+                  onPressed: () => _mapKey.currentState?.recenterOnVehicle(),
                   child: const Icon(Icons.my_location, color: Colors.black),
                 ),
               ),

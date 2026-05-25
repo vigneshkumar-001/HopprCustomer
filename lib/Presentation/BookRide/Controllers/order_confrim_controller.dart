@@ -194,6 +194,17 @@ class OrderConfirmController extends GetxController
   final RxSet<Polyline> polylines = <Polyline>{}.obs;
   final RxSet<Circle> circles = <Circle>{}.obs;
 
+  /// Exposed raw driver position for reusable map widgets.
+  final Rxn<LatLng> driverLocation = Rxn<LatLng>();
+
+  /// Exposed active route points (decoded + simplified).
+  final RxList<LatLng> activeRoutePoints = <LatLng>[].obs;
+
+  /// When true, this controller will not move the camera automatically.
+  /// Used when screens render the map via a reusable component that owns
+  /// camera follow behavior.
+  bool externalCameraControl = false;
+
   BitmapDescriptor? carIcon;
   BitmapDescriptor? bikeIcon;
 
@@ -241,7 +252,6 @@ class OrderConfirmController extends GetxController
   final Duration _polylineInterval = const Duration(seconds: 25);
 
   bool _isDrawingPolyline = false;
-  String? _activePolyId;
 
   bool _seededPickupMarker = false;
   bool _seededDropMarker = false;
@@ -871,6 +881,7 @@ class OrderConfirmController extends GetxController
         return;
       }
       final newPos = LatLng(lat, lng);
+      driverLocation.value = newPos;
 
       final rawTs = _parseServerTime(data['timestamp']);
 
@@ -1355,6 +1366,7 @@ class OrderConfirmController extends GetxController
   // =================================================================
 
   void _autoCameraUpdate() {
+    if (externalCameraControl) return;
     if (mapController == null) return;
     if (_emaPos == null) return;
 
@@ -1648,7 +1660,6 @@ class OrderConfirmController extends GetxController
     if (!canByTime) return false;
 
     _lastPolylineAt = now;
-    _activePolyId = polyId;
     return true;
   }
 
@@ -1673,8 +1684,8 @@ class OrderConfirmController extends GetxController
       final pts = _simplifyPolyline(route.points);
       if (pts.length < 2) return;
 
+      activeRoutePoints.assignAll(pts);
       polylines.assignAll(MapUiDefaults.routePolylines(pts, id: polyId));
-      _activePolyId = polyId;
     } catch (e) {
       AppLogger.log.e("Polyline error: $e");
     } finally {
