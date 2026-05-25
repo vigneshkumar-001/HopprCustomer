@@ -25,8 +25,8 @@ import 'package:hopper/Presentation/OnBoarding/Screens/payment_screen.dart';
 import 'package:hopper/api/repository/api_consents.dart';
 import 'package:hopper/uitls/netWorkHandling/network_handling_screen.dart';
 import 'package:hopper/uitls/websocket/shared_web_socket.dart';
-import 'package:hopper/Presentation/BookRide/Widgets/ride_tracking_map.dart'
-    as ride_map;
+import 'package:hopper/uitls/map/customer/customer_ride_map_view.dart';
+import 'package:hopper/uitls/map/customer/marker_icon_cache.dart' as icon_cache;
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -105,8 +105,8 @@ class _SharedScreensState extends State<SharedScreens>
   final TextEditingController _destController = TextEditingController();
 
   // ---------- MAP CONTROL ----------
-  final GlobalKey<ride_map.RideTrackingMapState> _mapKey =
-      GlobalKey<ride_map.RideTrackingMapState>();
+  final GlobalKey<CustomerRideMapViewState> _mapKey =
+      GlobalKey<CustomerRideMapViewState>();
 
   // ---------- RIDE STATE ----------
   bool isWaitingForDriver = true;
@@ -245,7 +245,7 @@ class _SharedScreensState extends State<SharedScreens>
       if (!isWaitingForDriver || isDriverConfirmed || driverStartedRide) return;
       final mapState = _mapKey.currentState;
       final pickup = _customerPickupLatLng ?? widget.pickupPosition;
-      mapState?.fitRouteBounds(padding: 150);
+      mapState?.fitRoute(padding: 150);
       updatePickup(pickup);
     });
 
@@ -487,7 +487,7 @@ class _SharedScreensState extends State<SharedScreens>
   }
 
   Future<void> _onLocationFabTap() async {
-    await _mapKey.currentState?.recenterOnVehicle();
+    await _mapKey.currentState?.recenter();
   }
 
   // ---------- ROUTE MANAGEMENT ----------
@@ -1130,7 +1130,7 @@ class _SharedScreensState extends State<SharedScreens>
 
       // draw DRIVER → PICKUP when accepted
       if (hasDriver && _driverLatLng != null) {
-        _mapKey.currentState?.fitRouteBounds(padding: 120);
+        _mapKey.currentState?.fitRoute(padding: 120);
 
         if (driverStartedRide) {
           final drop = _customerDropLatLng ?? widget.dropPosition;
@@ -1524,19 +1524,21 @@ class _SharedScreensState extends State<SharedScreens>
                 height: 550,
                 width: double.infinity,
                 child: RepaintBoundary(
-                  child: ride_map.RideTrackingMap(
+                  child: CustomerRideMapView(
                     key: _mapKey,
-                    rideType: ride_map.RideType.shared,
                     vehicleType:
                         widget.carType.toLowerCase().contains('bike')
-                            ? ride_map.VehicleType.bike
-                            : ride_map.VehicleType.car,
-                    currentLocation: _driverLatLng,
+                            ? icon_cache.VehicleType.bike
+                            : icon_cache.VehicleType.car,
+                    driverLocation: _driverLatLng,
                     routePoints: _activeRoute,
-                    pickupLocation:
-                        _customerPickupLatLng ?? widget.pickupPosition,
-                    destinationLocation:
-                        _customerDropLatLng ?? widget.dropPosition,
+                    pickup: _customerPickupLatLng ?? widget.pickupPosition,
+                    drop: _customerDropLatLng ?? widget.dropPosition,
+                    mode: driverStartedRide ? RideMapMode.toDrop : RideMapMode.toPickup,
+                    etaText: isDriverConfirmed ? _etaChipText : '',
+                    distanceText: isDriverConfirmed ? _distanceChipText : '',
+                    statusText:
+                        driverStartedRide ? 'Ride in progress' : 'Driver reaching pickup',
                     mapPadding: const EdgeInsets.only(bottom: 210),
                   ),
                 ),
@@ -1572,7 +1574,7 @@ class _SharedScreensState extends State<SharedScreens>
                           a.longitude == b.longitude) {
                         return;
                       }
-                      _mapKey.currentState?.fitRouteBounds(padding: 120);
+                      _mapKey.currentState?.fitRoute(padding: 120);
                     },
                     child: Container(
                       height: 42,
@@ -1601,77 +1603,7 @@ class _SharedScreensState extends State<SharedScreens>
                 ),
               ),
 
-              if (isDriverConfirmed && _etaChipText.isNotEmpty)
-                Positioned(
-                  top: 102,
-                  right: 16,
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    child: InkWell(
-                      onTap: _showEtaDistanceSheet,
-                      borderRadius: BorderRadius.circular(22),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 14,
-                          vertical: 10,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(22),
-                          boxShadow: const [
-                            BoxShadow(
-                              color: Colors.black12,
-                              blurRadius: 10,
-                              offset: Offset(0, 4),
-                            ),
-                          ],
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Flexible(
-                              child: Text(
-                                _etaChipText,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            ),
-                            if (_distanceChipText.isNotEmpty) ...[
-                              const SizedBox(width: 10),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 10,
-                                  vertical: 6,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: Colors.black.withOpacity(0.06),
-                                  borderRadius: BorderRadius.circular(18),
-                                ),
-                                child: Text(
-                                  _distanceChipText,
-                                  style: const TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w800,
-                                  ),
-                                ),
-                              ),
-                            ],
-                            const SizedBox(width: 10),
-                            const Icon(
-                              Icons.timer_outlined,
-                              size: 18,
-                              color: Colors.black,
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
+              // ETA/distance is rendered by CustomerRideMapView (reusable card).
 
               // (Location FAB is unified above; no duplicate button in confirmed state.)
 

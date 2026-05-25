@@ -8,7 +8,8 @@ import 'package:get/get.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Presentation/BookRide/Controllers/order_confrim_controller.dart';
-import 'package:hopper/Presentation/BookRide/Widgets/ride_tracking_map.dart';
+import 'package:hopper/uitls/map/customer/customer_ride_map_view.dart';
+import 'package:hopper/uitls/map/customer/marker_icon_cache.dart' as icon_cache;
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -82,8 +83,8 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
   bool get wantKeepAlive => true;
 
   late final OrderConfirmController c;
-  final GlobalKey<RideTrackingMapState> _mapKey =
-      GlobalKey<RideTrackingMapState>();
+  final GlobalKey<CustomerRideMapViewState> _mapKey =
+      GlobalKey<CustomerRideMapViewState>();
   late final LatLng _pickupLatLng;
   late final LatLng _dropLatLng;
 
@@ -302,22 +303,43 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                 width: double.infinity,
                 child: RepaintBoundary(
                   child: Obx(
-                    () => RideTrackingMap(
+                    () {
+                      final raw = c.etaChipText.value;
+                      final pieces = raw
+                          .split('|')
+                          .map((e) => e.trim())
+                          .where((e) => e.isNotEmpty)
+                          .toList();
+                      final etaText =
+                          pieces.isNotEmpty ? pieces.first : raw.trim();
+                      final distText = pieces.length >= 2 ? pieces.last : '';
+
+                      return CustomerRideMapView(
                       key: _mapKey,
-                      rideType: RideType.single,
                       vehicleType:
                           widget.carType.toLowerCase().contains('bike')
-                              ? VehicleType.bike
-                              : VehicleType.car,
-                      currentLocation: c.driverLocation.value,
+                              ? icon_cache.VehicleType.bike
+                              : icon_cache.VehicleType.car,
+                      driverLocation: c.driverLocation.value,
                       routePoints: c.activeRoutePoints,
-                      pickupLocation: c.customerLatLng ?? _pickupLatLng,
-                      destinationLocation: c.customerToLatLng ?? _dropLatLng,
+                      pickup: c.customerLatLng ?? _pickupLatLng,
+                      drop: c.customerToLatLng ?? _dropLatLng,
+                      mode:
+                          c.driverStartedRide.value
+                              ? RideMapMode.toDrop
+                              : RideMapMode.toPickup,
+                      etaText: c.isDriverConfirmed.value ? etaText : '',
+                      distanceText: c.isDriverConfirmed.value ? distText : '',
+                      statusText:
+                          c.driverStartedRide.value
+                              ? 'Ride in progress'
+                              : 'Driver reaching pickup',
                       onMapReady: (controller) => c.onMapCreated(controller),
                       // Bottom sheet overlays the lower portion; keep map padding
                       // so Google logo/controls never overlap the sheet.
                       mapPadding: const EdgeInsets.only(bottom: 210),
-                    ),
+                      );
+                    },
                   ),
                 ),
               ),
@@ -329,7 +351,7 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                   heroTag: 'ride_my_location_${widget.bookingId}',
                   mini: true,
                   backgroundColor: Colors.white,
-                  onPressed: () => _mapKey.currentState?.recenterOnVehicle(),
+                  onPressed: () => _mapKey.currentState?.recenter(),
                   child: const Icon(Icons.my_location, color: Colors.black),
                 ),
               ),
@@ -390,24 +412,7 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                 ),
               ),
 
-              Positioned(
-                top: 102,
-                right: 16,
-                child: Obx(() {
-                  if (!c.isDriverConfirmed.value ||
-                      c.etaChipText.value.isEmpty) {
-                    return const SizedBox.shrink();
-                  }
-                  return Align(
-                    alignment: Alignment.centerRight,
-                    child: InkWell(
-                      onTap: () => _showEtaDistanceSheet(),
-                      borderRadius: BorderRadius.circular(22),
-                      child: _etaChip(),
-                    ),
-                  );
-                }),
-              ),
+              // ETA/distance is rendered by CustomerRideMapView (reusable card).
 
               // OTP overlay (black card on map)
               // Positioned(
@@ -434,7 +439,15 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                     heroTag: 'ride_follow_fit_${widget.bookingId}',
                     mini: true,
                     backgroundColor: Colors.white,
-                    onPressed: c.onLocateActionTap,
+                    onPressed: () async {
+                      if (c.focusDriverOnNextTap.value) {
+                        c.focusDriverOnNextTap.value = false;
+                        await _mapKey.currentState?.fitRoute(padding: 120);
+                        return;
+                      }
+                      c.focusDriverOnNextTap.value = true;
+                      await _mapKey.currentState?.recenter();
+                    },
                     child: Icon(
                       // 1st tap focuses driver, next tap fits bounds.
                       c.focusDriverOnNextTap.value
