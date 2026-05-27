@@ -189,8 +189,16 @@ class DriverMotionEngine {
       return;
     }
 
-    int dur = (500 + (dist * 20)).toInt();
-    dur = dur.clamp(_minSeg.inMilliseconds, _maxSeg.inMilliseconds);
+    // Animation duration derived from distance and a conservative min speed.
+    // Required clamp:
+    // durationMs = clamp(distance / max(speedMps, 4.0) * 1000, 650, 1800)
+    // Here we don't know real-time speed reliably from server, so we use the
+    // conservative minimum speed bound (4 m/s) to keep motion smooth and fast.
+    int dur = ((dist / math.max(4.0, 4.0)) * 1000).toInt();
+    dur = dur.clamp(
+      math.max(650, _minSeg.inMilliseconds),
+      math.min(1800, _maxSeg.inMilliseconds),
+    );
     final segDur = Duration(milliseconds: dur);
 
     final targetBearing = toPose.bearing ?? _computeBearing(from, to);

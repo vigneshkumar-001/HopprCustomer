@@ -68,6 +68,11 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   Set<Circle> _circles = {};
   bool _isDriverConfirmed = false;
   Marker? _driverMarker;
+  Timer? _driverMarkerFlushTimer;
+  LatLng? _pendingDriverMarkerPos;
+  double? _pendingDriverMarkerBearing;
+  DateTime _lastDriverMarkerCommitAt = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _driverMarkerMinInterval = Duration(milliseconds: 90);
   bool driverStartedRide = false;
   bool destinationReached = false;
   bool _autoFollowEnabled = true;
@@ -112,12 +117,38 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   static const double _preferredInitialZoom = 16.4;
   static const double _minFollowZoom = 15.8;
 
+  Widget _driverAvatar() {
+    final raw = ProfilePic.trim();
+    final isHttp = raw.startsWith('http://') || raw.startsWith('https://');
+    if (!isHttp) {
+      return CircleAvatar(
+        radius: 20,
+        backgroundColor: Colors.grey.shade300,
+        child: const Icon(Icons.person, color: Colors.white),
+      );
+    }
+
+    return Image.network(
+      raw,
+      fit: BoxFit.cover,
+      height: 40,
+      width: 40,
+      errorBuilder: (_, __, ___) {
+        return CircleAvatar(
+          radius: 20,
+          backgroundColor: Colors.grey.shade300,
+          child: const Icon(Icons.person, color: Colors.white),
+        );
+      },
+      // Avoid unnecessary decode work on scrolling rebuilds.
+      filterQuality: FilterQuality.low,
+    );
+  }
+
   bool _isTruthy(dynamic v) {
     if (v == null) return false;
     if (v is bool) return v;
     if (v is num) return v != 0;
-    if (v is Map) return v.isNotEmpty;
-    if (v is Iterable) return v.isNotEmpty;
     final s = v.toString().trim().toLowerCase();
     if (s.isEmpty) return false;
     return s == 'true' || s == '1' || s == 'yes' || s == 'y';
@@ -557,6 +588,12 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
     if (!mounted) return;
     setState(() => _markers = next.toSet());
+
+    if (kDebugMode) {
+      AppLogger.log.i(
+        'pkg map markers updated: count=${_markers.length} hasDriver=${_driverMarker != null} hasPolyline=${_polylines.isNotEmpty}',
+      );
+    }
   }
 
   void _startPulseAnimation() {
@@ -677,7 +714,11 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   final double _hardJumpMeters = 120.0;
   // Allow slow movement to animate; reduce "stuck" feeling in traffic.
   final double _minMoveMeters = 0.3;
-  final Duration _maxStale = const Duration(seconds: 6);
+  // Socket packets can arrive with server timestamps that are older than the
+  // UI clock (queueing, reconnects, server clock drift). We still want to
+  // render driver marker + polyline as long as packets are not out-of-order.
+  // Out-of-order handling is done separately via `_lastDriverPacketTs`.
+  final Duration _maxStale = const Duration(minutes: 3);
   DateTime _lastDriverLocationLogAt = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime? _lastDriverServerTs;
   DateTime? _lastDriverPacketTs;
@@ -930,7 +971,9 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
     socketService.on('joined-booking', (data) {
       if (!mounted) return;
-      AppLogger.log.i("Package Joined booking data: $data");
+      if (kDebugMode) {
+        AppLogger.log.i("Package Joined booking data: $data");
+      }
 
       final payload = _normalizeSocketPayload(data);
 
@@ -1037,14 +1080,28 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                 : (double.tryParse((amount ?? '').toString()) ?? 0.0);
       });
 
-      AppLogger.log.i("🚕 Joined booking data: $data");
-      AppLogger.log.i("🚕 driverAccepted ==  $driverAccepted");
+      if (kDebugMode) {
+        AppLogger.log.i("🚕 Joined booking data: $data");
+        AppLogger.log.i("🚕 driverAccepted ==  $driverAccepted");
+      }
 
       _loadCustomMarkerForVehicle(type.toString());
       _loadPickupDropIcons().whenComplete(() {
         _seedPickupDropMarkers();
         _syncPhaseMarkers();
       });
+
+      // If driver-location reached the screen before joined-booking (common),
+      // we may already have driver lat/lng but couldn't render a route yet.
+      // Trigger marker + polyline now once pickup/drop are known, even if the
+      // next driver packet is identical (no movement -> no animation).
+      final driverPos = _currentDriverLatLng;
+      if (driverPos != null) {
+        _pendingDriverMarkerPos = driverPos;
+        _pendingDriverMarkerBearing = _lastBearing;
+        _commitDriverMarker(force: true);
+        _maybeUpdatePolyline(driverPos, force: true);
+      }
 
       // Start real-time tracking
       if (driverId.trim().isNotEmpty) {
@@ -1053,6 +1110,26 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
           bookingId: widget.bookingId,
           driverId: driverId.trim(),
         );
+      }
+    });
+
+    // Backend emits `ride-estimate` independently of `driver-location`.
+    // Listening to it avoids UI delay when heartbeat packets are sparse.
+    socketService.on('ride-estimate', (data) {
+      final payload = _asMap(data);
+      final stt1 = (payload['stt1'] ?? '').toString();
+      final stt2 = (payload['stt2'] ?? '').toString();
+
+      if (!mounted) return;
+      if (stt1 == _estimateStt1 && stt2 == _estimateStt2) return;
+
+      setState(() {
+        _estimateStt1 = stt1;
+        _estimateStt2 = stt2;
+      });
+
+      if (kDebugMode) {
+        AppLogger.log.i('ride-estimate: stt1="$stt1" stt2="$stt2"');
       }
     });
 
@@ -1093,6 +1170,18 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         _updateDriverMarker(newDriverLatLng, _lastBearing);
         _maybeAutoFollow(newDriverLatLng);
         _maybeUpdatePolyline(newDriverLatLng, force: true);
+
+        // Also apply estimate immediately on the very first driver-location packet.
+        final basePayload = data['basePayload'] ?? {};
+        final estimate = basePayload['getEstimateTime'] ?? {};
+        final stt1 = (estimate['stt1'] ?? '').toString();
+        final stt2 = (estimate['stt2'] ?? '').toString();
+        if (mounted && (stt1 != _estimateStt1 || stt2 != _estimateStt2)) {
+          setState(() {
+            _estimateStt1 = stt1;
+            _estimateStt2 = stt2;
+          });
+        }
         return;
       }
 
@@ -1110,21 +1199,10 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       final basePayload = data['basePayload'] ?? {};
       final estimate = basePayload['getEstimateTime'] ?? {};
       final prevStarted = driverStartedRide;
-      final latestStatus =
-          (data['latestStatus'] ?? basePayload['latestStatus'] ?? data['status'])
-              .toString()
-              .trim()
-              .toUpperCase();
-      final startedFromStatus =
-          latestStatus == 'STARTED' ||
-          latestStatus == 'IN_TRANSIT' ||
-          latestStatus == 'OUT_FOR_DELIVERY' ||
-          latestStatus == 'DELIVERING';
       final nextStarted =
-          startedFromStatus ||
-          _isTruthy(basePayload['packageCollected']) ||
-          _isTruthy(basePayload['inTransit']) ||
-          _isTruthy(basePayload['outForDelivery']);
+          basePayload['packageCollected'] == true ||
+          basePayload['inTransit'] == true ||
+          basePayload['outForDelivery'] == true;
 
       final socketMeters = _parseInt(
         data[nextStarted ? 'dropDistanceInMeters' : 'pickupDistanceInMeters'],
@@ -1135,12 +1213,12 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       if (!mounted) return;
       setState(() {
         driverStartedRide = nextStarted;
-        _isOrderConfirmed = _isTruthy(basePayload['orderConfirmationStatus']);
-        _isEnRoute = _isTruthy(basePayload['enRoute']);
-        _isPackagePickup = _isTruthy(basePayload['packagePickup']);
-        _isPackageCollected = _isTruthy(basePayload['packageCollected']);
-        _isInTransit = _isTruthy(basePayload['inTransit']);
-        _isOutForDelivery = _isTruthy(basePayload['outForDelivery']);
+        _isOrderConfirmed = basePayload['orderConfirmationStatus'] ?? false;
+        _isEnRoute = basePayload['enRoute'] ?? false;
+        _isPackagePickup = basePayload['packagePickup'] ?? false;
+        _isPackageCollected = basePayload['packageCollected'] ?? false;
+        _isInTransit = basePayload['inTransit'] ?? false;
+        _isOutForDelivery = basePayload['outForDelivery'] ?? false;
         _estimateStt1 = estimate['stt1'] ?? '';
         _estimateStt2 = estimate['stt2'] ?? '';
 
@@ -1155,11 +1233,6 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
           _routeMetricsFromSocket = true;
           _routeMetricsFromSocketAt = DateTime.now();
         }
-
-        // driver-location should always be treated as driver assigned/confirmed.
-        _isDriverConfirmed = true;
-        isWaitingForDriver = false;
-        noDriverFound = false;
       });
 
       if (prevStarted != nextStarted) {
@@ -1353,6 +1426,28 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   }
 
   void _updateDriverMarker(LatLng position, double bearing) {
+    _pendingDriverMarkerPos = position;
+    _pendingDriverMarkerBearing = bearing;
+
+    if (_driverMarkerFlushTimer != null) return;
+    _driverMarkerFlushTimer = Timer(_driverMarkerMinInterval, () {
+      _driverMarkerFlushTimer = null;
+      _commitDriverMarker(force: false);
+    });
+  }
+
+  void _commitDriverMarker({required bool force}) {
+    final now = DateTime.now();
+    if (!force &&
+        now.difference(_lastDriverMarkerCommitAt) < _driverMarkerMinInterval) {
+      return;
+    }
+    _lastDriverMarkerCommitAt = now;
+
+    final position = _pendingDriverMarkerPos ?? _currentDriverLatLng;
+    if (position == null) return;
+    final bearing = _pendingDriverMarkerBearing ?? _lastBearing;
+
     _driverMarker = Marker(
       markerId: const MarkerId("driver_marker"),
       position: position,
@@ -1362,6 +1457,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
           BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueBlue),
       anchor: const Offset(0.5, 0.5),
       flat: true,
+      zIndex: 5,
       infoWindow: InfoWindow(
         title: driverName.trim().isNotEmpty ? driverName.trim() : 'Driver',
         snippet: carDetails.trim().isNotEmpty ? carDetails.trim() : null,
@@ -1370,12 +1466,15 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
     if (!mounted) return;
     setState(() {
-      // 🟢 Remove old marker and add updated one
       _markers = {
         ..._markers.where((m) => m.markerId != const MarkerId("driver_marker")),
         _driverMarker!,
       };
     });
+
+    // Ensure the marker becomes visible even if driver-location arrived before
+    // the map controller was ready.
+    _maybeAutoFollow(position);
   }
 
   List<LatLng> _decodeStepsPolyline(dynamic legs) {
@@ -1417,7 +1516,9 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       final url =
           'https://maps.googleapis.com/maps/api/directions/json?origin=${driverLatLng.latitude},${driverLatLng.longitude}&destination=${customerLatLng.latitude},${customerLatLng.longitude}&key=$apiKey';
 
-      final response = await http.get(Uri.parse(url));
+      final response = await http
+          .get(Uri.parse(url))
+          .timeout(const Duration(seconds: 8));
       final data = json.decode(response.body);
       if (!mounted) return;
       if (data['status'] == 'OK') {
@@ -1436,8 +1537,11 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         final encoded =
             (data['routes']?[0]?['overview_polyline']?['points'] ?? '')
                 .toString();
+        final decoded = stepPoints.isNotEmpty ? stepPoints : _decodePolyline(encoded);
+        // Fallback: always show at least a straight line if Directions gives
+        // an empty/short polyline (happens on very short routes / edge cases).
         final points =
-            stepPoints.isNotEmpty ? stepPoints : _decodePolyline(encoded);
+            decoded.length >= 2 ? decoded : <LatLng>[driverLatLng, customerLatLng];
         if (!mounted) return;
         final socketFresh =
             _routeMetricsFromSocket &&
@@ -1453,11 +1557,36 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
               driverStartedRide ? 'driver_to_drop' : 'driver_to_pickup';
           _polylines = MapUiDefaults.routePolylines(points, id: polyId);
         });
+        if (kDebugMode) {
+          AppLogger.log.i('pkg map polyline set: pts=${points.length} id=${driverStartedRide ? 'driver_to_drop' : 'driver_to_pickup'}');
+        }
       } else {
-        AppLogger.log.e("Directions error: ${data['status']}");
+        // Still draw a basic fallback line so UI never looks "broken".
+        if (mounted) {
+          setState(() {
+            final polyId =
+                driverStartedRide ? 'driver_to_drop' : 'driver_to_pickup';
+            _polylines =
+                MapUiDefaults.routePolylines(<LatLng>[driverLatLng, customerLatLng], id: polyId);
+          });
+        }
+        if (kDebugMode) {
+          AppLogger.log.e("Directions error: ${data['status']}");
+        }
       }
     } catch (e) {
-      AppLogger.log.e("Directions exception: $e");
+      // Network hiccup/timeouts shouldn't leave the map without a route.
+      if (mounted) {
+        setState(() {
+          final polyId =
+              driverStartedRide ? 'driver_to_drop' : 'driver_to_pickup';
+          _polylines =
+              MapUiDefaults.routePolylines(<LatLng>[driverLatLng, customerLatLng], id: polyId);
+        });
+      }
+      if (kDebugMode) {
+        AppLogger.log.e("Directions exception: $e");
+      }
     } finally {
       _isDrawingPolyline = false;
     }
@@ -1719,7 +1848,14 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       to.longitude,
     );
 
-    if (dist < _minMoveMeters) return;
+    if (dist < _minMoveMeters) {
+      // Ensure the polyline exists even if the driver hasn't moved enough to
+      // animate (e.g. driver-location arrived before joined-booking).
+      if (_polylines.isEmpty) {
+        _maybeUpdatePolyline(from, force: true);
+      }
+      return;
+    }
 
     if (dist > _hardJumpMeters) {
       _driverMoveController.stop();
@@ -1891,6 +2027,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     } catch (_) {}
 
     _pulseTimer?.cancel();
+    _driverMarkerFlushTimer?.cancel();
     _paymentNavTimer?.cancel();
     _searchingElapsedTimer?.cancel();
     _searchingAnimController.dispose();
@@ -2174,12 +2311,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                                           Row(
                                             children: [
                                               ClipOval(
-                                                child: Image.network(
-                                                  ProfilePic,
-                                                  fit: BoxFit.cover,
-                                                  height: 40,
-                                                  width: 40,
-                                                ),
+                                                child: _driverAvatar(),
                                               ),
                                               SizedBox(width: 5),
                                               CustomTextFields.textWithStylesSmall(

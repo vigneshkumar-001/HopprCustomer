@@ -11,10 +11,10 @@ class MapUiConfig {
   static const int completedPolylineZ = 0;
 
   // Camera
-  static const double initialZoom = 16.6;
+  static const double initialZoom = 16.5;
   static const double minZoom = 12.0;
   static const double maxZoom = 18.0;
-  static const double followMinZoom = 15.8;
+  static const double followMinZoom = 15.5;
   static const Duration cameraFollowInterval = Duration(milliseconds: 900);
 
   // Marker sizing (logical px / dp)

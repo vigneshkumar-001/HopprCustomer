@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:get/get.dart';
@@ -14,10 +15,27 @@ import 'package:hopper/api/repository/api_consents.dart';
 import 'package:hopper/Presentation/BookRide/Controllers/driver_search_controller.dart';
 import 'package:hopper/uitls/map/direction_helper.dart';
 import 'package:hopper/uitls/map/driver_motion_engine.dart';
+import 'package:hopper/uitls/map/route_tracking_math.dart';
 import 'package:hopper/uitls/websocket/socket_io_client.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:hopper/uitls/map/map_ui_defaults.dart';
 import 'package:hopper/uitls/map/compact_marker_icons.dart';
+
+class _RouteRequest {
+  final LatLng origin;
+  final LatLng destination;
+  final String polyId;
+  final bool force;
+  final String? cacheKey;
+
+  const _RouteRequest({
+    required this.origin,
+    required this.destination,
+    required this.polyId,
+    required this.force,
+    required this.cacheKey,
+  });
+}
 
 class OrderConfirmController extends GetxController
     with GetSingleTickerProviderStateMixin, WidgetsBindingObserver {
@@ -248,8 +266,19 @@ class OrderConfirmController extends GetxController
   // =================================================================
   //                        POLYLINE CONTROL
   // =================================================================
-  DateTime _lastPolylineAt = DateTime.fromMillisecondsSinceEpoch(0);
-  final Duration _polylineInterval = const Duration(seconds: 25);
+  // Route API call throttle. Keep separate from polyline rebuild cadence so we
+  // can reroute faster when off-route without spamming the API.
+  DateTime _lastRouteFetchAt = DateTime.fromMillisecondsSinceEpoch(0);
+  String _lastRouteKey = '';
+  String _activeRouteSig = '';
+  String? _routeInFlightKey;
+  _RouteRequest? _pendingRouteRequest;
+
+  // Small in-memory route cache to avoid repeated decode/fetch work.
+  // Key: phase|originLat|originLng|destLat|destLng (rounded to 5 decimals).
+  // Value: simplified LatLng points.
+  final Map<String, List<LatLng>> _routeCache = <String, List<LatLng>>{};
+  static const int _routeCacheMaxEntries = 10;
 
   bool _isDrawingPolyline = false;
 
@@ -328,6 +357,7 @@ class OrderConfirmController extends GetxController
     _driverMarkerFlushTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _driverMotion.dispose();
+    _clearActiveRoute();
     super.onClose();
   }
 
@@ -843,21 +873,8 @@ class OrderConfirmController extends GetxController
       _seedStaticMarkers(forceRecreate: false);
 
       if (driverLat != null && driverLng != null) {
-        if (driverStartedRide.value && customerToLatLng != null) {
-          await _drawPolyline(
-            origin: LatLng(driverLat, driverLng),
-            destination: customerToLatLng!,
-            polyId: 'driver_to_drop',
-            force: true,
-          );
-        } else if (!driverStartedRide.value && customerLatLng != null) {
-          await _drawPolyline(
-            origin: LatLng(driverLat, driverLng),
-            destination: customerLatLng!,
-            polyId: 'driver_to_pickup',
-            force: true,
-          );
-        }
+        final initialDriverPos = LatLng(driverLat, driverLng);
+        _maybeRerouteFromDriver(initialDriverPos, force: true);
       }
 
       if (driverStartedRide.value) {
@@ -901,12 +918,7 @@ class OrderConfirmController extends GetxController
         _seedStaticMarkers(forceRecreate: false);
         _refreshPulseCircles();
         if (customerToLatLng != null) {
-          _drawPolyline(
-            origin: newPos,
-            destination: customerToLatLng!,
-            polyId: 'driver_to_drop',
-            force: true,
-          );
+          _maybeRerouteFromDriver(newPos, force: true);
         }
       }
       // first point -> show immediately
@@ -921,12 +933,7 @@ class OrderConfirmController extends GetxController
 
         // polyline driver->pickup once
         if (!driverStartedRide.value && customerLatLng != null) {
-          _drawPolyline(
-            origin: newPos,
-            destination: customerLatLng!,
-            polyId: "driver_to_pickup",
-            force: true,
-          );
+          _maybeRerouteFromDriver(newPos, force: true);
         }
         return;
       }
@@ -934,26 +941,8 @@ class OrderConfirmController extends GetxController
       // enqueue for smooth motion (shared helper)
       _driverMotion.ingest(newPos, serverTs: rawTs, bearing: srvBearing);
 
-      // polyline update rarely
-      if (!driverStartedRide.value &&
-          customerLatLng != null &&
-          _shouldUpdatePolyline("driver_to_pickup")) {
-        _drawPolyline(
-          origin: newPos,
-          destination: customerLatLng!,
-          polyId: "driver_to_pickup",
-        );
-      }
-
-      if (driverStartedRide.value &&
-          customerToLatLng != null &&
-          _shouldUpdatePolyline("driver_to_drop")) {
-        _drawPolyline(
-          origin: newPos,
-          destination: customerToLatLng!,
-          polyId: "driver_to_drop",
-        );
-      }
+      // Re-route only when off-route or phase/destination changes. Throttled.
+      _maybeRerouteFromDriver(newPos);
 
       // Motion ticks are handled inside DriverMotionEngine.
     });
@@ -1000,12 +989,7 @@ class OrderConfirmController extends GetxController
       if (status && customerToLatLng != null) {
         final polyOrigin =
             _emaPos ?? _displayPos ?? customerLatLng ?? customerToLatLng!;
-        await _drawPolyline(
-          origin: polyOrigin,
-          destination: customerToLatLng!,
-          polyId: "driver_to_drop",
-          force: true,
-        );
+        _maybeRerouteFromDriver(polyOrigin, force: true);
 
         // Ola like: fit pickup+drop after ride started (skip if user manually
         // took over the camera via focus/zoom/drag).
@@ -1022,6 +1006,7 @@ class OrderConfirmController extends GetxController
         nearDestination.value = true;
         etaChipText.value = 'Arrived at destination';
         latestRideStatus.value = 'COMPLETED';
+        _clearActiveRoute();
       }
     });
 
@@ -1031,6 +1016,7 @@ class OrderConfirmController extends GetxController
         isTripCancelled.value = true;
         cancelReason.value =
             (data['message'] ?? data['reason'] ?? "Trip cancelled").toString();
+        _clearActiveRoute();
       }
     });
 
@@ -1040,6 +1026,7 @@ class OrderConfirmController extends GetxController
         isTripCancelled.value = true;
         cancelReason.value =
             (data['message'] ?? data['reason'] ?? "Trip cancelled").toString();
+        _clearActiveRoute();
       }
     });
   }
@@ -1654,13 +1641,102 @@ class OrderConfirmController extends GetxController
   // =================================================================
   //                           POLYLINES
   // =================================================================
-  bool _shouldUpdatePolyline(String polyId) {
-    final now = DateTime.now();
-    final canByTime = now.difference(_lastPolylineAt) >= _polylineInterval;
-    if (!canByTime) return false;
+  String _routeKey({
+    required bool toDrop,
+    required LatLng destination,
+  }) {
+    return '${toDrop ? 'toDrop' : 'toPickup'}|dest:${destination.latitude.toStringAsFixed(5)},${destination.longitude.toStringAsFixed(5)}';
+  }
 
-    _lastPolylineAt = now;
-    return true;
+  String _routeCacheKey({
+    required bool toDrop,
+    required LatLng origin,
+    required LatLng destination,
+  }) {
+    final phase = toDrop ? 'toDrop' : 'toPickup';
+    return '$phase|'
+        '${origin.latitude.toStringAsFixed(5)}|${origin.longitude.toStringAsFixed(5)}|'
+        '${destination.latitude.toStringAsFixed(5)}|${destination.longitude.toStringAsFixed(5)}';
+  }
+
+  void _cachePut(String key, List<LatLng> points) {
+    if (_routeCache.containsKey(key)) {
+      _routeCache.remove(key);
+    }
+    _routeCache[key] = points;
+    while (_routeCache.length > _routeCacheMaxEntries) {
+      _routeCache.remove(_routeCache.keys.first);
+    }
+  }
+
+  String _routeSig(List<LatLng> pts) {
+    if (pts.length < 2) return 'len:${pts.length}';
+    final a = pts.first;
+    final b = pts.last;
+    return 'len:${pts.length}|a:${a.latitude.toStringAsFixed(6)},${a.longitude.toStringAsFixed(6)}|b:${b.latitude.toStringAsFixed(6)},${b.longitude.toStringAsFixed(6)}';
+  }
+
+  LatLng? _activeDestination() {
+    if (driverStartedRide.value) return customerToLatLng;
+    return customerLatLng;
+  }
+
+  void _maybeRerouteFromDriver(LatLng driverPos, {bool force = false}) {
+    if (isTripCancelled.value || destinationReached.value) return;
+    final dest = _activeDestination();
+    if (dest == null) return;
+
+    final now = DateTime.now();
+    final key = _routeKey(toDrop: driverStartedRide.value, destination: dest);
+    final cacheKey = _routeCacheKey(
+      toDrop: driverStartedRide.value,
+      origin: driverPos,
+      destination: dest,
+    );
+
+    if (force || key != _lastRouteKey) {
+      _lastRouteKey = key;
+      _clearActiveRoute();
+      _drawPolyline(
+        origin: driverPos,
+        destination: dest,
+        polyId: driverStartedRide.value ? 'driver_to_drop' : 'driver_to_pickup',
+        force: true,
+        cacheKey: cacheKey,
+      );
+      _lastRouteFetchAt = now;
+      return;
+    }
+
+    if (!shouldReroute(
+      activeRoute: activeRoutePoints,
+      driver: driverPos,
+      destination: dest,
+      now: now,
+      lastRouteFetchAt: _lastRouteFetchAt,
+      minInterval: const Duration(seconds: 10),
+      offRouteThresholdMeters: 35.0,
+    )) {
+      return;
+    }
+
+    _lastRouteFetchAt = now;
+    _drawPolyline(
+      origin: driverPos,
+      destination: dest,
+      polyId: driverStartedRide.value ? 'driver_to_drop' : 'driver_to_pickup',
+      force: true,
+      cacheKey: cacheKey,
+    );
+  }
+
+  void _clearActiveRoute() {
+    activeRoutePoints.clear();
+    polylines.clear();
+    _lastRouteKey = '';
+    _lastRouteFetchAt = DateTime.fromMillisecondsSinceEpoch(0);
+    _activeRouteSig = '';
+    _routeInFlightKey = null;
   }
 
   Future<void> _drawPolyline({
@@ -1668,11 +1744,55 @@ class OrderConfirmController extends GetxController
     required LatLng destination,
     required String polyId,
     bool force = false,
+    String? cacheKey,
   }) async {
-    if (!force && _isDrawingPolyline) return;
+    // Never run multiple Directions calls in parallel. If we need a newer route
+    // (phase switch / off-route), queue the latest request and run it right
+    // after the current fetch finishes.
+    if (_isDrawingPolyline) {
+      _pendingRouteRequest = _RouteRequest(
+        origin: origin,
+        destination: destination,
+        polyId: polyId,
+        force: force,
+        cacheKey: cacheKey,
+      );
+      return;
+    }
     _isDrawingPolyline = true;
 
     try {
+      final resolvedCacheKey =
+          cacheKey ??
+          _routeCacheKey(
+            toDrop: polyId == 'driver_to_drop',
+            origin: origin,
+            destination: destination,
+          );
+
+      // Prevent duplicate same-origin/same-destination requests while one is in-flight.
+      if (_routeInFlightKey == resolvedCacheKey) return;
+
+      final cached = _routeCache[resolvedCacheKey];
+      if (cached != null && cached.length >= 2) {
+        if (kDebugMode) {
+          AppLogger.log.i('🧭 route cache hit: $resolvedCacheKey (${cached.length} pts)');
+        }
+        final sig = _routeSig(cached);
+        if (sig != _activeRouteSig) {
+          _activeRouteSig = sig;
+          activeRoutePoints.assignAll(cached);
+          polylines.assignAll(MapUiDefaults.routePolylines(cached, id: polyId));
+        }
+        return;
+      }
+
+      _routeInFlightKey = resolvedCacheKey;
+      if (kDebugMode) {
+        AppLogger.log.i(
+          '🧭 route fetch: $resolvedCacheKey (origin=${origin.latitude.toStringAsFixed(5)},${origin.longitude.toStringAsFixed(5)} dest=${destination.latitude.toStringAsFixed(5)},${destination.longitude.toStringAsFixed(5)})',
+        );
+      }
       final route = await _dir.getRouteInfo(
         origin: origin,
         destination: destination,
@@ -1684,12 +1804,37 @@ class OrderConfirmController extends GetxController
       final pts = _simplifyPolyline(route.points);
       if (pts.length < 2) return;
 
-      activeRoutePoints.assignAll(pts);
-      polylines.assignAll(MapUiDefaults.routePolylines(pts, id: polyId));
+      _cachePut(resolvedCacheKey, pts);
+
+      final sig = _routeSig(pts);
+      if (sig != _activeRouteSig) {
+        _activeRouteSig = sig;
+        activeRoutePoints.assignAll(pts);
+        polylines.assignAll(MapUiDefaults.routePolylines(pts, id: polyId));
+        if (kDebugMode) {
+          AppLogger.log.i('🧭 route applied: ${pts.length} pts ($polyId)');
+        }
+      }
     } catch (e) {
       AppLogger.log.e("Polyline error: $e");
     } finally {
+      _routeInFlightKey = null;
       _isDrawingPolyline = false;
+
+      final pending = _pendingRouteRequest;
+      _pendingRouteRequest = null;
+      if (pending != null) {
+        // Run latest queued request.
+        unawaited(
+          _drawPolyline(
+            origin: pending.origin,
+            destination: pending.destination,
+            polyId: pending.polyId,
+            force: true,
+            cacheKey: pending.cacheKey,
+          ),
+        );
+      }
     }
   }
 

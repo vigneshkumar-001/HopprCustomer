@@ -12,8 +12,8 @@ import 'package:hopper/uitls/map/customer/camera_utils.dart';
 import 'package:hopper/uitls/map/customer/map_eta_distance_card.dart';
 import 'package:hopper/uitls/map/customer/map_ui_config.dart';
 import 'package:hopper/uitls/map/customer/marker_icon_cache.dart';
-import 'package:hopper/uitls/map/customer/polyline_trim_utils.dart';
 import 'package:hopper/uitls/map/driver_motion_engine.dart';
+import 'package:hopper/uitls/map/route_tracking_math.dart';
 
 enum RideMapMode { idle, toPickup, toDrop }
 
@@ -71,18 +71,16 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   double _vehicleBearing = 0;
 
   List<LatLng> _fullRoute = const <LatLng>[];
-  List<LatLng> _remainingRoute = const <LatLng>[];
-  List<LatLng> _completedRoute = const <LatLng>[];
-  int _trimIndex = 0;
+  String _routeSig = '';
 
   Set<Polyline> _polylines = const <Polyline>{};
   Set<Marker> _markers = const <Marker>{};
 
-  DateTime _lastTrimAt = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _trimInterval = Duration(milliseconds: 240);
-
   DateTime _lastCameraAt = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _pauseFollowUntil = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastFitAt = DateTime.fromMillisecondsSinceEpoch(0);
+  String _lastFitKey = '';
+  bool _pendingFit = false;
 
   double _currentZoom = MapUiConfig.initialZoom;
 
@@ -100,7 +98,6 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       vsync: this,
       onUpdate: (pos, bearing) => _queueVehicleMarker(pos, bearing),
       onFrameSideEffects: (pos) {
-        _maybeTrimPolyline(pos);
         _maybeFollowCamera(pos);
       },
     );
@@ -133,18 +130,22 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     // signature instead of relying on list identity.
     if (_computeRouteSig(widget.routePoints) != _routeSig) {
       _syncRoute(force: true);
+      _requestFitBounds(reason: 'route_changed');
     }
 
     if (oldWidget.pickup != widget.pickup || oldWidget.drop != widget.drop) {
       _syncMarkers(force: true);
+      _requestFitBounds(reason: 'pickup_drop_changed');
     }
     if (oldWidget.mode != widget.mode) {
       _syncMarkers(force: true);
+      _requestFitBounds(reason: 'mode_changed');
     }
 
     if (widget.driverLocation != null &&
         oldWidget.driverLocation != widget.driverLocation) {
-      _motion.ingest(widget.driverLocation!);
+      final snapped = _snapAndBearing(widget.driverLocation!);
+      _motion.ingest(snapped.position, bearing: snapped.bearing);
     }
   }
 
@@ -164,7 +165,9 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     try {
       _vehIcon = await MarkerIconCache.vehicleIcon(widget.vehicleType, dpr: dpr);
     } catch (e) {
-      AppLogger.log.w('vehicle icon load failed: $e');
+      if (kDebugMode) {
+        AppLogger.log.w('vehicle icon load failed: $e');
+      }
     }
     try {
       _pickupIcon = await MarkerIconCache.pickupPin(dpr: dpr);
@@ -181,10 +184,48 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
 
     _routeSig = sig;
     _fullRoute = List<LatLng>.unmodifiable(List<LatLng>.from(pts));
-    _trimIndex = 0;
-    _completedRoute = const <LatLng>[];
-    _remainingRoute = _fullRoute;
     _rebuildPolylines();
+  }
+
+  void _requestFitBounds({required String reason}) {
+    // Fit bounds only when it matters; never on every driver update.
+    // Also don't fight the user: pause after user gestures.
+    final now = DateTime.now();
+    if (now.isBefore(_pauseFollowUntil)) return;
+    if (now.difference(_lastFitAt) < const Duration(milliseconds: 900)) return;
+
+    final key =
+        '${widget.mode}|route:$_routeSig|p:${widget.pickup.latitude.toStringAsFixed(5)},${widget.pickup.longitude.toStringAsFixed(5)}|d:${widget.drop.latitude.toStringAsFixed(5)},${widget.drop.longitude.toStringAsFixed(5)}';
+    if (key == _lastFitKey) return;
+
+    _lastFitKey = key;
+    _pendingFit = true;
+    _maybeFitBounds();
+  }
+
+  Future<void> _maybeFitBounds() async {
+    if (!_pendingFit) return;
+    if (_mapController == null) return;
+    if (DateTime.now().isBefore(_pauseFollowUntil)) return;
+
+    final extras = <LatLng>[
+      if (_vehiclePos != null) _vehiclePos!,
+      widget.pickup,
+      if (widget.mode == RideMapMode.toDrop) widget.drop,
+    ];
+
+    if (_fullRoute.length < 2 && extras.length < 2) return;
+
+    _pendingFit = false;
+    _lastFitAt = DateTime.now();
+
+    final bounds = boundsFromRoutePoints(_fullRoute, extraPoints: extras);
+    final padding = 110.0; // balanced for top/bottom overlays
+    try {
+      await _mapController!.animateCamera(
+        CameraUpdate.newLatLngBounds(bounds, padding),
+      );
+    } catch (_) {}
   }
 
   String _computeRouteSig(List<LatLng> pts) {
@@ -197,42 +238,15 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   void _rebuildPolylines() {
     final set = <Polyline>{};
 
-    if (_completedRoute.length > 1) {
+    // Draw one clean polyline only, and rebuild it only when routePoints changes.
+    if (_fullRoute.length > 1) {
       set.add(
         Polyline(
-          polylineId: const PolylineId('route_completed'),
-          points: _completedRoute,
-          color: MapUiConfig.completedPolylineColor,
-          width: MapUiConfig.polylineWidth,
-          zIndex: MapUiConfig.completedPolylineZ,
-          startCap: Cap.roundCap,
-          endCap: Cap.roundCap,
-          jointType: JointType.round,
-        ),
-      );
-    }
-
-    if (_remainingRoute.length > 1) {
-      // Outline for better visibility on light/dark map styles.
-      set.add(
-        Polyline(
-          polylineId: const PolylineId('route_remaining_outline'),
-          points: _remainingRoute,
-          color: MapUiConfig.polylineOutlineColor,
-          width: MapUiConfig.polylineOutlineWidth,
-          zIndex: MapUiConfig.activePolylineZ,
-          startCap: Cap.roundCap,
-          endCap: Cap.roundCap,
-          jointType: JointType.round,
-        ),
-      );
-      set.add(
-        Polyline(
-          polylineId: const PolylineId('route_remaining'),
-          points: _remainingRoute,
+          polylineId: const PolylineId('active_route'),
+          points: _fullRoute,
           color: MapUiConfig.activePolylineColor,
           width: MapUiConfig.polylineWidth,
-          zIndex: MapUiConfig.activePolylineZ + 1,
+          zIndex: MapUiConfig.activePolylineZ,
           startCap: Cap.roundCap,
           endCap: Cap.roundCap,
           jointType: JointType.round,
@@ -293,6 +307,17 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   }
 
   void _queueVehicleMarker(LatLng pos, double bearing) {
+    // Avoid rebuilding markers/state for micro-jitter.
+    // Ignore <2m moves unless bearing changed meaningfully.
+    final last = _vehiclePos;
+    if (last != null) {
+      final d = haversineDistanceMeters(last, pos);
+      final bearingDelta = shortestAngleDelta(_vehicleBearing, bearing).abs();
+      if (d < 2.0 && bearingDelta < 10.0) {
+        return;
+      }
+    }
+
     _pendingMarkerPos = pos;
     _pendingMarkerBearing = bearing;
     if (_markerFlushTimer != null) return;
@@ -327,7 +352,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
         flat: true,
         anchor: const Offset(0.5, MapUiConfig.vehicleAnchorY),
         icon: _vehIcon ?? BitmapDescriptor.defaultMarker,
-          zIndex: 4,
+        zIndex: 4,
         infoWindow: InfoWindow.noText,
       ),
     );
@@ -335,28 +360,31 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     if (mounted) setState(() {});
   }
 
-  void _maybeTrimPolyline(LatLng vehiclePos) {
-    if (_fullRoute.length < 2) return;
-    if (DateTime.now().difference(_lastTrimAt) < _trimInterval) return;
-    _lastTrimAt = DateTime.now();
+  _SnappedPose _snapAndBearing(LatLng raw) {
+    if (_fullRoute.length < 2) {
+      return _SnappedPose(position: raw, bearing: _vehicleBearing);
+    }
 
-    final res = PolylineTrimUtils.trim(
-      full: _fullRoute,
-      lastIndex: _trimIndex,
-      current: vehiclePos,
-      maxLookahead: 55,
-      maxSnapMeters: 32,
+    final nearest = nearestPointOnPolyline(raw, _fullRoute);
+    if (nearest == null) {
+      return _SnappedPose(position: raw, bearing: _vehicleBearing);
+    }
+
+    final nextIdx = (nearest.segmentIndex + 1).clamp(0, _fullRoute.length - 1);
+    final next = _fullRoute[nextIdx];
+
+    final routeBearing = bearingBetween(nearest.point, next);
+    final smooth = smoothBearing(
+      currentDeg: _vehicleBearing,
+      targetDeg: routeBearing,
+      alpha: 0.22,
     );
-    if (res == null) return;
 
-    _trimIndex = res.index;
-    _completedRoute = res.completed;
-    _remainingRoute = res.remaining;
-    _rebuildPolylines();
+    return _SnappedPose(position: nearest.point, bearing: smooth);
   }
 
   void _onUserGesture() {
-    _pauseFollowUntil = DateTime.now().add(const Duration(seconds: 5));
+    _pauseFollowUntil = DateTime.now().add(const Duration(seconds: 8));
   }
 
   void _maybeFollowCamera(LatLng vehiclePos) {
@@ -370,10 +398,13 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       min: MapUiConfig.followMinZoom,
       max: MapUiConfig.maxZoom,
     );
+
+    // Follow slightly ahead of the vehicle for a more professional feel.
+    final target = offsetLatLngMeters(vehiclePos, _vehicleBearing, 28);
     try {
       _mapController!.moveCamera(
         CameraUpdate.newCameraPosition(
-          CameraPosition(target: vehiclePos, zoom: z, bearing: 0, tilt: 0),
+          CameraPosition(target: target, zoom: z, bearing: 0, tilt: 0),
         ),
       );
     } catch (_) {}
@@ -443,6 +474,8 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
                 } catch (_) {}
               }
               widget.onMapReady?.call(controller);
+              // If we had a route/mode update before map was ready, fit once.
+              _maybeFitBounds();
             },
             onCameraMoveStarted: _onUserGesture,
             onTap: (_) => _onUserGesture(),
@@ -472,4 +505,9 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     );
   }
 }
-  String _routeSig = '';
+
+class _SnappedPose {
+  final LatLng position;
+  final double bearing;
+  const _SnappedPose({required this.position, required this.bearing});
+}
