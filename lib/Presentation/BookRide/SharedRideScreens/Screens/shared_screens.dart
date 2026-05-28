@@ -1294,13 +1294,27 @@ class _SharedScreensState extends State<SharedScreens>
       if (_activeRoute.isNotEmpty) {
         _trimRouteForDriver(newPos);
 
-        // OFF-ROUTE DETECTION:
-        if (_isOffRoute(newPos)) {
-          AppLogger.log.w("🚨 Driver is off route, recalculating...");
-          if (_isRoutingToDrop && _customerDropLatLng != null) {
-            _requestRoute(newPos, _customerDropLatLng!).then(_setActiveRoute);
-          } else if (_isRoutingToPickup && _customerPickupLatLng != null) {
-            _requestRoute(newPos, _customerPickupLatLng!).then(_setActiveRoute);
+        // OFF-ROUTE DETECTION (production-safe):
+        // - Require consecutive misses (GPS noise protection)
+        // - Throttle route API calls (prevents polyline flicker / blinking)
+        final offRoute = _isOffRoute(newPos);
+        if (!offRoute) {
+          _offRouteConsecutive = 0;
+        } else {
+          _offRouteConsecutive++;
+          final nowR = DateTime.now();
+          final canReroute =
+              _offRouteConsecutive >= _offRouteConfirmCount &&
+              nowR.difference(_lastRerouteAt) >= _minRerouteInterval;
+          if (canReroute) {
+            _offRouteConsecutive = 0;
+            _lastRerouteAt = nowR;
+            AppLogger.log.w("🚨 Driver is off route, recalculating...");
+            if (_isRoutingToDrop && _customerDropLatLng != null) {
+              _requestRoute(newPos, _customerDropLatLng!).then(_setActiveRoute);
+            } else if (_isRoutingToPickup && _customerPickupLatLng != null) {
+              _requestRoute(newPos, _customerPickupLatLng!).then(_setActiveRoute);
+            }
           }
         }
       }
