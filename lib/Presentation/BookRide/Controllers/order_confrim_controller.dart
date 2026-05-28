@@ -526,9 +526,9 @@ class OrderConfirmController extends GetxController
     final dpr = ui.window.devicePixelRatio;
 
     try {
-      carIcon = await CompactMarkerIcons.assetCircleBadge(
+      carIcon = await CompactMarkerIcons.assetContained(
         assetPath: AppImages.carHop,
-        diameterDp: MapUiDefaults.vehicleBadgeDiameterDp,
+        sizeDp: MapUiDefaults.vehicleBadgeDiameterDp,
         dpr: dpr,
       );
     } catch (_) {
@@ -538,9 +538,9 @@ class OrderConfirmController extends GetxController
     }
 
     try {
-      bikeIcon = await CompactMarkerIcons.assetCircleBadge(
+      bikeIcon = await CompactMarkerIcons.assetContained(
         assetPath: AppImages.packageBike,
-        diameterDp: MapUiDefaults.vehicleBadgeDiameterDp,
+        sizeDp: MapUiDefaults.vehicleBadgeDiameterDp,
         dpr: dpr,
       );
     } catch (_) {

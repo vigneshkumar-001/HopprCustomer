@@ -15,18 +15,14 @@ class MarkerIconCache {
     final sizeDp =
         type == VehicleType.bike ? MapUiConfig.bikeMarkerSizeDp : MapUiConfig.carMarkerSizeDp;
     final asset = type == VehicleType.bike ? AppImages.packageBike : AppImages.carHop;
-    // Bike assets often have more whitespace; scale them slightly up inside the badge
-    // so car/bike look visually consistent.
-    final imageScale = type == VehicleType.bike ? 0.62 : 0.56;
-    final key = 'veh|$asset|$sizeDp|$imageScale|$resolvedDpr';
+    final key = 'veh|contain|$asset|$sizeDp|$resolvedDpr';
     final cached = _cache[key];
     if (cached != null) return cached;
 
-    final icon = await CompactMarkerIcons.assetCircleBadge(
+    final icon = await CompactMarkerIcons.assetContained(
       assetPath: asset,
-      diameterDp: sizeDp,
+      sizeDp: sizeDp,
       dpr: resolvedDpr,
-      imageScale: imageScale,
     );
     _cache[key] = icon;
     return icon;

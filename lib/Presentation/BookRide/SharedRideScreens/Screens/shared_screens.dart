@@ -169,6 +169,13 @@ class _SharedScreensState extends State<SharedScreens>
 
   bool _isFetchingRoute = false;
 
+  // Off-route handling: require consecutive misses + throttle reroute to avoid
+  // polyline flicker from one noisy GPS sample.
+  int _offRouteConsecutive = 0;
+  static const int _offRouteConfirmCount = 3;
+  static const Duration _minRerouteInterval = Duration(seconds: 12);
+  DateTime _lastRerouteAt = DateTime.fromMillisecondsSinceEpoch(0);
+
   // ---------- SMOOTH MOTION STATE ----------
   DateTime _lastDriverLocationLogAt = DateTime.fromMillisecondsSinceEpoch(0);
 
@@ -374,9 +381,9 @@ class _SharedScreensState extends State<SharedScreens>
             ? AppImages.packageBike
             : AppImages.carHop;
     try {
-      _driverIcon = await CompactMarkerIcons.assetCircleBadge(
+      _driverIcon = await CompactMarkerIcons.assetContained(
         assetPath: driverAsset,
-        diameterDp: MapUiDefaults.vehicleBadgeDiameterDp,
+        sizeDp: MapUiDefaults.vehicleBadgeDiameterDp,
       );
     } catch (_) {
       _driverIcon = null;

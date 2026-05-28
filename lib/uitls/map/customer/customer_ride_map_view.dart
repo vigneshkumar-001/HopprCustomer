@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
+import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import 'package:hopper/Core/Consents/app_logger.dart';
@@ -71,6 +72,9 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   double _vehicleBearing = 0;
 
   List<LatLng> _fullRoute = const <LatLng>[];
+  List<LatLng> _remainingRoute = const <LatLng>[];
+  List<LatLng> _completedRoute = const <LatLng>[];
+  int _lastTrimIndex = 0;
   String _routeSig = '';
 
   Set<Polyline> _polylines = const <Polyline>{};
@@ -88,7 +92,10 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   LatLng? _pendingMarkerPos;
   double? _pendingMarkerBearing;
   DateTime _lastMarkerCommitAt = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _markerMinInterval = Duration(milliseconds: 120);
+  static const Duration _markerMinInterval = Duration(milliseconds: 90);
+
+  DateTime _lastPolylineTrimAt = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _polyTrimInterval = Duration(milliseconds: 260);
 
   @override
   void initState() {
@@ -98,6 +105,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       vsync: this,
       onUpdate: (pos, bearing) => _queueVehicleMarker(pos, bearing),
       onFrameSideEffects: (pos) {
+        _maybeTrimRoute(pos);
         _maybeFollowCamera(pos);
       },
     );
@@ -106,9 +114,15 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     _loadIcons();
     _syncRoute(force: true);
 
-    final initPos = widget.driverLocation ?? widget.pickup;
-    _motion.reset(initPos, bearing: 0);
-    _vehiclePos = initPos;
+    // IMPORTANT: never seed the vehicle marker from pickup/drop.
+    // Driver location can arrive slightly later via socket; showing the car at
+    // pickup is misleading and looks like a bug. We only render the vehicle
+    // once we have a real driver fix.
+    final initPos = widget.driverLocation;
+    if (initPos != null) {
+      _motion.reset(initPos, bearing: 0);
+      _vehiclePos = initPos;
+    }
   }
 
   @override
@@ -145,7 +159,15 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     if (widget.driverLocation != null &&
         oldWidget.driverLocation != widget.driverLocation) {
       final snapped = _snapAndBearing(widget.driverLocation!);
-      _motion.ingest(snapped.position, bearing: snapped.bearing);
+      if (!_motion.hasFix) {
+        // First live fix: set immediately (no long animation from pickup).
+        _motion.reset(snapped.position, bearing: snapped.bearing);
+        _vehiclePos = snapped.position;
+        _vehicleBearing = snapped.bearing;
+        _syncMarkers(force: true);
+      } else {
+        _motion.ingest(snapped.position, bearing: snapped.bearing);
+      }
     }
   }
 
@@ -184,6 +206,9 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
 
     _routeSig = sig;
     _fullRoute = List<LatLng>.unmodifiable(List<LatLng>.from(pts));
+    _remainingRoute = _fullRoute;
+    _completedRoute = const <LatLng>[];
+    _lastTrimIndex = 0;
     _rebuildPolylines();
   }
 
@@ -238,12 +263,30 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   void _rebuildPolylines() {
     final set = <Polyline>{};
 
-    // Draw one clean polyline only, and rebuild it only when routePoints changes.
-    if (_fullRoute.length > 1) {
+    // Premium route progress: completed (grey) + remaining (active).
+    final completed = _completedRoute.length >= 2 ? _completedRoute : const <LatLng>[];
+    final remaining = _remainingRoute.length >= 2 ? _remainingRoute : _fullRoute;
+
+    if (completed.length >= 2) {
+      set.add(
+        Polyline(
+          polylineId: const PolylineId('completed_route'),
+          points: completed,
+          color: MapUiConfig.completedPolylineColor,
+          width: MapUiConfig.polylineOutlineWidth,
+          zIndex: MapUiConfig.completedPolylineZ,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          jointType: JointType.round,
+        ),
+      );
+    }
+
+    if (remaining.length > 1) {
       set.add(
         Polyline(
           polylineId: const PolylineId('active_route'),
-          points: _fullRoute,
+          points: remaining,
           color: MapUiConfig.activePolylineColor,
           width: MapUiConfig.polylineWidth,
           zIndex: MapUiConfig.activePolylineZ,
@@ -313,7 +356,8 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     if (last != null) {
       final d = haversineDistanceMeters(last, pos);
       final bearingDelta = shortestAngleDelta(_vehicleBearing, bearing).abs();
-      if (d < 2.0 && bearingDelta < 10.0) {
+      // Keep slow movement smooth: allow sub-2m updates (traffic/crawling).
+      if (d < 0.8 && bearingDelta < 6.0) {
         return;
       }
     }
@@ -383,6 +427,66 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     return _SnappedPose(position: nearest.point, bearing: smooth);
   }
 
+  int? _nearestIndexInWindow(
+    LatLng current,
+    List<LatLng> points, {
+    required int lastIndex,
+    int window = 28,
+    double maxSnapMeters = 55,
+  }) {
+    if (points.length < 2) return null;
+    final start = (lastIndex - window).clamp(0, points.length - 1);
+    final end = (lastIndex + window).clamp(0, points.length - 1);
+
+    int? bestIdx;
+    double bestD = double.infinity;
+
+    for (int i = start; i <= end; i++) {
+      final p = points[i];
+      final d = Geolocator.distanceBetween(
+        current.latitude,
+        current.longitude,
+        p.latitude,
+        p.longitude,
+      );
+      if (d < bestD) {
+        bestD = d;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx == null) return null;
+    if (!bestD.isFinite || bestD > maxSnapMeters) return null;
+    return bestIdx;
+  }
+
+  void _maybeTrimRoute(LatLng vehiclePos) {
+    if (_fullRoute.length < 2) return;
+
+    final now = DateTime.now();
+    if (now.difference(_lastPolylineTrimAt) < _polyTrimInterval) return;
+    _lastPolylineTrimAt = now;
+
+    final idx = _nearestIndexInWindow(
+      vehiclePos,
+      _fullRoute,
+      lastIndex: _lastTrimIndex,
+      window: 34,
+      maxSnapMeters: 60,
+    );
+    if (idx == null) return;
+
+    // Don't bounce backwards unless very small (GPS noise).
+    if (idx + 2 < _lastTrimIndex) return;
+    if ((idx - _lastTrimIndex).abs() < 1) return;
+
+    _lastTrimIndex = idx;
+    final clamped = idx.clamp(0, _fullRoute.length - 1);
+    _completedRoute = List<LatLng>.unmodifiable(_fullRoute.sublist(0, clamped));
+    _remainingRoute = List<LatLng>.unmodifiable(_fullRoute.sublist(clamped));
+
+    _rebuildPolylines();
+  }
+
   void _onUserGesture() {
     _pauseFollowUntil = DateTime.now().add(const Duration(seconds: 8));
   }
@@ -414,10 +518,16 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     final pos = _vehiclePos ?? widget.driverLocation;
     if (_mapController == null || pos == null) return;
     _pauseFollowUntil = DateTime.fromMillisecondsSinceEpoch(0);
+    // Ensure recenter always feels like a "focus" action (not stuck zoomed out).
+    final z = CameraUtils.clampZoom(
+      _currentZoom,
+      min: MapUiConfig.followMinZoom,
+      max: MapUiConfig.maxZoom,
+    );
     try {
       await _mapController!.animateCamera(
         CameraUpdate.newCameraPosition(
-          CameraPosition(target: pos, zoom: _currentZoom, bearing: 0, tilt: 0),
+          CameraPosition(target: pos, zoom: z, bearing: 0, tilt: 0),
         ),
       );
     } catch (_) {}
@@ -425,15 +535,21 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
 
   Future<void> fitRoute({double padding = 120}) async {
     if (_mapController == null) return;
-    final pts = <LatLng>[
-      if (_vehiclePos != null) _vehiclePos!,
-      widget.pickup,
-      widget.drop,
-    ];
-    if (pts.length < 2) return;
     try {
-      final bounds = CameraUtils.boundsFromPoints(pts);
-      await _mapController!.animateCamera(CameraUpdate.newLatLngBounds(bounds, padding));
+      // Prefer fitting the actual route polyline so the entire leg is visible.
+      // Fallback to marker points if route isn't ready yet.
+      final extras = <LatLng>[
+        if (_vehiclePos != null) _vehiclePos!,
+        widget.pickup,
+        widget.drop,
+      ];
+      final hasRoute = _fullRoute.length >= 2;
+      final bounds = hasRoute
+          ? boundsFromRoutePoints(_fullRoute, extraPoints: extras)
+          : CameraUtils.boundsFromPoints(extras);
+      await _mapController!.animateCamera(
+        CameraUpdate.newLatLngBounds(bounds, padding),
+      );
     } catch (_) {}
   }
 

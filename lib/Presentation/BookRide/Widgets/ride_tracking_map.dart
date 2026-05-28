@@ -167,12 +167,12 @@ class RideTrackingMapState extends State<RideTrackingMap>
   Future<void> _loadIcons() async {
     final dpr = ui.window.devicePixelRatio;
     try {
-      _vehicleIcon = await CompactMarkerIcons.assetCircleBadge(
+      _vehicleIcon = await CompactMarkerIcons.assetContained(
         assetPath:
             widget.vehicleType == VehicleType.bike
                 ? AppImages.packageBike
                 : AppImages.carHop,
-        diameterDp: MapUiDefaults.vehicleBadgeDiameterDp,
+        sizeDp: MapUiDefaults.vehicleBadgeDiameterDp,
         dpr: dpr,
       );
     } catch (_) {
@@ -490,4 +490,3 @@ class RideTrackingMapState extends State<RideTrackingMap>
     );
   }
 }
-

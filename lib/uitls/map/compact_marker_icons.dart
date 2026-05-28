@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -7,6 +9,107 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 class CompactMarkerIcons {
   static final Map<String, BitmapDescriptor> _cache =
       <String, BitmapDescriptor>{};
+
+  static Future<ui.Rect?> _opaqueBounds(ui.Image image) async {
+    const int alphaThreshold = 12;
+    ByteData? bd;
+    try {
+      bd = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+    } catch (_) {
+      bd = null;
+    }
+    if (bd == null) return null;
+    final bytes = bd.buffer.asUint8List();
+    final w = image.width;
+    final h = image.height;
+    int minX = w, minY = h, maxX = -1, maxY = -1;
+
+    for (int y = 0; y < h; y++) {
+      final rowOffset = y * w * 4;
+      for (int x = 0; x < w; x++) {
+        final a = bytes[rowOffset + x * 4 + 3];
+        if (a > alphaThreshold) {
+          if (x < minX) minX = x;
+          if (y < minY) minY = y;
+          if (x > maxX) maxX = x;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+
+    if (maxX < 0 || maxY < 0) return null;
+    minX = (minX - 1).clamp(0, w - 1);
+    minY = (minY - 1).clamp(0, h - 1);
+    maxX = (maxX + 1).clamp(0, w - 1);
+    maxY = (maxY + 1).clamp(0, h - 1);
+    return ui.Rect.fromLTRB(
+      minX.toDouble(),
+      minY.toDouble(),
+      (maxX + 1).toDouble(),
+      (maxY + 1).toDouble(),
+    );
+  }
+
+  /// Render an asset as a crisp marker icon without any badge/circle behind it.
+  ///
+  /// - Crops transparent padding (tight bounds)
+  /// - Scales with `devicePixelRatio`
+  /// - Contain-fit into the target square (no stretching)
+  static Future<BitmapDescriptor> assetContained({
+    required String assetPath,
+    double sizeDp = 28,
+    double? dpr,
+  }) async {
+    final resolvedDpr = (dpr ?? ui.window.devicePixelRatio).clamp(1.0, 4.0);
+    final key = 'contain|$assetPath|$sizeDp|$resolvedDpr';
+    final cached = _cache[key];
+    if (cached != null) return cached;
+
+    final targetPx = (sizeDp * resolvedDpr).round().clamp(18, 420);
+
+    final data = await rootBundle.load(assetPath);
+    final codec = await ui.instantiateImageCodec(data.buffer.asUint8List());
+    final frame = await codec.getNextFrame();
+    final src = frame.image;
+
+    final srcRect = (await _opaqueBounds(src)) ??
+        Rect.fromLTWH(0, 0, src.width.toDouble(), src.height.toDouble());
+
+    final cropW = srcRect.width;
+    final cropH = srcRect.height;
+
+    final scale = (cropW <= 1 || cropH <= 1)
+        ? 1.0
+        : (targetPx / math.max(cropW, cropH));
+
+    // Contain within the square while preserving aspect ratio.
+    final dstW = cropW * scale;
+    final dstH = cropH * scale;
+    final dx = (targetPx - dstW) / 2.0;
+    final dy = (targetPx - dstH) / 2.0;
+    final dstRect = Rect.fromLTWH(dx, dy, dstW, dstH);
+
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(
+      recorder,
+      Rect.fromLTWH(0, 0, targetPx.toDouble(), targetPx.toDouble()),
+    );
+    final paint = Paint()
+      ..isAntiAlias = true
+      ..filterQuality = FilterQuality.high;
+    canvas.drawImageRect(
+      src,
+      srcRect,
+      dstRect,
+      paint,
+    );
+    final picture = recorder.endRecording();
+    final rendered = await picture.toImage(targetPx, targetPx);
+    final bytes = await rendered.toByteData(format: ui.ImageByteFormat.png);
+    final icon = BitmapDescriptor.fromBytes(bytes!.buffer.asUint8List());
+    _cache[key] = icon;
+    return icon;
+  }
 
   static Future<BitmapDescriptor> assetPin({
     required String assetPath,

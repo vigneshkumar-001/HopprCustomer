@@ -41,6 +41,10 @@ class DriverMotionEngine {
     double maxTurnDegPerSec = 220.0,
     Duration maxFutureSkew = const Duration(seconds: 12),
     Duration outOfOrderTolerance = const Duration(milliseconds: 500),
+    // When driver is stopped, GPS jitter can cause the marker to "dance".
+    // We detect low implied speed (from timestamps) and ignore small moves.
+    double stationarySpeedThresholdMps = 0.6,
+    double stationaryIgnoreUnderMeters = 4.0,
   })  : _playbackDelay = playbackDelay,
         _maxStale = maxStale,
         _minUpdateInterval = motionStepMinInterval,
@@ -54,9 +58,11 @@ class DriverMotionEngine {
         _emaAlphaFast = emaAlphaFast,
         _bearingEmaAlpha = bearingEmaAlpha,
         _maxTurnDegPerSec = maxTurnDegPerSec,
-        _maxFutureSkew = maxFutureSkew,
-        _outOfOrderTolerance = outOfOrderTolerance,
-        _moveCtrl = AnimationController(vsync: vsync);
+         _maxFutureSkew = maxFutureSkew,
+         _outOfOrderTolerance = outOfOrderTolerance,
+         _stationarySpeedThresholdMps = stationarySpeedThresholdMps,
+         _stationaryIgnoreUnderMeters = stationaryIgnoreUnderMeters,
+         _moveCtrl = AnimationController(vsync: vsync);
 
   final void Function(LatLng position, double bearing) onUpdate;
   final void Function(LatLng position)? onFrameSideEffects;
@@ -78,6 +84,8 @@ class DriverMotionEngine {
 
   final Duration _maxFutureSkew;
   final Duration _outOfOrderTolerance;
+  final double _stationarySpeedThresholdMps;
+  final double _stationaryIgnoreUnderMeters;
 
   final List<DriverPose> _poseQueue = <DriverPose>[];
   final AnimationController _moveCtrl;
@@ -137,7 +145,6 @@ class DriverMotionEngine {
         ts.isBefore(lastPkt.subtract(_outOfOrderTolerance))) {
       return false;
     }
-    _lastPacketTs = ts;
 
     if (_lastReceivedPos != null) {
       final d = Geolocator.distanceBetween(
@@ -146,12 +153,30 @@ class DriverMotionEngine {
         newPos.latitude,
         newPos.longitude,
       );
-      if (d < _minMoveMeters) return false;
+      // Stationary jitter guard: if the implied speed is very low and the move is
+      // small, treat it as GPS drift (prevents the car "dancing" while stopped).
+      if (lastPkt != null) {
+        final dtMs = ts.difference(lastPkt).inMilliseconds;
+        if (dtMs > 200) {
+          final implied = d / (dtMs / 1000.0);
+          if (implied <= _stationarySpeedThresholdMps &&
+              d <= _stationaryIgnoreUnderMeters) {
+            _lastPacketTs = ts;
+            return false;
+          }
+        }
+      }
+      if (d < _minMoveMeters) {
+        _lastPacketTs = ts;
+        return false;
+      }
       if (d > _hardJumpMeters) {
+        _lastPacketTs = ts;
         reset(newPos, bearing: bearing ?? _lastBearing);
         return true;
       }
     }
+    _lastPacketTs = ts;
     _lastReceivedPos = newPos;
 
     if (_displayPos == null) {
