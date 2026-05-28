@@ -6,7 +6,6 @@ import 'package:hopper/Core/Utility/app_buttons.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Core/Utility/app_loader.dart';
 import 'package:hopper/Presentation/Authentication/controller/authController.dart';
-import 'package:hopper/Presentation/Authentication/screens/otp_screens.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:country_picker/country_picker.dart';
 import 'package:get/get.dart';
@@ -21,6 +20,8 @@ class MobileScreens extends StatefulWidget {
 class _MobileScreensState extends State<MobileScreens> {
   final AuthController controller = Get.put(AuthController());
   final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
+  DateTime _lastBackAt = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _exitBackWindow = Duration(seconds: 2);
   void showCountrySelector(BuildContext context) {
     showCountryPicker(
       context: context,
@@ -98,20 +99,61 @@ class _MobileScreensState extends State<MobileScreens> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
-          child: Form(
-            key: _formKey,
-            child: Column(
-              children: [
-                Expanded(
-                  child: SingleChildScrollView(
-                    child: Column(
+    Future<void> safeBack() async {
+      final nav = Navigator.of(context);
+      if (nav.canPop()) {
+        nav.pop();
+        return;
+      }
+
+      // If this screen is the first route (common after pushReplacement),
+      // show "press back again to exit" and exit on second tap.
+      final now = DateTime.now();
+      final within = now.difference(_lastBackAt) <= _exitBackWindow;
+      _lastBackAt = now;
+
+      if (within) {
+        try {
+          await SystemChannels.textInput.invokeMethod('TextInput.hide');
+        } catch (_) {}
+        SystemNavigator.pop();
+        return;
+      }
+
+      // Keep the user on the same screen and show a short hint.
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text('Press back again to exit'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+    }
+
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        safeBack();
+      },
+      child: Scaffold(
+        body: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+            child: Form(
+              key: _formKey,
+              child: Column(
+                children: [
+                  Expanded(
+                    child: SingleChildScrollView(
+                      child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        AppButtons.backButton(context: context),
+                          GestureDetector(
+                            onTap: safeBack,
+                            child: Image.asset(AppImages.backImage, height: 25),
+                          ),
                         const SizedBox(height: 25),
                         CustomTextFields.textWithStyles700(
                           AppTexts.enterMobileNumberForVerification,
@@ -339,7 +381,8 @@ class _MobileScreensState extends State<MobileScreens> {
                         text: AppTexts.continueWithPhoneNumber,
                       );
                 }),
-              ],
+                ],
+              ),
             ),
           ),
         ),

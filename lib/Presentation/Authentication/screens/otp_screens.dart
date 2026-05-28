@@ -34,6 +34,7 @@ class _OtpScreensState extends State<OtpScreens> {
   late Timer _timer;
   int _start = 30;
   final OtpController otpController = Get.put(OtpController());
+  bool _navigating = false;
 
   Future<void> _hideKeyboard() async {
     FocusManager.instance.primaryFocus?.unfocus();
@@ -43,8 +44,10 @@ class _OtpScreensState extends State<OtpScreens> {
   }
 
   Future<void> _goNextAfterOtp() async {
+    if (_navigating) return;
+    if (mounted) setState(() => _navigating = true);
     await _hideKeyboard();
-    await Future.delayed(const Duration(milliseconds: 60));
+    await Future.delayed(const Duration(milliseconds: 40));
 
     final gate = Get.find<LocationGateController>();
     await gate.checkNow();
@@ -54,9 +57,29 @@ class _OtpScreensState extends State<OtpScreens> {
         gate.isReady.value
             ? const CommonBottomNavigation()
             : const PermissionScreens();
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (_) => next),
+    await Navigator.of(context).pushReplacement(
+      PageRouteBuilder(
+        pageBuilder: (_, __, ___) => next,
+        transitionDuration: const Duration(milliseconds: 260),
+        reverseTransitionDuration: const Duration(milliseconds: 200),
+        transitionsBuilder: (_, animation, __, child) {
+          final curved = CurvedAnimation(
+            parent: animation,
+            curve: Curves.easeOutCubic,
+          );
+          return FadeTransition(
+            opacity: curved,
+            child: SlideTransition(
+              position:
+                  Tween<Offset>(
+                    begin: const Offset(0, 0.02),
+                    end: Offset.zero,
+                  ).animate(curved),
+              child: child,
+            ),
+          );
+        },
+      ),
     );
   }
 
@@ -112,17 +135,19 @@ class _OtpScreensState extends State<OtpScreens> {
           () =>
               otpController.isLoading.value
                   ? Center(child: AppLoader.appLoader())
-                  : Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 20,
-                      vertical: 20,
-                    ),
-                    child: Column(
-                      children: [
-                        Expanded(
-                          child: SingleChildScrollView(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
+                  : Stack(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 20,
+                          vertical: 20,
+                        ),
+                        child: Column(
+                          children: [
+                            Expanded(
+                              child: SingleChildScrollView(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
 
                               children: [
                                 AppButtons.backButton(context: context),
@@ -341,6 +366,19 @@ class _OtpScreensState extends State<OtpScreens> {
                       ],
                     ),
                   ),
+                  if (_navigating)
+                    Positioned.fill(
+                      child: AbsorbPointer(
+                        absorbing: true,
+                        child: Container(
+                          color: Colors.white54,
+                          alignment: Alignment.center,
+                          child: AppLoader.appLoader(),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
         ),
       ),
     );

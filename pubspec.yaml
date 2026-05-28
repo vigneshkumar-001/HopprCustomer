@@ -23,6 +23,7 @@ dependencies:
   equatable: any
   dartz: any
   dio: any
+  http: any
   country_picker: any
   intl_phone_field: any
   pin_code_fields: any

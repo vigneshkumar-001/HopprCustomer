@@ -1,4 +1,4 @@
-import 'package:hopper/Core/Utility/app_toasts.dart';
+﻿import 'package:hopper/Core/Utility/app_toasts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -26,10 +26,12 @@ import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:hopper/uitls/websocket/socket_io_client.dart';
 import 'package:hopper/uitls/map/compact_marker_icons.dart';
+import 'package:hopper/uitls/map/driver_motion_engine.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:hopper/Core/Consents/app_logger.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:get/get.dart';
+import 'package:hopper/uitls/map/route_tracking_math.dart';
 import '../../../api/repository/api_consents.dart';
 import '../../BookRide/Controllers/driver_search_controller.dart';
 
@@ -596,6 +598,29 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     }
   }
 
+  bool _isValidCoordinate(LatLng p) {
+    if (p.latitude.abs() < 0.000001 && p.longitude.abs() < 0.000001) return false;
+    if (p.latitude < -90 || p.latitude > 90) return false;
+    if (p.longitude < -180 || p.longitude > 180) return false;
+    return true;
+  }
+
+  double? _parseBearingDeg(dynamic v) {
+    final d = _toDouble(v);
+    if (d == null) return null;
+    if (!d.isFinite) return null;
+    final norm = (d % 360 + 360) % 360;
+    return norm;
+  }
+
+  /// Google Directions supported modes: driving, walking, bicycling, transit.
+  /// For "bike", we first try bicycling and fall back to driving if needed.
+  String _preferredRouteMode() {
+    final t = _vehicleType.toString().trim().toLowerCase();
+    if (t.contains('bike') || t.contains('two')) return 'bicycling';
+    return 'driving';
+  }
+
   void _startPulseAnimation() {
     _pulseTimer?.cancel();
     _pulseTimer = Timer.periodic(const Duration(milliseconds: 650), (_) {
@@ -707,32 +732,26 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   final Duration _cameraInterval = const Duration(milliseconds: 900);
   final Duration _userGesturePause = const Duration(seconds: 6);
 
-  // ---------- smooth driver motion ----------
-  bool _isAnimatingDriver = false;
-  LatLng? _pendingDriverTarget;
+  // ---------- smooth driver motion (production-grade) ----------
+  late final DriverMotionEngine _motion;
   double _lastBearing = 0.0;
-  final double _hardJumpMeters = 120.0;
-  // Allow slow movement to animate; reduce "stuck" feeling in traffic.
-  final double _minMoveMeters = 0.3;
-  // Socket packets can arrive with server timestamps that are older than the
-  // UI clock (queueing, reconnects, server clock drift). We still want to
-  // render driver marker + polyline as long as packets are not out-of-order.
-  // Out-of-order handling is done separately via `_lastDriverPacketTs`.
-  final Duration _maxStale = const Duration(minutes: 3);
   DateTime _lastDriverLocationLogAt = DateTime.fromMillisecondsSinceEpoch(0);
-  DateTime? _lastDriverServerTs;
-  DateTime? _lastDriverPacketTs;
-  DateTime _lastDriverPaintAt = DateTime.fromMillisecondsSinceEpoch(0);
-
-  late final AnimationController _driverMoveController;
-  LatLng? _driverAnimFrom;
-  LatLng? _driverAnimTo;
-  LatLng? _driverAnimPrev;
 
   // ---------- polyline throttle ----------
   DateTime _lastPolylineAt = DateTime.fromMillisecondsSinceEpoch(0);
   final Duration _polylineInterval = const Duration(seconds: 25);
   String? _activePolyId;
+
+  // ---------- reroute / off-route detection ----------
+  List<LatLng> _activeRoutePoints = const <LatLng>[];
+  DateTime _lastRouteFetchAt = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastOffRouteCheckAt = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _rerouteMinInterval = Duration(seconds: 12);
+  static const Duration _offRouteCheckInterval = Duration(milliseconds: 700);
+  static const double _offRouteThresholdMeters = 65.0;
+
+  DateTime _lastBoundsAt = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _boundsInterval = Duration(seconds: 4);
 
   Future<void> _loadCustomMarker() async {
     await _loadCustomMarkerForVehicle(_vehicleType);
@@ -896,12 +915,33 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       duration: const Duration(milliseconds: 1600),
     )..repeat();
 
-    _driverMoveController = AnimationController(
+    _motion = DriverMotionEngine(
       vsync: this,
-      duration: const Duration(milliseconds: 1),
-    )
-      ..addListener(_onDriverAnimTick)
-      ..addStatusListener(_onDriverAnimStatus);
+      // Tuning for "always smooth" feel (less snapping, less jitter).
+      playbackDelay: const Duration(milliseconds: 750),
+      maxStale: const Duration(minutes: 3),
+      outOfOrderTolerance: const Duration(milliseconds: 650),
+      motionStepMinInterval: const Duration(milliseconds: 16), // ~60fps
+      minMoveMeters: 0.18, // reduce "stuck" feeling at slow speeds
+      hardJumpMeters: 260.0, // tolerate bigger GPS jumps before snapping
+      minSeg: const Duration(milliseconds: 520),
+      maxSeg: const Duration(milliseconds: 1650),
+      ease: Curves.easeInOutCubicEmphasized,
+      emaAlphaSlow: 0.10,
+      emaAlphaFast: 0.26,
+      bearingEmaAlpha: 0.18,
+      maxTurnDegPerSec: 180.0,
+      onUpdate: (pos, bearing) {
+        _currentDriverLatLng = pos;
+        _lastBearing = bearing;
+        _updateDriverMarker(pos, bearing);
+      },
+      onFrameSideEffects: (pos) {
+        _maybeAutoFollow(pos);
+        _maybeUpdatePolyline(pos);
+        _maybeRerouteIfOffRoute(pos);
+      },
+    );
 
     _searchingElapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
@@ -1151,24 +1191,17 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       }
       final newDriverLatLng = LatLng(lat, lng);
 
+      if (!_isValidCoordinate(newDriverLatLng)) return;
+
       final ts = _parseServerTime(data['timestamp']);
-      final now0 = DateTime.now();
-      final safeTs =
-          ts.isAfter(now0.add(const Duration(seconds: 12))) ? now0 : ts;
-      if (now0.difference(safeTs) > _maxStale) return;
+      final bearing =
+          _parseBearingDeg(data['bearing'] ?? data['heading'] ?? data['rotation']);
 
-      // Drop out-of-order packets (prevents marker jumping backwards).
-      final lastPkt = _lastDriverPacketTs;
-      if (lastPkt != null &&
-          safeTs.isBefore(lastPkt.subtract(const Duration(milliseconds: 500)))) {
-        return;
-      }
-      _lastDriverPacketTs = safeTs;
-
-      if (_currentDriverLatLng == null) {
-        _currentDriverLatLng = newDriverLatLng;
-        _updateDriverMarker(newDriverLatLng, _lastBearing);
-        _maybeAutoFollow(newDriverLatLng);
+      // DriverMotionEngine handles stale/out-of-order packets internally.
+      // First packet: snap immediately (no visible "lag"), then subsequent
+      // packets animate smoothly via DriverMotionEngine.
+      if (_motion.displayPosition == null) {
+        _motion.reset(newDriverLatLng, bearing: bearing ?? _lastBearing);
         _maybeUpdatePolyline(newDriverLatLng, force: true);
 
         // Also apply estimate immediately on the very first driver-location packet.
@@ -1182,11 +1215,14 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
             _estimateStt2 = stt2;
           });
         }
-        return;
+      } else {
+        _motion.ingest(newDriverLatLng, serverTs: ts, bearing: bearing);
+        if (_polylines.isEmpty) {
+          _maybeUpdatePolyline(newDriverLatLng, force: true);
+        }
       }
 
       // ✅ Animate movement
-      _enqueueDriverMove(newDriverLatLng, serverTs: safeTs);
 
       // polyline handled by _enqueueDriverMove()
 
@@ -1332,99 +1368,6 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     });
   }
 
-  double _getBearing(LatLng start, LatLng end) {
-    final lat1 = start.latitude * math.pi / 180;
-    final lon1 = start.longitude * math.pi / 180;
-    final lat2 = end.latitude * math.pi / 180;
-    final lon2 = end.longitude * math.pi / 180;
-
-    final dLon = lon2 - lon1;
-
-    final y = math.sin(dLon) * math.cos(lat2);
-    final x =
-        math.cos(lat1) * math.sin(lat2) -
-        math.sin(lat1) * math.cos(lat2) * math.cos(dLon);
-
-    final bearing = math.atan2(y, x);
-    return (bearing * 180 / math.pi + 360) % 360;
-  }
-
-  double _smoothBearing(double current, double target, {double alpha = 0.35}) {
-    final from = current % 360;
-    final to = target % 360;
-    var delta = to - from;
-    if (delta > 180) delta -= 360;
-    if (delta < -180) delta += 360;
-    return (from + delta * alpha + 360) % 360;
-  }
-
-  double _lerp(double start, double end, double t) {
-    return start + (end - start) * t;
-  }
-
-  Future<void> _animateCarTo(LatLng from, LatLng to) async {
-    const steps = 10;
-    const duration = Duration(milliseconds: 800);
-    final interval = duration.inMilliseconds ~/ steps;
-
-    double currentBearing = _driverMarker?.rotation ?? 0;
-
-    for (int i = 1; i <= steps; i++) {
-      await Future.delayed(Duration(milliseconds: interval));
-
-      final lat = _lerp(from.latitude, to.latitude, i / steps);
-      final lng = _lerp(from.longitude, to.longitude, i / steps);
-      final intermediate = LatLng(lat, lng);
-      double newBearing = _getBearing(from, intermediate);
-
-      if ((newBearing - currentBearing).abs() > 10) {
-        currentBearing = newBearing;
-      }
-
-      _updateDriverMarker(intermediate, currentBearing);
-
-      // ✅ Only auto-move camera if user is not interacting
-      if (Geolocator.distanceBetween(
-            _currentDriverLatLng!.latitude,
-            _currentDriverLatLng!.longitude,
-            intermediate.latitude,
-            intermediate.longitude,
-          ) >
-          1) {
-        _updateDriverMarker(intermediate, currentBearing);
-
-        if (_autoFollowEnabled) {
-          final zoom = await _mapController?.getZoomLevel() ?? 17;
-
-          _mapController?.animateCamera(
-            CameraUpdate.newCameraPosition(
-              CameraPosition(
-                target: intermediate,
-                zoom: zoom,
-                tilt: 45, // optional
-                bearing: currentBearing, // 👈 map rotates with car
-              ),
-            ),
-          );
-        }
-      }
-    }
-
-    _currentDriverLatLng = to;
-
-    if (driverStartedRide && _customerToLatLang != null) {
-      await _drawPolylineFromDriverToCustomer(
-        driverLatLng: to,
-        customerLatLng: _customerToLatLang!,
-      );
-    } else if (!driverStartedRide && _customerLatLng != null) {
-      await _drawPolylineFromDriverToCustomer(
-        driverLatLng: to,
-        customerLatLng: _customerLatLng!,
-      );
-    }
-  }
-
   void _updateDriverMarker(LatLng position, double bearing) {
     _pendingDriverMarkerPos = position;
     _pendingDriverMarkerBearing = bearing;
@@ -1506,20 +1449,31 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   Future<void> _drawPolylineFromDriverToCustomer({
     required LatLng driverLatLng,
     required LatLng customerLatLng,
+    bool forceKeepOldOnFailure = false,
   }) async {
     if (_isDrawingPolyline) return; // prevent multiple calls
     _isDrawingPolyline = true;
 
     try {
       final apiKey = ApiConsents.googleMapApiKey;
+      final preferredMode = _preferredRouteMode();
 
-      final url =
-          'https://maps.googleapis.com/maps/api/directions/json?origin=${driverLatLng.latitude},${driverLatLng.longitude}&destination=${customerLatLng.latitude},${customerLatLng.longitude}&key=$apiKey';
+      Future<Map<String, dynamic>> fetch(String mode) async {
+        final url =
+            'https://maps.googleapis.com/maps/api/directions/json?origin=${driverLatLng.latitude},${driverLatLng.longitude}&destination=${customerLatLng.latitude},${customerLatLng.longitude}&mode=$mode&region=in&key=$apiKey';
+        final response = await http
+            .get(Uri.parse(url))
+            .timeout(const Duration(seconds: 8));
+        return json.decode(response.body) as Map<String, dynamic>;
+      }
 
-      final response = await http
-          .get(Uri.parse(url))
-          .timeout(const Duration(seconds: 8));
-      final data = json.decode(response.body);
+      final startedAt = DateTime.now();
+      _lastRouteFetchAt = startedAt;
+
+      Map<String, dynamic> data = await fetch(preferredMode);
+      if (data['status'] != 'OK' && preferredMode == 'bicycling') {
+        data = await fetch('driving');
+      }
       if (!mounted) return;
       if (data['status'] == 'OK') {
         final legs = (data['routes']?[0]?['legs'] as List?) ?? const [];
@@ -1556,18 +1510,24 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
           final polyId =
               driverStartedRide ? 'driver_to_drop' : 'driver_to_pickup';
           _polylines = MapUiDefaults.routePolylines(points, id: polyId);
+          _activeRoutePoints = points;
         });
+        _maybeFitBounds(points, extraPoints: <LatLng>[driverLatLng, customerLatLng]);
         if (kDebugMode) {
           AppLogger.log.i('pkg map polyline set: pts=${points.length} id=${driverStartedRide ? 'driver_to_drop' : 'driver_to_pickup'}');
         }
       } else {
-        // Still draw a basic fallback line so UI never looks "broken".
-        if (mounted) {
+        // Keep the current route if Directions fails (production-safe). If we
+        // don't have any route yet, draw a minimal fallback line.
+        if (mounted && _polylines.isEmpty && !forceKeepOldOnFailure) {
           setState(() {
             final polyId =
                 driverStartedRide ? 'driver_to_drop' : 'driver_to_pickup';
-            _polylines =
-                MapUiDefaults.routePolylines(<LatLng>[driverLatLng, customerLatLng], id: polyId);
+            _polylines = MapUiDefaults.routePolylines(
+              <LatLng>[driverLatLng, customerLatLng],
+              id: polyId,
+            );
+            _activeRoutePoints = <LatLng>[driverLatLng, customerLatLng];
           });
         }
         if (kDebugMode) {
@@ -1575,13 +1535,16 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         }
       }
     } catch (e) {
-      // Network hiccup/timeouts shouldn't leave the map without a route.
-      if (mounted) {
+      // Network hiccup/timeouts shouldn't clear the current route.
+      if (mounted && _polylines.isEmpty && !forceKeepOldOnFailure) {
         setState(() {
           final polyId =
               driverStartedRide ? 'driver_to_drop' : 'driver_to_pickup';
-          _polylines =
-              MapUiDefaults.routePolylines(<LatLng>[driverLatLng, customerLatLng], id: polyId);
+          _polylines = MapUiDefaults.routePolylines(
+            <LatLng>[driverLatLng, customerLatLng],
+            id: polyId,
+          );
+          _activeRoutePoints = <LatLng>[driverLatLng, customerLatLng];
         });
       }
       if (kDebugMode) {
@@ -1590,6 +1553,20 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     } finally {
       _isDrawingPolyline = false;
     }
+  }
+
+  void _maybeFitBounds(List<LatLng> routePoints, {List<LatLng> extraPoints = const <LatLng>[]}) {
+    if (_mapController == null) return;
+    if (!_autoFollowEnabled) return;
+    final now = DateTime.now();
+    if (now.isBefore(_pauseAutoFollowUntil)) return;
+    if (now.difference(_lastBoundsAt) < _boundsInterval) return;
+    _lastBoundsAt = now;
+
+    try {
+      final bounds = boundsFromRoutePoints(routePoints, extraPoints: extraPoints);
+      _mapController?.animateCamera(CameraUpdate.newLatLngBounds(bounds, 120));
+    } catch (_) {}
   }
 
   List<LatLng> _decodePolyline(String encoded) {
@@ -1831,186 +1808,37 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     );
   }
 
-  void _enqueueDriverMove(LatLng to, {DateTime? serverTs}) {
-    final from = _currentDriverLatLng;
-    if (from == null) {
-      _currentDriverLatLng = to;
-      _updateDriverMarker(to, _lastBearing);
-      _maybeAutoFollow(to);
-      _maybeUpdatePolyline(to, force: true);
-      return;
-    }
+  void _maybeRerouteIfOffRoute(LatLng driverLatLng) {
+    final customerTarget =
+        driverStartedRide ? _customerToLatLang : _customerLatLng;
+    if (customerTarget == null) return;
+    if (_activeRoutePoints.length < 2) return;
 
-    final dist = Geolocator.distanceBetween(
-      from.latitude,
-      from.longitude,
-      to.latitude,
-      to.longitude,
-    );
-
-    if (dist < _minMoveMeters) {
-      // Ensure the polyline exists even if the driver hasn't moved enough to
-      // animate (e.g. driver-location arrived before joined-booking).
-      if (_polylines.isEmpty) {
-        _maybeUpdatePolyline(from, force: true);
-      }
-      return;
-    }
-
-    if (dist > _hardJumpMeters) {
-      _driverMoveController.stop();
-      _driverAnimFrom = null;
-      _driverAnimTo = null;
-      _driverAnimPrev = null;
-      _isAnimatingDriver = false;
-      _pendingDriverTarget = null;
-
-      _currentDriverLatLng = to;
-      _lastBearing = _smoothBearing(
-        _lastBearing,
-        _getBearing(from, to),
-        alpha: 0.6,
-      );
-      _updateDriverMarker(to, _lastBearing);
-      _maybeAutoFollow(to);
-      _maybeUpdatePolyline(to, force: true);
-      return;
-    }
-
-    if (_isAnimatingDriver) {
-      _pendingDriverTarget = to;
-      return;
-    }
-
-    _startDriverAnimation(
-      from: from,
-      to: to,
-      distMeters: dist,
-      serverTs: serverTs,
-    );
-  }
-
-  int _computeDriverSegmentDurationMs({
-    required double distMeters,
-    required DateTime? serverTs,
-  }) {
-    // Base duration scales gently with distance.
-    int base =
-        (450 + (distMeters / 2).clamp(0, 650)).round().clamp(420, 1100);
-
-    // If server timestamps are reliable, keep the animation time aligned to
-    // the update cadence so movement doesn't "freeze" between packets.
-    if (serverTs != null) {
-      final prev = _lastDriverServerTs;
-      _lastDriverServerTs = serverTs;
-      if (prev != null) {
-        final dt = serverTs.difference(prev).inMilliseconds;
-        if (dt > 0) {
-          // Finish slightly before the next update is expected.
-          final aligned = (dt * 0.9).round();
-          base = base.clamp(320, aligned.clamp(320, 1400));
-        }
-      }
-    }
-
-    return base;
-  }
-
-  void _startDriverAnimation({
-    required LatLng from,
-    required LatLng to,
-    required double distMeters,
-    required DateTime? serverTs,
-  }) {
-    _isAnimatingDriver = true;
-    _driverAnimFrom = from;
-    _driverAnimTo = to;
-    _driverAnimPrev = from;
-
-    final durationMs = _computeDriverSegmentDurationMs(
-      distMeters: distMeters,
-      serverTs: serverTs,
-    );
-
-    _driverMoveController
-      ..stop()
-      ..duration = Duration(milliseconds: durationMs)
-      ..value = 0.0
-      ..forward();
-  }
-
-  void _onDriverAnimTick() {
-    if (!mounted) return;
-    final from = _driverAnimFrom;
-    final to = _driverAnimTo;
-    if (from == null || to == null) return;
-
-    // Avoid excessive setState churn; 30fps is plenty for marker smoothness.
     final now = DateTime.now();
-    final isLastFrame = _driverMoveController.value >= 0.999;
-    if (!isLastFrame &&
-        now.difference(_lastDriverPaintAt) <
-            const Duration(milliseconds: 33)) {
-      return;
-    }
-    _lastDriverPaintAt = now;
+    if (now.difference(_lastOffRouteCheckAt) < _offRouteCheckInterval) return;
+    _lastOffRouteCheckAt = now;
 
-    final t = _driverMoveController.value.clamp(0.0, 1.0);
-    final pos = LatLng(
-      _lerp(from.latitude, to.latitude, t),
-      _lerp(from.longitude, to.longitude, t),
+    final should = shouldReroute(
+      activeRoute: _activeRoutePoints,
+      driver: driverLatLng,
+      destination: customerTarget,
+      now: now,
+      lastRouteFetchAt: _lastRouteFetchAt,
+      minInterval: _rerouteMinInterval,
+      offRouteThresholdMeters: _offRouteThresholdMeters,
     );
+    if (!should) return;
 
-    final prev = _driverAnimPrev ?? from;
-    final movedMeters = Geolocator.distanceBetween(
-      prev.latitude,
-      prev.longitude,
-      pos.latitude,
-      pos.longitude,
+    // Apply cooldown immediately (even if the API fails) to avoid spamming.
+    _lastRouteFetchAt = now;
+    _drawPolylineFromDriverToCustomer(
+      driverLatLng: driverLatLng,
+      customerLatLng: customerTarget,
+      forceKeepOldOnFailure: true,
     );
-    if (!isLastFrame && movedMeters < 0.05) return;
-
-    final rawBearing = _getBearing(prev, pos);
-    _lastBearing = _smoothBearing(_lastBearing, rawBearing);
-    _driverAnimPrev = pos;
-
-    _updateDriverMarker(pos, _lastBearing);
-    _maybeAutoFollow(pos);
   }
 
-  void _onDriverAnimStatus(AnimationStatus status) async {
-    if (status != AnimationStatus.completed) return;
-    final to = _driverAnimTo;
-    if (to == null) return;
-
-    _currentDriverLatLng = to;
-    _isAnimatingDriver = false;
-    _driverAnimFrom = null;
-    _driverAnimTo = null;
-    _driverAnimPrev = null;
-
-    _maybeUpdatePolyline(to);
-    _syncPhaseMarkers();
-
-    final pending = _pendingDriverTarget;
-    if (pending != null && mounted) {
-      _pendingDriverTarget = null;
-      final dist = Geolocator.distanceBetween(
-        to.latitude,
-        to.longitude,
-        pending.latitude,
-        pending.longitude,
-      );
-      if (dist >= _minMoveMeters) {
-        _startDriverAnimation(
-          from: to,
-          to: pending,
-          distMeters: dist,
-          serverTs: null,
-        );
-      }
-    }
-  }
+  // (Driver motion is handled by DriverMotionEngine.)
 
   @override
   void dispose() {
@@ -2031,7 +1859,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     _paymentNavTimer?.cancel();
     _searchingElapsedTimer?.cancel();
     _searchingAnimController.dispose();
-    _driverMoveController.dispose();
+    _motion.dispose();
     _mapController?.dispose();
     super.dispose();
   }

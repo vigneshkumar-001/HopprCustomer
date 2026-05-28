@@ -6,14 +6,19 @@ import 'package:hopper/Core/Utility/app_showcase_key.dart';
 
 class TutorialService {
   static bool _isShown = false;
+  static bool _isActive = false;
   static TutorialCoachMark? _tutorial;
+
+  static bool get isActive => _isActive;
+  static bool get isPending => _tutorial != null && !_isShown;
 
   /// Show main tab tutorial
   static Future<void> showTutorial(
       BuildContext context, {
         required ShowcaseKeys keys,
       }) async {
-    if (_isShown) return;
+    // Single-flight: prevent showing/creating the tutorial twice.
+    if (_isShown || _tutorial != null) return;
 
     final prefs = await SharedPreferences.getInstance();
     final isFirstTime = prefs.getBool("tutorialShown") ?? true;
@@ -29,25 +34,33 @@ class TutorialService {
         SharedPreferences.getInstance().then((prefs) async {
           await prefs.setBool("tutorialShown", false);
           _isShown = true;
+          _isActive = false;
           _tutorial = null;
         });
         return true;
-        // SharedPreferences.getInstance().then((prefs) {
-        //   prefs.setBool("tutorialShown", false);
-        //   _isShown = true;
-        // });
-        return true; // <-- must return a bool
       },
       onFinish: () async {
         final prefs = await SharedPreferences.getInstance();
         await prefs.setBool("tutorialShown", false);
         _isShown = true;
+        _isActive = false;
         _tutorial = null;
         return true;
       },
     );
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      // Only show when targets exist in the tree (prevents instant hide).
+      if (!_areTargetsReady(keys)) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_areTargetsReady(keys)) {
+            _isActive = true;
+            _tutorial?.show(context: context);
+          }
+        });
+        return;
+      }
+      _isActive = true;
       _tutorial?.show(context: context);
     });
   }
@@ -57,7 +70,8 @@ class TutorialService {
       BuildContext context, {
         required ShowcaseKeys keys,
       }) async {
-    if (_isShown) return;
+    // Single-flight: prevent showing/creating the tutorial twice.
+    if (_isShown || _tutorial != null) return;
 
     final prefs = await SharedPreferences.getInstance();
     final isFirstTime = prefs.getBool("profileTutorialShown") ?? true;
@@ -74,27 +88,47 @@ class TutorialService {
         SharedPreferences.getInstance().then((prefs) async {
           await prefs.setBool("tutorialShown", false);
           _isShown = true;
+          _isActive = false;
           _tutorial = null;
         });
         return true;
-        // SharedPreferences.getInstance().then((prefs) {
-        //   prefs.setBool("tutorialShown", false);
-        //   _isShown = true;
-        // });
-        return true; // <-- must return a bool
       },
       onFinish: () async {
         final prefs = await SharedPreferences.getInstance();
         await prefs.setBool("tutorialShown", false);
         _isShown = true;
+        _isActive = false;
         _tutorial = null;
         return true;
       },
     );
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_areProfileTargetsReady(keys)) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_areProfileTargetsReady(keys)) {
+            _isActive = true;
+            _tutorial?.show(context: context);
+          }
+        });
+        return;
+      }
+      _isActive = true;
       _tutorial?.show(context: context);
     });
+  }
+
+  static bool _areTargetsReady(ShowcaseKeys keys) {
+    return keys.homeTab.currentContext != null &&
+        keys.rideTab.currentContext != null &&
+        keys.walletTab.currentContext != null &&
+        keys.packageTab.currentContext != null &&
+        keys.profileTabBottom.currentContext != null;
+  }
+
+  static bool _areProfileTargetsReady(ShowcaseKeys keys) {
+    return keys.profileEditButton.currentContext != null &&
+        keys.profileImage.currentContext != null;
   }
 
   // -------- Targets (now use instance keys) --------

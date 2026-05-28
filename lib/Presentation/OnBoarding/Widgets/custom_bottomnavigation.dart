@@ -1,4 +1,5 @@
 // common_bottom_navigation.dart
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:hopper/Core/Consents/app_colors.dart';
@@ -27,11 +28,31 @@ class CommonBottomNavigationState extends State<CommonBottomNavigation> {
   /// Instance-scoped showcase keys (fixes duplicate GlobalKey crash)
   late final ShowcaseKeys showcaseKeys;
 
+  Timer? _tutorialRetryTimer;
+  DateTime _tutorialRetryStartedAt = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _bootOverlayVisible = false;
+
   Future<void> _forceHideKeyboard() async {
     FocusManager.instance.primaryFocus?.unfocus();
     try {
       await SystemChannels.textInput.invokeMethod('TextInput.hide');
     } catch (_) {}
+  }
+
+  Future<void> _tryShowTutorialOnce() async {
+    if (!mounted) return;
+
+    await _forceHideKeyboard();
+    await Future.delayed(const Duration(milliseconds: 80));
+    if (!mounted) return;
+
+    if (MediaQuery.of(context).viewInsets.bottom > 0) return;
+
+    // Give layout one more frame to mount bottom-nav targets.
+    await Future.delayed(const Duration(milliseconds: 120));
+    if (!mounted) return;
+
+    await TutorialService.showTutorial(context, keys: showcaseKeys);
   }
 
   @override
@@ -43,20 +64,51 @@ class CommonBottomNavigationState extends State<CommonBottomNavigation> {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
 
-      // Prevent "keyboard flash" on first Home load (which also breaks tutorial overlay positioning).
-      await _forceHideKeyboard();
-      await Future.delayed(const Duration(milliseconds: 180));
-      if (!mounted) return;
-      await _forceHideKeyboard();
+      // iOS: avoid the "keyboard flash" that can cause coachmarks to vanish.
+      if (Theme.of(context).platform == TargetPlatform.iOS) {
+        setState(() => _bootOverlayVisible = true);
+        await _forceHideKeyboard();
+        await Future.delayed(const Duration(milliseconds: 320));
+        if (!mounted) return;
+        await _forceHideKeyboard();
+        if (!mounted) return;
+        setState(() => _bootOverlayVisible = false);
+      } else {
+        await _forceHideKeyboard();
+      }
 
-      if (!mounted) return;
-      if (MediaQuery.of(context).viewInsets.bottom > 0) return;
-      // Give one more frame for layout to stabilize before showing coach marks.
-      await Future.delayed(const Duration(milliseconds: 120));
-      if (!mounted) return;
+      // Retry for a short window because sometimes the keyboard briefly opens
+      // right after navigation (OTP -> Home) which would skip tutorial.
+      _tutorialRetryStartedAt = DateTime.now();
+      _tutorialRetryTimer?.cancel();
+      _tutorialRetryTimer = Timer.periodic(const Duration(milliseconds: 250), (
+        t,
+      ) async {
+        if (!mounted) {
+          t.cancel();
+          return;
+        }
+        if (TutorialService.isActive || TutorialService.isPending) {
+          t.cancel();
+          return;
+        }
+        if (DateTime.now().difference(_tutorialRetryStartedAt) >
+            const Duration(seconds: 4)) {
+          t.cancel();
+          return;
+        }
+        await _tryShowTutorialOnce();
+      });
 
-      TutorialService.showTutorial(context, keys: showcaseKeys);
+      // Also attempt immediately.
+      await _tryShowTutorialOnce();
     });
+  }
+
+  @override
+  void dispose() {
+    _tutorialRetryTimer?.cancel();
+    super.dispose();
   }
 
   Widget _getScreen(int index) {
@@ -87,15 +139,31 @@ class CommonBottomNavigationState extends State<CommonBottomNavigation> {
   @override
   Widget build(BuildContext context) {
     final bool isKeyboardVisible = MediaQuery.of(context).viewInsets.bottom > 0;
+    final bool isTutorialActive = TutorialService.isActive;
     return WillPopScope(
       onWillPop: () async => false,
       child: NoInternetOverlay(
         child: Scaffold(
           resizeToAvoidBottomInset: true,
           backgroundColor: Colors.white,
-          body: _getScreen(_selectedIndex),
+          body: Stack(
+            children: [
+              _getScreen(_selectedIndex),
+              if (_bootOverlayVisible)
+                Positioned.fill(
+                  child: AbsorbPointer(
+                    absorbing: true,
+                    child: Container(
+                      color: Colors.white,
+                      alignment: Alignment.center,
+                      child: const CircularProgressIndicator(),
+                    ),
+                  ),
+                ),
+            ],
+          ),
           bottomNavigationBar:
-              isKeyboardVisible
+              (isKeyboardVisible && !isTutorialActive)
                   ? null
                   : BottomNavigationBar(
                     backgroundColor: AppColors.commonWhite,
