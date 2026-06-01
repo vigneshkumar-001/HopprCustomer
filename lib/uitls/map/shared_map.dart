@@ -122,7 +122,7 @@ class SharedMapState extends State<SharedMap>
   Future<void> _loadMapStyle() async {
     try {
       final style = await rootBundle.loadString(
-        'assets/map_style/map_style_uber_like.json',
+        'assets/map_style.json',
       );
       _mapStyle = style;
       if (_mapController != null) {
@@ -217,7 +217,7 @@ class SharedMapState extends State<SharedMap>
           (b.northeast.latitude + b.southwest.latitude) / 2,
           (b.northeast.longitude + b.southwest.longitude) / 2,
         );
-        _mapController!.moveCamera(
+        _mapController!.animateCamera(
           CameraUpdate.newCameraPosition(
             CameraPosition(target: mid, zoom: 13.8),
           ),
@@ -294,7 +294,7 @@ class SharedMapState extends State<SharedMap>
           _safeMoveToBounds(bounds, padding: 150);
         }
       } else {
-        _mapController!.moveCamera(
+        _mapController!.animateCamera(
           CameraUpdate.newCameraPosition(
             CameraPosition(
               target: widget.initialPosition,

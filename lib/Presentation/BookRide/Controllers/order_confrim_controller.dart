@@ -152,14 +152,14 @@ class OrderConfirmController extends GetxController
   // ---------- map ----------
   GoogleMapController? mapController;
   String? mapStyle;
-  double currentZoomLevel = 14.9; // matched to driver-side live map zoom
-  static const double _minAutoFollowZoom = 15.8;
+  // Active ride tracking zoom.
+  double currentZoomLevel = 17.0;
+  static const double _minAutoFollowZoom = 17.0;
   BuildContext? _screenCtx;
   Timer? _searchTimer;
   final RxBool focusDriverOnNextTap = false.obs;
 
-  static const double _mapBearingNorth = 0.0;
-  static const double _mapTilt = 0.0;
+  static const double _mapTilt = 30.0;
 
   // Auto camera control (Ola style)
   DateTime _lastCameraMoveAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -169,7 +169,7 @@ class OrderConfirmController extends GetxController
   bool _hasFittedAtLeastOnce = false;
   bool _autoFitBoundsEnabled = true;
   bool _didFitDriverAndPickup = false;
-  static const double _focusDriverZoom = 16.6;
+  static const double _focusDriverZoom = 17.0;
   DateTime _lastAutoFrameAt = DateTime.fromMillisecondsSinceEpoch(0);
   final Duration _autoFrameInterval = const Duration(milliseconds: 1400);
 
@@ -302,6 +302,8 @@ class OrderConfirmController extends GetxController
       onFrameSideEffects: (pos) {
         _autoCameraUpdate();
       },
+      // Debounce raw GPS packets (ignore <5m moves).
+      minMoveMeters: 5.0,
     );
     _dir = DirectionsHelper(apiKey: ApiConsents.googleMapApiKey);
     _loadMapStyle();
@@ -345,7 +347,7 @@ class OrderConfirmController extends GetxController
   Future<void> _loadMapStyle() async {
     try {
       mapStyle = await rootBundle.loadString(
-        'assets/map_style/map_style_ride_clean.json',
+        'assets/map_style.json',
       );
     } catch (_) {}
   }
@@ -384,12 +386,12 @@ class OrderConfirmController extends GetxController
 
     // Initial move
     if (currentPosition != null) {
-      mapController?.moveCamera(
+      mapController?.animateCamera(
         CameraUpdate.newCameraPosition(
           CameraPosition(
             target: currentPosition!,
             zoom: currentZoomLevel,
-            bearing: _mapBearingNorth,
+            bearing: _lastBearing,
             tilt: _mapTilt,
           ),
         ),
@@ -429,7 +431,7 @@ class OrderConfirmController extends GetxController
           CameraPosition(
             target: latLng,
             zoom: currentZoomLevel,
-            bearing: _mapBearingNorth,
+            bearing: _lastBearing,
             tilt: _mapTilt,
           ),
         ),
@@ -480,7 +482,7 @@ class OrderConfirmController extends GetxController
             zoom: math
                 .max(currentZoomLevel, _focusDriverZoom)
                 .clamp(_minAutoFollowZoom, 17.0),
-            bearing: _mapBearingNorth,
+            bearing: _lastBearing,
             tilt: _mapTilt,
           ),
         ),
@@ -510,7 +512,7 @@ class OrderConfirmController extends GetxController
           CameraPosition(
             target: driverPos,
             zoom: currentZoomLevel,
-            bearing: _mapBearingNorth,
+            bearing: _lastBearing,
             tilt: _mapTilt,
           ),
         ),
@@ -696,7 +698,7 @@ class OrderConfirmController extends GetxController
             customerToLatLng!,
           );
           await mapController!.animateCamera(
-            CameraUpdate.newLatLngBounds(bounds, 120),
+            CameraUpdate.newLatLngBounds(bounds, 80),
           );
           return;
         } catch (_) {}
@@ -716,7 +718,7 @@ class OrderConfirmController extends GetxController
             CameraPosition(
               target: target,
               zoom: math.max(currentZoomLevel, MapUiDefaults.focusZoom),
-              bearing: _mapBearingNorth,
+              bearing: _lastBearing,
               tilt: _mapTilt,
             ),
           ),
@@ -737,7 +739,7 @@ class OrderConfirmController extends GetxController
           CameraPosition(
             target: customerLatLng!,
             zoom: math.max(currentZoomLevel, MapUiDefaults.focusZoom),
-            bearing: _mapBearingNorth,
+            bearing: _lastBearing,
             tilt: _mapTilt,
           ),
         ),
@@ -874,7 +876,11 @@ class OrderConfirmController extends GetxController
 
       if (driverLat != null && driverLng != null) {
         final initialDriverPos = LatLng(driverLat, driverLng);
-        _maybeRerouteFromDriver(initialDriverPos, force: true);
+        _updatePolylinesForStatus(
+          latestRideStatus.value,
+          driverPos: initialDriverPos,
+          force: true,
+        );
       }
 
       if (driverStartedRide.value) {
@@ -912,14 +918,14 @@ class OrderConfirmController extends GetxController
           (data['latestStatus'] ?? '').toString().toUpperCase();
       _updateRideMetrics(data);
       final derivedRideStarted = _isRideStartedStatus(latestStatus);
+      final effectiveStatus =
+          latestStatus.trim().isNotEmpty ? latestStatus : latestRideStatus.value;
 
       if (derivedRideStarted && !driverStartedRide.value) {
         driverStartedRide.value = true;
         _seedStaticMarkers(forceRecreate: false);
         _refreshPulseCircles();
-        if (customerToLatLng != null) {
-          _maybeRerouteFromDriver(newPos, force: true);
-        }
+        _updatePolylinesForStatus(effectiveStatus, driverPos: newPos, force: true);
       }
       // first point -> show immediately
       if (_displayPos == null) {
@@ -932,17 +938,15 @@ class OrderConfirmController extends GetxController
         _fitDriverAndPickupOnce();
 
         // polyline driver->pickup once
-        if (!driverStartedRide.value && customerLatLng != null) {
-          _maybeRerouteFromDriver(newPos, force: true);
-        }
+        _updatePolylinesForStatus(effectiveStatus, driverPos: newPos, force: true);
         return;
       }
 
       // enqueue for smooth motion (shared helper)
       _driverMotion.ingest(newPos, serverTs: rawTs, bearing: srvBearing);
 
-      // Re-route only when off-route or phase/destination changes. Throttled.
-      _maybeRerouteFromDriver(newPos);
+      // Keep polylines in sync with phase + driver motion (throttled/cached).
+      _updatePolylinesForStatus(effectiveStatus, driverPos: newPos);
 
       // Motion ticks are handled inside DriverMotionEngine.
     });
@@ -1324,10 +1328,22 @@ class OrderConfirmController extends GetxController
 
   void _applyDriverMarkerNow(LatLng position, double bearing) {
     _lastDriverMarkerAt = DateTime.now();
+    final t = cartypeFromServer.value.trim().toLowerCase();
+    final isCar =
+        t.contains('car') ||
+        t.contains('sedan') ||
+        t.contains('suv') ||
+        t.contains('van');
+    final adjustedBearing = MapUiDefaults.normalizeBearing(
+      bearing +
+          (isCar
+              ? MapUiDefaults.carBearingIconOffsetDeg
+              : MapUiDefaults.bikeBearingIconOffsetDeg),
+    );
     final newMarker = Marker(
       markerId: const MarkerId("driver_marker"),
       position: position,
-      rotation: bearing,
+      rotation: adjustedBearing,
       icon: _iconForVehicleType(cartypeFromServer.value),
       anchor: const Offset(0.5, 0.72),
       flat: true,
@@ -1381,12 +1397,12 @@ class OrderConfirmController extends GetxController
       // Keep zoom stable so roads + vehicle icon remain clear (avoid zooming out).
       final z = lockedZoom.clamp(_minAutoFollowZoom, 17.0);
       try {
-        mapController!.moveCamera(
+        mapController!.animateCamera(
           CameraUpdate.newCameraPosition(
             CameraPosition(
               target: mid,
               zoom: z,
-              bearing: _mapBearingNorth,
+              bearing: _lastBearing,
               tilt: _mapTilt,
             ),
           ),
@@ -1399,12 +1415,12 @@ class OrderConfirmController extends GetxController
     if (driverStartedRide.value) {
       final z = lockedZoom.clamp(_minAutoFollowZoom, 17.0);
       try {
-        mapController!.moveCamera(
+        mapController!.animateCamera(
           CameraUpdate.newCameraPosition(
             CameraPosition(
               target: _emaPos!,
               zoom: z,
-              bearing: _mapBearingNorth,
+              bearing: _lastBearing,
               tilt: _mapTilt,
             ),
           ),
@@ -1416,12 +1432,12 @@ class OrderConfirmController extends GetxController
     // 3) fallback: follow driver with a safe zoom clamp
     final z = lockedZoom.clamp(_minAutoFollowZoom, 17.0);
     try {
-      mapController!.moveCamera(
+      mapController!.animateCamera(
         CameraUpdate.newCameraPosition(
           CameraPosition(
             target: _emaPos!,
             zoom: z,
-            bearing: _mapBearingNorth,
+            bearing: _lastBearing,
             tilt: _mapTilt,
           ),
         ),
@@ -1444,12 +1460,12 @@ class OrderConfirmController extends GetxController
 
     if (currentPosition != null) {
       try {
-        mapController!.moveCamera(
+        mapController!.animateCamera(
           CameraUpdate.newCameraPosition(
             CameraPosition(
               target: currentPosition!,
               zoom: currentZoomLevel,
-              bearing: _mapBearingNorth,
+              bearing: _lastBearing,
               tilt: _mapTilt,
             ),
           ),
@@ -1527,7 +1543,7 @@ class OrderConfirmController extends GetxController
           CameraPosition(
             target: mid,
             zoom: z,
-            bearing: _mapBearingNorth,
+            bearing: _lastBearing,
             tilt: _mapTilt,
           ),
         ),
@@ -1567,7 +1583,7 @@ class OrderConfirmController extends GetxController
             CameraPosition(
               target: mid,
               zoom: z,
-              bearing: _mapBearingNorth,
+              bearing: _lastBearing,
               tilt: _mapTilt,
             ),
           ),
@@ -1590,7 +1606,7 @@ class OrderConfirmController extends GetxController
             CameraPosition(
               target: mid,
               zoom: z,
-              bearing: _mapBearingNorth,
+              bearing: _lastBearing,
               tilt: _mapTilt,
             ),
           ),
@@ -1606,12 +1622,12 @@ class OrderConfirmController extends GetxController
         (b.northeast.latitude + b.southwest.latitude) / 2,
         (b.northeast.longitude + b.southwest.longitude) / 2,
       );
-      mapController!.moveCamera(
+      mapController!.animateCamera(
         CameraUpdate.newCameraPosition(
           CameraPosition(
             target: mid,
             zoom: 13.8,
-            bearing: _mapBearingNorth,
+            bearing: _lastBearing,
             tilt: _mapTilt,
           ),
         ),
@@ -1671,12 +1687,28 @@ class OrderConfirmController extends GetxController
 
   String _routeSig(List<LatLng> pts) {
     if (pts.length < 2) return 'len:${pts.length}';
-    final a = pts.first;
-    final b = pts.last;
-    return 'len:${pts.length}|a:${a.latitude.toStringAsFixed(6)},${a.longitude.toStringAsFixed(6)}|b:${b.latitude.toStringAsFixed(6)},${b.longitude.toStringAsFixed(6)}';
+    final idxs = <int>{
+      0,
+      pts.length - 1,
+      (pts.length * 1 ~/ 4),
+      (pts.length * 2 ~/ 4),
+      (pts.length * 3 ~/ 4),
+    }.toList()
+      ..sort();
+
+    final sb = StringBuffer('len:${pts.length}');
+    for (final i in idxs) {
+      final p = pts[i.clamp(0, pts.length - 1)];
+      sb.write('|');
+      sb.write('${p.latitude.toStringAsFixed(5)},${p.longitude.toStringAsFixed(5)}');
+    }
+    return sb.toString();
   }
 
   LatLng? _activeDestination() {
+    // Two-phase routing:
+    // - Before pickup: driver -> pickup
+    // - After pickup:  driver -> drop
     if (driverStartedRide.value) return customerToLatLng;
     return customerLatLng;
   }
@@ -1695,8 +1727,15 @@ class OrderConfirmController extends GetxController
     );
 
     if (force || key != _lastRouteKey) {
+      // IMPORTANT (production UX): don't clear the current polyline immediately.
+      // Clearing here causes visible "blink" (route disappears) while Directions
+      // API fetch is in-flight, and if the fetch fails the map becomes blank.
+      //
+      // Also: keep `_lastRouteKey` consistent. Previously `_clearActiveRoute()` was
+      // resetting `_lastRouteKey` which caused repeated reroute fetches and
+      // visible flicker on every location tick.
+      _clearActiveRoute(clearVisuals: false, clearKey: false);
       _lastRouteKey = key;
-      _clearActiveRoute();
       _drawPolyline(
         origin: driverPos,
         destination: dest,
@@ -1714,8 +1753,8 @@ class OrderConfirmController extends GetxController
       destination: dest,
       now: now,
       lastRouteFetchAt: _lastRouteFetchAt,
-      minInterval: const Duration(seconds: 10),
-      offRouteThresholdMeters: 35.0,
+      minInterval: const Duration(seconds: 30),
+      offRouteThresholdMeters: 100.0,
     )) {
       return;
     }
@@ -1730,12 +1769,56 @@ class OrderConfirmController extends GetxController
     );
   }
 
-  void _clearActiveRoute() {
-    activeRoutePoints.clear();
-    polylines.clear();
-    _lastRouteKey = '';
+  void _updatePolylinesForStatus(
+    String orderStatus, {
+    LatLng? driverPos,
+    bool force = false,
+  }) {
+    final s = orderStatus.trim().toLowerCase();
+
+    // Phase 2 (ride in progress)
+    if (s == 'picked_up' ||
+        s == 'on_trip' ||
+        s == 'in_progress' ||
+        s == 'started' ||
+        s == 'ride_started' ||
+        s == 'trip_started') {
+      if (driverPos != null) {
+        _maybeRerouteFromDriver(driverPos, force: force);
+      }
+      return;
+    }
+
+    // Completed / cancelled
+    if (s == 'completed' || s == 'cancelled' || s == 'canceled') {
+      _clearActiveRoute(clearVisuals: true, clearKey: true);
+      return;
+    }
+
+    // Phase 1 (driver approaching pickup)
+    if (s == 'driver_assigned' ||
+        s == 'accepted' ||
+        s == 'driver_approaching' ||
+        s == 'approaching' ||
+        s == 'arriving' ||
+        s == 'assigned') {
+      final pickup = customerLatLng;
+      if (driverPos != null && pickup != null) {
+        _maybeRerouteFromDriver(driverPos, force: force);
+      }
+    }
+  }
+
+  void _clearActiveRoute({bool clearVisuals = true, bool clearKey = true}) {
+    if (clearVisuals) {
+      activeRoutePoints.clear();
+      polylines.clear();
+    }
+    if (clearKey) _lastRouteKey = '';
     _lastRouteFetchAt = DateTime.fromMillisecondsSinceEpoch(0);
-    _activeRouteSig = '';
+    // Keep the last signature when visuals are kept, so the new route will only
+    // apply if it is actually different (prevents rapid redraw flicker).
+    if (clearVisuals) _activeRouteSig = '';
     _routeInFlightKey = null;
   }
 
@@ -1817,6 +1900,14 @@ class OrderConfirmController extends GetxController
       }
     } catch (e) {
       AppLogger.log.e("Polyline error: $e");
+      // Production-safe fallback: if Directions fails and we don't have a route
+      // yet, draw a straight line so the UI never looks "broken/blank".
+      if (activeRoutePoints.isEmpty) {
+        final pts = <LatLng>[origin, destination];
+        _activeRouteSig = _routeSig(pts);
+        activeRoutePoints.assignAll(pts);
+        polylines.assignAll(MapUiDefaults.routePolylines(pts, id: polyId));
+      }
     } finally {
       _routeInFlightKey = null;
       _isDrawingPolyline = false;

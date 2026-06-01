@@ -383,12 +383,6 @@ class DriverSearchController extends GetxController {
           return failure.message;
         },
         (response) {
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(
-              builder: (context) => CommonBottomNavigation(initialIndex: 0),
-            ),
-          );
           isLoading.value = false;
           sendDriverRequestData.value = response.data;
           AppLogger.log.i(response.data);

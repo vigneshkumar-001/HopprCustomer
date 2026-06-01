@@ -97,6 +97,14 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   DateTime _lastPolylineTrimAt = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _polyTrimInterval = Duration(milliseconds: 260);
 
+  double _bearingWithVehicleIconOffset(double bearing) {
+    final offset =
+        widget.vehicleType == VehicleType.bike
+            ? MapUiConfig.bikeBearingIconOffsetDeg
+            : MapUiConfig.carBearingIconOffsetDeg;
+    return MapUiConfig.normalizeBearing(bearing + offset);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -108,6 +116,8 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
         _maybeTrimRoute(pos);
         _maybeFollowCamera(pos);
       },
+      // Debounce raw GPS packets (ignore <5m moves).
+      minMoveMeters: 5.0,
     );
 
     _loadMapStyle();
@@ -174,7 +184,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   Future<void> _loadMapStyle() async {
     try {
       _mapStyle = await rootBundle.loadString(
-        'assets/map_style/map_style_ride_clean.json',
+        'assets/map_style.json',
       );
       if (_mapController != null) {
         await _mapController!.setMapStyle(_mapStyle);
@@ -245,7 +255,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     _lastFitAt = DateTime.now();
 
     final bounds = boundsFromRoutePoints(_fullRoute, extraPoints: extras);
-    final padding = 110.0; // balanced for top/bottom overlays
+    final padding = 80.0;
     try {
       await _mapController!.animateCamera(
         CameraUpdate.newLatLngBounds(bounds, padding),
@@ -255,46 +265,64 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
 
   String _computeRouteSig(List<LatLng> pts) {
     if (pts.length < 2) return 'len:${pts.length}';
-    final a = pts.first;
-    final b = pts.last;
-    return 'len:${pts.length}|a:${a.latitude.toStringAsFixed(6)},${a.longitude.toStringAsFixed(6)}|b:${b.latitude.toStringAsFixed(6)},${b.longitude.toStringAsFixed(6)}';
+    final idxs = <int>{
+      0,
+      pts.length - 1,
+      (pts.length * 1 ~/ 4),
+      (pts.length * 2 ~/ 4),
+      (pts.length * 3 ~/ 4),
+    }.toList()
+      ..sort();
+
+    final sb = StringBuffer('len:${pts.length}');
+    for (final i in idxs) {
+      final p = pts[i.clamp(0, pts.length - 1)];
+      sb.write('|');
+      sb.write('${p.latitude.toStringAsFixed(5)},${p.longitude.toStringAsFixed(5)}');
+    }
+    return sb.toString();
   }
 
   void _rebuildPolylines() {
     final set = <Polyline>{};
 
-    // Premium route progress: completed (grey) + remaining (active).
-    final completed = _completedRoute.length >= 2 ? _completedRoute : const <LatLng>[];
-    final remaining = _remainingRoute.length >= 2 ? _remainingRoute : _fullRoute;
-
-    if (completed.length >= 2) {
-      set.add(
-        Polyline(
-          polylineId: const PolylineId('completed_route'),
-          points: completed,
-          color: MapUiConfig.completedPolylineColor,
-          width: MapUiConfig.polylineOutlineWidth,
-          zIndex: MapUiConfig.completedPolylineZ,
-          startCap: Cap.roundCap,
-          endCap: Cap.roundCap,
-          jointType: JointType.round,
-        ),
-      );
-    }
-
-    if (remaining.length > 1) {
-      set.add(
-        Polyline(
-          polylineId: const PolylineId('active_route'),
-          points: remaining,
-          color: MapUiConfig.activePolylineColor,
-          width: MapUiConfig.polylineWidth,
-          zIndex: MapUiConfig.activePolylineZ,
-          startCap: Cap.roundCap,
-          endCap: Cap.roundCap,
-          jointType: JointType.round,
-        ),
-      );
+    // Two-phase polyline system (Uber/Ola-like).
+    // Phase 1: driver -> pickup (grey dashed).
+    // Phase 2: pickup -> drop (blue solid), and we trim as driver advances
+    // by updating `_remainingRoute`.
+    if (widget.mode == RideMapMode.toPickup) {
+      final pts = _fullRoute.length >= 2 ? _fullRoute : const <LatLng>[];
+      if (pts.length >= 2) {
+        set.add(
+          Polyline(
+            polylineId: const PolylineId('driver_to_pickup'),
+            points: pts,
+            color: Colors.grey.shade600,
+            width: 4,
+            zIndex: 1,
+            startCap: Cap.roundCap,
+            endCap: Cap.roundCap,
+            jointType: JointType.round,
+            patterns: <PatternItem>[PatternItem.dash(20), PatternItem.gap(10)],
+          ),
+        );
+      }
+    } else if (widget.mode == RideMapMode.toDrop) {
+      final remaining = _remainingRoute.length >= 2 ? _remainingRoute : _fullRoute;
+      if (remaining.length >= 2) {
+        set.add(
+          Polyline(
+            polylineId: const PolylineId('driver_to_drop'),
+            points: remaining,
+            color: const Color(0xFF000000),
+            width: 5,
+            zIndex: 1,
+            startCap: Cap.roundCap,
+            endCap: Cap.roundCap,
+            jointType: JointType.round,
+          ),
+        );
+      }
     }
 
     _polylines = set;
@@ -309,22 +337,21 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     }
 
     final markers = <Marker>{
-      if (widget.mode != RideMapMode.toDrop)
-        Marker(
-          markerId: const MarkerId('pickup'),
-          position: widget.pickup,
-          icon: _pickupIcon ?? BitmapDescriptor.defaultMarker,
-          anchor: const Offset(0.5, MapUiConfig.pickupDropAnchorY),
-          zIndex: 3,
-          infoWindow: InfoWindow.noText,
-        ),
-      if (widget.mode != RideMapMode.toPickup)
+      Marker(
+        markerId: const MarkerId('pickup'),
+        position: widget.pickup,
+        icon: _pickupIcon ?? BitmapDescriptor.defaultMarker,
+        anchor: const Offset(0.5, MapUiConfig.pickupDropAnchorY),
+        zIndex: 1,
+        infoWindow: InfoWindow.noText,
+      ),
+      if (widget.mode == RideMapMode.toDrop)
         Marker(
           markerId: const MarkerId('drop'),
           position: widget.drop,
           icon: _dropIcon ?? BitmapDescriptor.defaultMarker,
           anchor: const Offset(0.5, MapUiConfig.pickupDropAnchorY),
-          zIndex: 3,
+          zIndex: 1,
           infoWindow: InfoWindow.noText,
         ),
     };
@@ -335,11 +362,11 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
         Marker(
           markerId: const MarkerId('vehicle'),
           position: _vehiclePos!,
-          rotation: _vehicleBearing,
+          rotation: _bearingWithVehicleIconOffset(_vehicleBearing),
           flat: true,
           anchor: const Offset(0.5, MapUiConfig.vehicleAnchorY),
           icon: _vehIcon ?? BitmapDescriptor.defaultMarker,
-          zIndex: 4,
+          zIndex: 2,
           infoWindow: InfoWindow.noText,
         ),
       );
@@ -392,7 +419,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       Marker(
         markerId: const MarkerId('vehicle'),
         position: pos,
-        rotation: _vehicleBearing,
+        rotation: _bearingWithVehicleIconOffset(_vehicleBearing),
         flat: true,
         anchor: const Offset(0.5, MapUiConfig.vehicleAnchorY),
         icon: _vehIcon ?? BitmapDescriptor.defaultMarker,
@@ -411,6 +438,12 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
 
     final nearest = nearestPointOnPolyline(raw, _fullRoute);
     if (nearest == null) {
+      return _SnappedPose(position: raw, bearing: _vehicleBearing);
+    }
+
+    // If we're too far from the route, don't snap. Snapping aggressively causes
+    // "parallel road lock" and makes the vehicle appear to cut across streets.
+    if (nearest.distanceMeters > MapUiConfig.snapToRouteToleranceMeters) {
       return _SnappedPose(position: raw, bearing: _vehicleBearing);
     }
 
@@ -460,6 +493,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   }
 
   void _maybeTrimRoute(LatLng vehiclePos) {
+    if (widget.mode != RideMapMode.toDrop) return;
     if (_fullRoute.length < 2) return;
 
     final now = DateTime.now();
@@ -471,7 +505,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       _fullRoute,
       lastIndex: _lastTrimIndex,
       window: 34,
-      maxSnapMeters: 60,
+      maxSnapMeters: MapUiConfig.snapToRouteToleranceMeters + 18.0,
     );
     if (idx == null) return;
 
@@ -497,18 +531,26 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     if (DateTime.now().difference(_lastCameraAt) < MapUiConfig.cameraFollowInterval) return;
     _lastCameraAt = DateTime.now();
 
-    final z = CameraUtils.clampZoom(
-      _currentZoom,
-      min: MapUiConfig.followMinZoom,
-      max: MapUiConfig.maxZoom,
-    );
+    final z = widget.mode != RideMapMode.idle
+        ? 17.0
+        : CameraUtils.clampZoom(
+            _currentZoom,
+            min: MapUiConfig.followMinZoom,
+            max: MapUiConfig.maxZoom,
+          );
 
-    // Follow slightly ahead of the vehicle for a more professional feel.
-    final target = offsetLatLngMeters(vehiclePos, _vehicleBearing, 28);
+    final isActiveRide = widget.mode != RideMapMode.idle;
+
+    final target = vehiclePos;
     try {
-      _mapController!.moveCamera(
+      _mapController!.animateCamera(
         CameraUpdate.newCameraPosition(
-          CameraPosition(target: target, zoom: z, bearing: 0, tilt: 0),
+          CameraPosition(
+            target: target,
+            zoom: z,
+            bearing: isActiveRide ? _vehicleBearing : 0,
+            tilt: isActiveRide ? 30.0 : 0,
+          ),
         ),
       );
     } catch (_) {}
@@ -519,21 +561,28 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     if (_mapController == null || pos == null) return;
     _pauseFollowUntil = DateTime.fromMillisecondsSinceEpoch(0);
     // Ensure recenter always feels like a "focus" action (not stuck zoomed out).
-    final z = CameraUtils.clampZoom(
-      _currentZoom,
-      min: MapUiConfig.followMinZoom,
-      max: MapUiConfig.maxZoom,
-    );
+    final z = widget.mode != RideMapMode.idle
+        ? 17.0
+        : CameraUtils.clampZoom(
+            _currentZoom,
+            min: MapUiConfig.followMinZoom,
+            max: MapUiConfig.maxZoom,
+          );
     try {
       await _mapController!.animateCamera(
         CameraUpdate.newCameraPosition(
-          CameraPosition(target: pos, zoom: z, bearing: 0, tilt: 0),
+          CameraPosition(
+            target: pos,
+            zoom: z,
+            bearing: widget.mode != RideMapMode.idle ? _vehicleBearing : 0,
+            tilt: widget.mode != RideMapMode.idle ? 30.0 : 0,
+          ),
         ),
       );
     } catch (_) {}
   }
 
-  Future<void> fitRoute({double padding = 120}) async {
+  Future<void> fitRoute({double padding = 80}) async {
     if (_mapController == null) return;
     try {
       // Prefer fitting the actual route polyline so the entire leg is visible.

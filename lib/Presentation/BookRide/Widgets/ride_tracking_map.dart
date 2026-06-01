@@ -80,18 +80,26 @@ class RideTrackingMapState extends State<RideTrackingMap>
   LatLng? _pendingMarkerPos;
   double? _pendingMarkerBearing;
   DateTime _lastMarkerCommitAt = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _markerMinInterval = Duration(milliseconds: 120);
+  static const Duration _markerMinInterval = Duration(milliseconds: 90);
 
   DateTime _lastPolylineTrimAt = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _polyTrimInterval = Duration(milliseconds: 260);
 
   DateTime _lastCameraAt = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _cameraInterval = Duration(milliseconds: 900);
-  static const double _followZoom = 16.6;
-  static const double _minFollowZoom = 15.8;
+  static const double _followZoom = 17.0;
+  static const double _minFollowZoom = 17.0;
 
   DateTime _pauseAutoFollowUntil = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _userGesturePause = Duration(seconds: 5);
+
+  double _bearingWithVehicleIconOffset(double bearing) {
+    final offset =
+        widget.vehicleType == VehicleType.bike
+            ? MapUiDefaults.bikeBearingIconOffsetDeg
+            : MapUiDefaults.carBearingIconOffsetDeg;
+    return MapUiDefaults.normalizeBearing(bearing + offset);
+  }
 
   @override
   void initState() {
@@ -106,6 +114,8 @@ class RideTrackingMapState extends State<RideTrackingMap>
         _maybeTrimRoute(pos);
         _maybeFollowCamera(pos);
       },
+      // Debounce raw GPS packets (ignore <5m moves).
+      minMoveMeters: 5.0,
     );
 
     _loadMapStyle();
@@ -153,7 +163,7 @@ class RideTrackingMapState extends State<RideTrackingMap>
   Future<void> _loadMapStyle() async {
     try {
       final style = await rootBundle.loadString(
-        'assets/map_style/map_style_ride_clean.json',
+        'assets/map_style.json',
       );
       _mapStyle = style;
       if (_mapController != null) {
@@ -242,7 +252,7 @@ class RideTrackingMapState extends State<RideTrackingMap>
         Marker(
           markerId: const MarkerId('vehicle'),
           position: vehicle,
-          rotation: _displayBearing,
+          rotation: _bearingWithVehicleIconOffset(_displayBearing),
           anchor: const Offset(0.5, 0.5),
           flat: true,
           icon: _vehicleIcon ?? BitmapDescriptor.defaultMarker,
@@ -286,7 +296,7 @@ class RideTrackingMapState extends State<RideTrackingMap>
       Marker(
         markerId: const MarkerId('vehicle'),
         position: pos,
-        rotation: _displayBearing,
+        rotation: _bearingWithVehicleIconOffset(_displayBearing),
         anchor: const Offset(0.5, 0.5),
         flat: true,
         icon: _vehicleIcon ?? BitmapDescriptor.defaultMarker,
@@ -364,18 +374,18 @@ class RideTrackingMapState extends State<RideTrackingMap>
     if (now.difference(_lastCameraAt) < _cameraInterval) return;
     _lastCameraAt = now;
 
-    // Keep zoom stable (avoid zoom in/out jitter). If user zoomed out too far,
-    // gently clamp back to a minimum so the vehicle remains readable.
-    final zoom = _currentZoom.clamp(_minFollowZoom, MapUiDefaults.maxZoom);
+    // Active ride tracking: keep navigation zoom at 17.0.
+    final zoom = _followZoom;
 
     try {
-      _mapController!.moveCamera(
+      // Navigation mode (Uber-like): camera rotates to travel direction.
+      _mapController!.animateCamera(
         CameraUpdate.newCameraPosition(
           CameraPosition(
             target: vehiclePos,
             zoom: zoom,
-            bearing: 0,
-            tilt: 0,
+            bearing: _displayBearing,
+            tilt: 30.0,
           ),
         ),
       );
@@ -396,14 +406,19 @@ class RideTrackingMapState extends State<RideTrackingMap>
     try {
       await _mapController!.animateCamera(
         CameraUpdate.newCameraPosition(
-          CameraPosition(target: pos, zoom: _currentZoom, bearing: 0, tilt: 0),
+          CameraPosition(
+            target: pos,
+            zoom: _followZoom,
+            bearing: _displayBearing,
+            tilt: 30.0,
+          ),
         ),
       );
     } catch (_) {}
   }
 
   /// Public: fit bounds around (vehicle, pickup, drop) using a safe padding.
-  Future<void> fitRouteBounds({double padding = 120}) async {
+  Future<void> fitRouteBounds({double padding = 80}) async {
     if (_mapController == null) return;
     final pts = <LatLng>[
       if (_displayVehiclePos != null) _displayVehiclePos!,

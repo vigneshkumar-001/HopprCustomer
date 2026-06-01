@@ -64,6 +64,7 @@ flutter:
   assets:
     - assets/images/
     - assets/map_style/
+    - assets/map_style.json
 
 #name: hopper
 #description: "hopper customer application"

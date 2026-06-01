@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:hopper/Core/Consents/app_texts.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
-import 'package:hopper/Presentation/Authentication/controller/authController.dart';
+import 'package:hopper/Presentation/Authentication/controller/authcontroller.dart';
 import 'package:hopper/Presentation/Authentication/screens/mobile_screens.dart';
 import 'package:hopper/Presentation/Drawer/controller/profle_cotroller.dart';
 import 'package:hopper/Presentation/Drawer/controller/ride_history_controller.dart';

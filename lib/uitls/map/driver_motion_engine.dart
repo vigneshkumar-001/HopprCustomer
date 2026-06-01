@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/animation.dart';
@@ -58,11 +59,11 @@ class DriverMotionEngine {
         _emaAlphaFast = emaAlphaFast,
         _bearingEmaAlpha = bearingEmaAlpha,
         _maxTurnDegPerSec = maxTurnDegPerSec,
-         _maxFutureSkew = maxFutureSkew,
-         _outOfOrderTolerance = outOfOrderTolerance,
-         _stationarySpeedThresholdMps = stationarySpeedThresholdMps,
-         _stationaryIgnoreUnderMeters = stationaryIgnoreUnderMeters,
-         _moveCtrl = AnimationController(vsync: vsync);
+        _maxFutureSkew = maxFutureSkew,
+        _outOfOrderTolerance = outOfOrderTolerance,
+        _stationarySpeedThresholdMps = stationarySpeedThresholdMps,
+        _stationaryIgnoreUnderMeters = stationaryIgnoreUnderMeters,
+        _moveCtrl = AnimationController(vsync: vsync);
 
   final void Function(LatLng position, double bearing) onUpdate;
   final void Function(LatLng position)? onFrameSideEffects;
@@ -92,6 +93,12 @@ class DriverMotionEngine {
 
   bool _isAnimatingSegment = false;
   VoidCallback? _activeTick;
+  Timer? _deadReckonTimer;
+  DateTime _deadReckonStartAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  static const Duration _deadReckonTick = Duration(milliseconds: 100);
+  static const Duration _deadReckonStopAfter = Duration(seconds: 15);
+  double _lastSpeedMps = 0.0;
 
   LatLng? _lastReceivedPos;
   LatLng? _displayPos;
@@ -106,6 +113,7 @@ class DriverMotionEngine {
   double get displayBearing => _lastBearing;
 
   void dispose() {
+    _deadReckonTimer?.cancel();
     if (_activeTick != null) _moveCtrl.removeListener(_activeTick!);
     _moveCtrl.dispose();
   }
@@ -113,6 +121,7 @@ class DriverMotionEngine {
   void clearQueue() => _poseQueue.clear();
 
   void reset(LatLng position, {double bearing = 0.0}) {
+    _deadReckonTimer?.cancel();
     _poseQueue.clear();
     _lastReceivedPos = position;
     _displayPos = position;
@@ -122,6 +131,7 @@ class DriverMotionEngine {
     _moveCtrl.stop();
     _moveCtrl.reset();
     _activeTick = null;
+    _lastSpeedMps = 0.0;
     _emit(position, _lastBearing, force: true);
   }
 
@@ -134,6 +144,9 @@ class DriverMotionEngine {
   }) {
     final now0 = now ?? DateTime.now();
     DateTime ts = serverTs ?? now0;
+
+    // Real data arrived: stop dead-reckoning immediately.
+    _deadReckonTimer?.cancel();
 
     if (ts.isAfter(now0.add(_maxFutureSkew))) {
       ts = now0;
@@ -153,6 +166,14 @@ class DriverMotionEngine {
         newPos.latitude,
         newPos.longitude,
       );
+      if (lastPkt != null) {
+        final dtMs = ts.difference(lastPkt).inMilliseconds;
+        if (dtMs > 0) {
+          final implied = d / (dtMs / 1000.0);
+          // Clamp to a sensible envelope to avoid crazy projections.
+          _lastSpeedMps = implied.clamp(0.0, 30.0);
+        }
+      }
       // Stationary jitter guard: if the implied speed is very low and the move is
       // small, treat it as GPS drift (prevents the car "dancing" while stopped).
       if (lastPkt != null) {
@@ -247,8 +268,65 @@ class DriverMotionEngine {
       _emit(_emaPos ?? to, _lastBearing, force: true);
 
       _isAnimatingSegment = false;
-      if (_poseQueue.isNotEmpty) _pumpMotion();
+      if (_poseQueue.isNotEmpty) {
+        _pumpMotion();
+      } else {
+        _startDeadReckoningIfNeeded();
+      }
     });
+  }
+
+  void _startDeadReckoningIfNeeded() {
+    // Only when we have a fix, not currently animating, and no buffered poses.
+    if (_displayPos == null) return;
+    if (_isAnimatingSegment) return;
+    if (_poseQueue.isNotEmpty) return;
+
+    // If implied speed is too low, driver is likely stopped -> no projection.
+    if (_lastSpeedMps < 1.0) return;
+
+    _deadReckonTimer?.cancel();
+    _deadReckonStartAt = DateTime.now();
+
+    _deadReckonTimer = Timer.periodic(_deadReckonTick, (_) {
+      if (_displayPos == null) {
+        _deadReckonTimer?.cancel();
+        return;
+      }
+      if (_isAnimatingSegment || _poseQueue.isNotEmpty) {
+        _deadReckonTimer?.cancel();
+        return;
+      }
+      if (DateTime.now().difference(_deadReckonStartAt) > _deadReckonStopAfter) {
+        _deadReckonTimer?.cancel();
+        return;
+      }
+
+      final dt = _deadReckonTick.inMilliseconds / 1000.0;
+      final projected = _projectPosition(_displayPos!, _lastBearing, _lastSpeedMps * dt);
+      _displayPos = projected;
+      _emaPos = projected;
+      _emit(projected, _lastBearing, force: false);
+    });
+  }
+
+  LatLng _projectPosition(LatLng from, double bearingDeg, double distanceMeters) {
+    const R = 6371000.0;
+    final d = distanceMeters / R;
+    final bearing = _deg2rad(bearingDeg);
+    final lat1 = _deg2rad(from.latitude);
+    final lon1 = _deg2rad(from.longitude);
+
+    final lat2 = math.asin(
+      math.sin(lat1) * math.cos(d) + math.cos(lat1) * math.sin(d) * math.cos(bearing),
+    );
+    final lon2 = lon1 +
+        math.atan2(
+          math.sin(bearing) * math.sin(d) * math.cos(lat1),
+          math.cos(d) - math.sin(lat1) * math.sin(lat2),
+        );
+
+    return LatLng(lat2 * 180.0 / math.pi, lon2 * 180.0 / math.pi);
   }
 
   void _onTick(

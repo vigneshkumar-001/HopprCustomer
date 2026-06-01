@@ -17,10 +17,8 @@ class WalletScreen extends StatefulWidget {
 }
 
 class _WalletScreenState extends State<WalletScreen> {
-  final WalletController walletController =
-      Get.isRegistered<WalletController>()
-          ? Get.find<WalletController>()
-          : Get.put(WalletController());
+  late final WalletController walletController;
+  late final bool _walletControllerWasRegistered;
   final ScrollController _scrollController = ScrollController();
 
   int selectedTab = 0;
@@ -29,7 +27,20 @@ class _WalletScreenState extends State<WalletScreen> {
   @override
   void initState() {
     super.initState();
+    _walletControllerWasRegistered = Get.isRegistered<WalletController>();
+    walletController =
+        _walletControllerWasRegistered
+            ? Get.find<WalletController>()
+            : Get.put(WalletController());
     _scrollController.addListener(_paginationListener);
+
+    // If the controller already existed (e.g., used elsewhere like Payment),
+    // refresh on open so Wallet always shows the latest balance/history.
+    if (_walletControllerWasRegistered) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        walletController.refreshWallet();
+      });
+    }
   }
 
   void _paginationListener() {
@@ -52,17 +63,18 @@ class _WalletScreenState extends State<WalletScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return WillPopScope(
-      onWillPop: () async => false,
+    return PopScope(
+      canPop: widget.flag != "bottomBar",
       child: Scaffold(
         backgroundColor: AppColors.containerColor1,
         body: SafeArea(
           child: RefreshIndicator(
             onRefresh: () async {
-              return walletController.customerWalletHistory(isRefresh: true);
+              await walletController.refreshWallet();
             },
             child: Obx(() {
               List<Transaction> all = walletController.transactions;
+              final historyError = walletController.walletHistoryError.value;
 
               List<Transaction> filtered =
                   selectedTab == 0
@@ -77,6 +89,7 @@ class _WalletScreenState extends State<WalletScreen> {
 
               return ListView(
                 controller: _scrollController,
+                physics: const AlwaysScrollableScrollPhysics(),
                 padding: const EdgeInsets.all(16),
                 children: [
                   _buildHeader(),
@@ -96,10 +109,37 @@ class _WalletScreenState extends State<WalletScreen> {
 
                   const SizedBox(height: 16),
 
-                  if (walletController.isLoading.value)
-                    Center(child: AppLoader.circularLoader()),
+                  if (walletController.isLoading.value &&
+                      walletController.transactions.isEmpty)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 40),
+                      child: Center(child: AppLoader.circularLoader()),
+                    ),
 
-                  if (!walletController.isLoading.value && filtered.isEmpty)
+                  if (!walletController.isLoading.value &&
+                      historyError != null &&
+                      walletController.transactions.isEmpty)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 40),
+                      child: Column(
+                        children: [
+                          Text(
+                            historyError,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(color: Colors.red),
+                          ),
+                          const SizedBox(height: 12),
+                          ElevatedButton(
+                            onPressed: walletController.refreshWallet,
+                            child: const Text('Retry'),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                  if (!walletController.isLoading.value &&
+                      historyError == null &&
+                      filtered.isEmpty)
                     Padding(
                       padding: const EdgeInsets.symmetric(vertical: 40),
                       child: Center(child: Text("No transactions found.")),
@@ -167,7 +207,7 @@ class _WalletScreenState extends State<WalletScreen> {
       case "Refund":
         return AppImages.refund;
       case "Bike":
-        return AppImages.tripPayment;
+        return AppImages.bikeImage;
       default:
         return AppImages.wallet_top;
     }

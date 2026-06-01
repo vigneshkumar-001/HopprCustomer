@@ -10,6 +10,10 @@ import 'package:hopper/api/dataSource/apiDataSource.dart';
 var getMobileNumber = '';
 var countryCodes = '';
 String selectedCountryFlag = '';
+const String _prefsLoginCountryCode = 'login_country_code';
+const String _prefsLoginCountryFlag = 'login_country_flag';
+const String _defaultLoginCountryCode = '+234';
+const String _defaultLoginCountryFlag = '🇳🇬';
 
 class AuthController extends GetxController {
   // String mobileNumber = '';
@@ -26,12 +30,50 @@ class AuthController extends GetxController {
   @override
   void onInit() {
     super.onInit();
+    initCountrySelection();
+  }
+
+  Future<void> initCountrySelection() async {
+    // Set a safe default immediately so UI never shows mismatched flag/code.
+    if (selectedCountryCode.value.isEmpty) {
+      selectedCountryCode.value = _defaultLoginCountryCode;
+      countryCodeController.text = _defaultLoginCountryCode;
+    }
+    if (selectedCountryFlag.isEmpty) {
+      selectedCountryFlag = _defaultLoginCountryFlag;
+    }
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final persistedCode = prefs.getString(_prefsLoginCountryCode) ?? '';
+      final persistedFlag = prefs.getString(_prefsLoginCountryFlag) ?? '';
+
+      if (persistedCode.trim().isNotEmpty) {
+        selectedCountryCode.value = persistedCode.trim();
+        countryCodeController.text = persistedCode.trim();
+      }
+      if (persistedFlag.trim().isNotEmpty) {
+        selectedCountryFlag = persistedFlag.trim();
+      }
+
+      // Persist current selection so logout/login keeps both flag + code in sync.
+      await prefs.setString(_prefsLoginCountryCode, selectedCountryCode.value);
+      await prefs.setString(_prefsLoginCountryFlag, selectedCountryFlag);
+    } catch (e) {
+      AppLogger.log.e('Country init failed: $e');
+    }
   }
 
   void setSelectedCountry(Country country) {
-    selectedCountryCode.value = '+${country.phoneCode}';
-    countryCodeController.text = '+${country.phoneCode}';
+    final code = '+${country.phoneCode}';
+    selectedCountryCode.value = code;
+    countryCodeController.text = code;
     selectedCountryFlag = country.flagEmoji;
+
+    SharedPreferences.getInstance().then((prefs) async {
+      await prefs.setString(_prefsLoginCountryCode, code);
+      await prefs.setString(_prefsLoginCountryFlag, selectedCountryFlag);
+    });
     // WidgetsBinding.instance.addPostFrameCallback((_) {
     //   mobileNumber.clear();
     // });
@@ -106,6 +148,6 @@ class AuthController extends GetxController {
 
   void clearState() {
     accessToken = '';
-    selectedCountryCode.value = '';
+    // Keep selected country code/flag stable across logout/login.
   }
 }

@@ -104,8 +104,12 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
   Timer? _publishDebounce;
 
   static const int _socketThrottleMs = 250;
-  static const int _animStepMs = 80;
-  static const double _ignoreMoveMeters = 2.0;
+  // Smoother nearby-driver animation (Uber/Ola-like).
+  // Keep this relatively high-FPS; markers are lightweight and count is small.
+  static const int _animStepMs = 25; // ~40 fps
+
+  // Debounce micro updates: ignore <5m moves to avoid jitter + churn.
+  static const double _ignoreMoveMeters = 5.0;
 
   static const double _reverseGeocodeMinMoveMeters = 15.0;
 
@@ -595,7 +599,7 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
   Future<void> _preloadMapStyle() async {
     try {
       mapStyle = await rootBundle.loadString(
-        'assets/map_style/map_style_uber_like.json',
+        'assets/map_style.json',
       );
       try {
         if (mapController != null && mapStyle != null) {

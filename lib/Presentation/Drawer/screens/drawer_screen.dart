@@ -489,6 +489,8 @@ class _DrawerScreenState extends State<DrawerScreen> {
     unawaited(prefs.remove('role'));
     unawaited(prefs.remove('contacts_synced'));
 
+    controller.clearSession();
+
     if (!context.mounted) return;
 
     Navigator.pushAndRemoveUntil(

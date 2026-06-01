@@ -104,7 +104,7 @@ class BookMapController extends GetxController {
 
   Future<void> _loadMapStyle() async {
     try {
-      mapStyle = await rootBundle.loadString('assets/map_style/map_style.json');
+      mapStyle = await rootBundle.loadString('assets/map_style.json');
     } catch (e) {
       debugPrint('Map style load failed: $e');
     }

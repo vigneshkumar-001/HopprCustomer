@@ -1,5 +1,5 @@
 import 'package:get/get.dart';
-import 'package:hopper/Presentation/Authentication/controller/authController.dart';
+import 'package:hopper/Presentation/Authentication/controller/authcontroller.dart';
 import 'package:hopper/Presentation/Authentication/controller/network_handling_controller.dart';
 import 'package:hopper/Presentation/BookRide/Controllers/driver_search_controller.dart';
 import 'package:hopper/Presentation/Drawer/controller/profle_cotroller.dart';

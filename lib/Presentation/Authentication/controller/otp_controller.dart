@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
-
+import 'dart:async' show unawaited;
 import 'package:get/get.dart';
 import 'package:hopper/Core/Consents/app_logger.dart';
+import 'package:hopper/Presentation/Drawer/controller/profle_cotroller.dart';
 import 'package:hopper/Presentation/Drawer/controller/ride_history_controller.dart';
 
 import 'package:hopper/api/dataSource/apiDataSource.dart';
@@ -41,25 +42,33 @@ class OtpController extends GetxController {
         },
         (response) async {
           AppLogger.log.i(response.data.toString());
-          onSuccess();
 
-          accessToken = response.data.token;
-          accessToken = response.data.customer.id;
-
-          AppLogger.log.i('Response = $accessToken');
           final prefs = await SharedPreferences.getInstance();
           await prefs.setString('token', response.data.token);
           await prefs.setString('customer_Id', response.data.customer.id);
-          String? token = prefs.getString('token');
-          String? customerId = prefs.getString('customer_Id');
-          AppLogger.log.i('token = $token');
-          AppLogger.log.i('token = $customerId');
+
+          accessToken = response.data.token;
+          this.customerId = response.data.customer.id;
+          AppLogger.log.i('Response = $accessToken');
+          final savedToken = prefs.getString('token');
+          final savedCustomerId = prefs.getString('customer_Id');
+          AppLogger.log.i('token = $savedToken');
+          AppLogger.log.i('token = $savedCustomerId');
           final fcmToken = prefs.getString('fcmToken');
           if (fcmToken != null && fcmToken.isNotEmpty) {
             await sendFcmToken(fcmToken: fcmToken);
           }
-          await controller.getRideHistory();
+
+          final profileController =
+              Get.isRegistered<ProfleCotroller>()
+                  ? Get.find<ProfleCotroller>()
+                  : Get.put(ProfleCotroller());
+          profileController.clearSession();
+          unawaited(profileController.getProfileData());
+          unawaited(controller.getRideHistory());
+
           isLoading.value = false;
+          onSuccess();
           // Navigator.push(
           //   context,
           //   MaterialPageRoute(

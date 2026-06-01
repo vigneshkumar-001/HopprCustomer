@@ -1175,54 +1175,6 @@ class _WalletPaymentScreensState extends State<WalletPaymentScreens> {
                       // ),
                       InkWell(
                         onTap:
-                            payPalLoading
-                                ? null
-                                : () async {
-                                  setState(() {
-                                    selectedPaymentMethod = "PAYPAL";
-                                    payPalLoading = true;
-                                  });
-
-                                  await payPall();
-
-                                  setState(() => payPalLoading = false);
-                                },
-                        child: Container(
-                          height: 50,
-                          width: 170,
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: AppColors.commonWhite,
-                            border: Border.all(
-                              color: _borderFor("PAYPAL"),
-                              width: _borderWidthFor("PAYPAL"),
-                            ),
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child:
-                              payPalLoading
-                                  ? Center(child: AppLoader.circularLoader())
-                                  : Row(
-                                    children: [
-                                      Image.asset(
-                                        AppImages.payPall,
-                                        height: 24,
-                                        width: 24,
-                                      ),
-                                      const SizedBox(width: 10),
-                                      CustomTextFields.textWithStylesSmall(
-                                        'PayPal',
-                                        fontWeight: FontWeight.w500,
-                                        fontSize: 16,
-                                        colors: AppColors.commonBlack,
-                                      ),
-                                    ],
-                                  ),
-                        ),
-                      ),
-
-                      InkWell(
-                        onTap:
                             flutterWaveLoading
                                 ? null
                                 : () async {
@@ -1274,49 +1226,6 @@ class _WalletPaymentScreensState extends State<WalletPaymentScreens> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      InkWell(
-                        onTap:
-                            _isLoading
-                                ? null
-                                : () async {
-                                  setState(() {
-                                    selectedPaymentMethod = "STRIPE";
-                                    _isLoading = true;
-                                  });
-
-                                  await makePayment();
-
-                                  setState(() => _isLoading = false);
-                                },
-                        child: Container(
-                          height: 50,
-                          width: 170,
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: AppColors.commonWhite,
-                            border: Border.all(
-                              color: _borderFor("STRIPE"),
-                              width: _borderWidthFor("STRIPE"),
-                            ),
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child:
-                              _isLoading
-                                  ? Center(child: AppLoader.circularLoader())
-                                  : Row(
-                                    children: [
-                                      Image.asset(AppImages.stripe),
-                                      const SizedBox(width: 10),
-                                      CustomTextFields.textWithStylesSmall(
-                                        'Stripe',
-                                        fontSize: 16,
-                                        fontWeight: FontWeight.w500,
-                                        colors: AppColors.commonBlack,
-                                      ),
-                                    ],
-                                  ),
-                        ),
-                      ),
                       InkWell(
                         onTap:
                             payStackLoading

@@ -5,6 +5,7 @@ import 'package:hopper/Core/Consents/app_logger.dart';
 import 'package:dio/dio.dart';
 import 'package:get/get.dart' hide FormData, Response;
 import 'package:hopper/Presentation/Authentication/screens/mobile_screens.dart';
+import 'package:hopper/Presentation/Drawer/controller/profle_cotroller.dart';
 import 'package:hopper/uitls/websocket/socket_io_client.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -148,6 +149,10 @@ class Request {
       await prefs.remove('driverId');
 
       SocketService().dispose();
+
+      if (Get.isRegistered<ProfleCotroller>()) {
+        Get.find<ProfleCotroller>().clearSession();
+      }
 
       Get.offAll(() => const MobileScreens());
     } catch (e) {

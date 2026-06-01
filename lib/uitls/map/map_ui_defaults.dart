@@ -48,9 +48,10 @@ class MapUiDefaults {
     return _ellipsize(candidate, maxChars);
   }
 
+  // Active ride screens: never allow zoom <14 or >18.
   static const double focusZoom = 17.0;
-  static const double minZoom = 11.0;
-  static const double maxZoom = 17.0;
+  static const double minZoom = 14.0;
+  static const double maxZoom = 18.0;
 
   // Route polyline styling (customer-side): thicker + high-contrast so it
   // never blends into the map style.
@@ -66,6 +67,17 @@ class MapUiDefaults {
   static const double vehicleBadgeDiameterDp = 48;
   static const double vehicleCarWidthDp = 26;
   static const double vehicleBikeWidthDp = 28;
+
+  // Vehicle icon orientation:
+  // google_maps_flutter marker rotation expects degrees clockwise from NORTH.
+  // Your PNG should be drawn pointing UP for 0°.
+  static const double carBearingIconOffsetDeg = 0.0;
+  static const double bikeBearingIconOffsetDeg = 0.0;
+
+  static double normalizeBearing(double deg) {
+    final v = deg % 360.0;
+    return (v + 360.0) % 360.0;
+  }
 
   static Set<Polyline> routePolylines(
     List<LatLng> points, {

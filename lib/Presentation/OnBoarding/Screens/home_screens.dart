@@ -213,11 +213,13 @@ class _HomeScreensState extends State<HomeScreens>
     _gateReadyWorker = ever<bool>(mapC.gate.isReady, (ready) {
       if (!ready) return;
       WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
         _tryAlignCurrentLocationUnderPinOnce();
       });
     });
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
       final screenH = MediaQuery.of(context).size.height;
       if (_sheetHeightN.value <= 0 && screenH > 0) {
         _sheetHeightN.value = screenH * 0.42;
@@ -230,13 +232,17 @@ class _HomeScreensState extends State<HomeScreens>
       } catch (_) {}
 
       await mapC.start();
+      if (!mounted) return;
       await _loadActiveRide();
+      if (!mounted) return;
       await _loadHomeHeroBanners();
+      if (!mounted) return;
       _tryAlignCurrentLocationUnderPinOnce();
     });
   }
 
   Future<void> _loadHomeHeroBanners() async {
+    if (!mounted) return;
     if (_loadingHomeHeroBanners) return;
 
     setState(() {
@@ -805,10 +811,11 @@ class _HomeScreensState extends State<HomeScreens>
                 return SizedBox(
                   key: _mapKey,
                   child: GoogleMap(
-                    initialCameraPosition: CameraPosition(
-                      target: pos,
-                      zoom: 17.2,
-                    ),
+                     initialCameraPosition: CameraPosition(
+                       target: pos,
+                       // Nearby drivers on pickup screen.
+                       zoom: 15.5,
+                     ),
                     // Keep padding zero so map projection matches overlay pin coordinates.
                     padding: EdgeInsets.zero,
                     markers: mapC.markers.toSet(),
@@ -841,10 +848,10 @@ class _HomeScreensState extends State<HomeScreens>
                     myLocationButtonEnabled: false,
                     buildingsEnabled: false,
                     tiltGesturesEnabled: false,
-                    minMaxZoomPreference: const MinMaxZoomPreference(
-                      12.0,
+                     minMaxZoomPreference: const MinMaxZoomPreference(
+                      14.0,
                       18.0,
-                    ),
+                     ),
                     mapToolbarEnabled: false,
                     zoomControlsEnabled: false,
                     gestureRecognizers: {

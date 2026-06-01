@@ -11,10 +11,11 @@ class MapUiConfig {
   static const int completedPolylineZ = 0;
 
   // Camera
-  static const double initialZoom = 16.5;
-  static const double minZoom = 12.0;
+  // Active ride screens: never allow zoom <14 or >18.
+  static const double initialZoom = 17.0;
+  static const double minZoom = 14.0;
   static const double maxZoom = 18.0;
-  static const double followMinZoom = 15.5;
+  static const double followMinZoom = 17.0;
   static const Duration cameraFollowInterval = Duration(milliseconds: 900);
 
   // Marker sizing (logical px / dp)
@@ -31,4 +32,27 @@ class MapUiConfig {
 
   // Map padding (sheet)
   static const double defaultBottomPadding = 210;
+
+  // Snap / trim
+  // Keep this reasonably tight to avoid "parallel road lock" where the marker
+  // sticks to the route even after the driver moved to the next street.
+  static const double snapToRouteToleranceMeters = 24.0;
+
+  // =============================================================
+  // Vehicle icon bearing offsets
+  // =============================================================
+  //
+  // `google_maps_flutter` marker rotation expects degrees clockwise from NORTH.
+  // For correct facing direction, your vehicle PNG should be drawn pointing UP.
+  //
+  // If your asset points RIGHT (east), use `-90`.
+  // If your asset points DOWN (south), use `180`.
+  // If your asset points LEFT (west), use `90`.
+  static const double carBearingIconOffsetDeg = 0.0;
+  static const double bikeBearingIconOffsetDeg = 0.0;
+
+  static double normalizeBearing(double deg) {
+    final v = deg % 360.0;
+    return (v + 360.0) % 360.0;
+  }
 }

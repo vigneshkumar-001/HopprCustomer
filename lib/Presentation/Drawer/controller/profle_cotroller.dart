@@ -69,6 +69,33 @@ class ProfleCotroller extends GetxController {
     isEditing.value = !isEditing.value;
   }
 
+  /// Clears all in-memory profile state (used on logout / account switch).
+  ///
+  /// This prevents showing the previous user's name/photo while the new
+  /// account's profile is being fetched.
+  void clearSession() {
+    isEditing.value = false;
+    isLoading.value = false;
+
+    user.value = null;
+    userName.value = '';
+    userId.value = '';
+    profileImagePath.value = '';
+    frontImageUrl.value = '';
+    mobileNumber = '';
+    code.value = '';
+    selectedCountryCode.value = '';
+    selectedCountryFlag.value = '';
+    errorText.value = '';
+    selectedCountry.value = null;
+
+    nameController.clear();
+    dobController.clear();
+    genderController.clear();
+    emailController.clear();
+    emergencyController.clear();
+  }
+
   void setProfileImage(String path) {
     profileImagePath.value = path;
   }

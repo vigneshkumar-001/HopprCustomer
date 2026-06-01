@@ -17,6 +17,8 @@ class WalletController extends GetxController {
   RxList<Transaction> transactions = <Transaction>[].obs;
   RxList<Transaction> traction = RxList<Transaction>([]);
   RxDouble balance = 0.0.obs;
+  RxnString walletBalanceError = RxnString();
+  RxnString walletHistoryError = RxnString();
 
   /// Pagination state
   RxBool isLoading = false.obs; // First API call
@@ -28,8 +30,14 @@ class WalletController extends GetxController {
   @override
   void onInit() {
     super.onInit();
-    customerWalletHistory(isRefresh: true);
-    getWalletBalance();
+    refreshWallet();
+  }
+
+  Future<void> refreshWallet() async {
+    await Future.wait(<Future<void>>[
+      getWalletBalance(),
+      customerWalletHistory(isRefresh: true),
+    ]);
   }
 
   void resetPagination() {
@@ -43,18 +51,21 @@ class WalletController extends GetxController {
   /// GET WALLET BALANCE
   /// ----------------------------
   Future<void> getWalletBalance() async {
+    walletBalanceError.value = null;
     try {
       final result = await apiDataSource.getWalletBalance();
-      result.fold((failure) => AppLogger.log.e("❌ Failed: $failure"), (
-        response,
-      ) {
-        walletBalance.value = response.data;
-        // balance.value =
-        //     double.tryParse(response.data?.customerWalletBalance ?? "0") ??
-        //         0.0;
-      });
+      result.fold(
+        (failure) {
+          walletBalanceError.value = failure.message;
+          AppLogger.log.e("❌ Failed: ${failure.message}");
+        },
+        (response) {
+          walletBalance.value = response.data;
+        },
+      );
     } catch (e) {
       AppLogger.log.e("❌ Exception: $e");
+      walletBalanceError.value = 'Something went wrong';
     }
   }
 
@@ -102,6 +113,7 @@ class WalletController extends GetxController {
     if (isLoading.value && !isRefresh) return;
 
     if (isRefresh) {
+      walletHistoryError.value = null;
       page = 1;
       hasMore.value = true;
       transactions.clear();
@@ -115,32 +127,40 @@ class WalletController extends GetxController {
     try {
       final result = await apiDataSource.customerWalletHistory(page: page);
 
-      result.fold((failure) => AppLogger.log.e("❌ History Failed: $failure"), (
-        response,
-      ) {
-        List<Transaction> fetched = response.transactions;
-
-        // Set data
-        if (isRefresh) {
-          transactions.assignAll(fetched);
-        } else {
-          transactions.addAll(fetched);
-        }
-
-        // Update balance
-        balance.value = double.tryParse(response.balance) ?? 0.0;
-
-        // Pagination logic
-        if (fetched.length < limit) {
+      result.fold(
+        (failure) {
+          walletHistoryError.value = failure.message;
+          AppLogger.log.e("❌ History Failed: ${failure.message}");
           hasMore.value = false;
-        } else {
-          page++;
-        }
+        },
+        (response) {
+          walletHistoryError.value = null;
+          List<Transaction> fetched = response.transactions;
 
-        AppLogger.log.i("📌 PAGE LOADED → $page, ITEMS: ${fetched.length}");
-      });
+          // Set data
+          if (isRefresh) {
+            transactions.assignAll(fetched);
+          } else {
+            transactions.addAll(fetched);
+          }
+
+          // Update balance
+          balance.value = double.tryParse(response.balance) ?? 0.0;
+
+          // Pagination logic
+          if (fetched.length < limit) {
+            hasMore.value = false;
+          } else {
+            page++;
+          }
+
+          AppLogger.log.i("📌 PAGE LOADED → $page, ITEMS: ${fetched.length}");
+        },
+      );
     } catch (e) {
       AppLogger.log.e("❌ History Exception: $e");
+      walletHistoryError.value = 'Something went wrong';
+      hasMore.value = false;
     } finally {
       isLoading.value = false;
       isMoreLoading.value = false;
