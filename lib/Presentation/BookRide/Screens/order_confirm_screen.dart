@@ -715,7 +715,12 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                     Navigator.push(
                       context,
                       MaterialPageRoute(
-                        builder: (_) => ChatScreen(bookingId: booking),
+                        builder:
+                            (_) => ChatScreen(
+                              bookingId: booking,
+                              pickupLatitude: _pickupLatLng.latitude,
+                              pickupLongitude: _pickupLatLng.longitude,
+                            ),
                       ),
                     );
                   },

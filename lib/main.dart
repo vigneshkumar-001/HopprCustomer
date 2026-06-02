@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_stripe/flutter_stripe.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 
@@ -19,6 +20,13 @@ Future<void> main() async {
   // Keep only critical init work before first frame.
   await Firebase.initializeApp();
   AppLogger.log.i('Firebase.initializeApp() completed in main()');
+
+  // Register background handler BEFORE runApp (required for terminated/background delivery).
+  try {
+    FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+  } catch (e, st) {
+    AppLogger.log.w('FCM BG handler register failed: $e\n$st');
+  }
 
   await initController();
 

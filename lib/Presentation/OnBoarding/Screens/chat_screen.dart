@@ -24,7 +24,14 @@ import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 
 class ChatScreen extends StatefulWidget {
   final String bookingId;
-  const ChatScreen({super.key, required this.bookingId});
+  final double? pickupLatitude;
+  final double? pickupLongitude;
+  const ChatScreen({
+    super.key,
+    required this.bookingId,
+    this.pickupLatitude,
+    this.pickupLongitude,
+  });
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -214,6 +221,8 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _loadHistory() async {
     await chatController.fetchChatHistory(
       bookingId: widget.bookingId,
+      pickupLatitude: widget.pickupLatitude,
+      pickupLongitude: widget.pickupLongitude,
       context: context,
     );
 

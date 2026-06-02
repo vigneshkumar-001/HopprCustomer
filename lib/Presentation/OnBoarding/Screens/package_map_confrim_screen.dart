@@ -2447,16 +2447,36 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                                           color: AppColors.chatBlueColor,
                                         ),
 
-                                        child: Padding(
-                                          padding: const EdgeInsets.all(8.0),
-                                          child: InkWell(
-                                            onTap: () async {
-                                              Get.to(ChatScreen(bookingId: ''));
-                                            },
-                                            child: Image.asset(
-                                              AppImages.chat,
-                                              height: 20,
-                                              width: 20,
+                                          child: Padding(
+                                            padding: const EdgeInsets.all(8.0),
+                                            child: InkWell(
+                                              onTap: () async {
+                                                final id =
+                                                    (BookingId.trim().isNotEmpty
+                                                            ? BookingId
+                                                            : widget.bookingId)
+                                                        .trim();
+                                                if (id.isEmpty) {
+                                                  AppToasts.showError(
+                                                    context,
+                                                    'Booking ID not available yet',
+                                                  );
+                                                  return;
+                                                }
+                                                Get.to(
+                                                  () => ChatScreen(
+                                                    bookingId: id,
+                                                    pickupLatitude:
+                                                        widget.senderData.latitude,
+                                                    pickupLongitude:
+                                                        widget.senderData.longitude,
+                                                  ),
+                                                );
+                                              },
+                                              child: Image.asset(
+                                                AppImages.chat,
+                                                height: 20,
+                                                width: 20,
                                             ),
                                           ),
                                         ),

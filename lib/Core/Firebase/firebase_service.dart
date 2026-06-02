@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:firebase_core/firebase_core.dart';
@@ -125,10 +127,22 @@ class FirebaseService {
   String? _fcmToken;
   String? get fcmToken => _fcmToken;
 
+  bool _tokenRefreshAttached = false;
+  Timer? _tokenRetryTimer;
+  int _tokenRetryCount = 0;
+
   Future<void> initializeFirebase() async {
     FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
 
     await _ensureLocalNotificationsInitialized();
+
+    try {
+      // Ensure FCM auto-init is enabled; on some devices getToken() may return
+      // null until auto-init is turned on.
+      await FirebaseMessaging.instance.setAutoInitEnabled(true);
+    } catch (e) {
+      AppLogger.log.w('setAutoInitEnabled failed: $e');
+    }
 
     await FirebaseMessaging.instance
         .setForegroundNotificationPresentationOptions(
@@ -183,34 +197,102 @@ class FirebaseService {
   }
 
   Future<void> fetchFCMTokenIfNeeded() async {
-    final prefs = await SharedPreferences.getInstance();
+    // If Firebase core is not ready, avoid touching Messaging.
+    if (Firebase.apps.isEmpty) {
+      AppLogger.log.w('Firebase not initialized; skip FCM token fetch');
+      return;
+    }
+
+    SharedPreferences prefs;
+    try {
+      prefs = await SharedPreferences.getInstance();
+    } catch (e) {
+      AppLogger.log.w('SharedPreferences not available for FCM: $e');
+      return;
+    }
+
     _fcmToken = prefs.getString('fcmToken');
 
     if (_fcmToken == null || _fcmToken!.isEmpty) {
-      try {
-        final token = await FirebaseMessaging.instance.getToken();
-        if (token != null && token.isNotEmpty) {
-          _fcmToken = token;
+      final token = await _getFCMTokenWithRetry();
+      if (token != null && token.isNotEmpty) {
+        _fcmToken = token;
+        _tokenRetryCount = 0;
+        _tokenRetryTimer?.cancel();
+        _tokenRetryTimer = null;
+        try {
           await prefs.setString('fcmToken', token);
-          AppLogger.log.i('New FCM token saved: $token');
-          await _syncFcmTokenIfAuthenticated(token);
-        } else {
-          AppLogger.log.w('FCM token null or empty');
-        }
-      } catch (e) {
-        AppLogger.log.e('Error fetching FCM token: $e');
+        } catch (_) {}
+        AppLogger.log.i('FCM token fetched (${token.length} chars)');
+        await _syncFcmTokenIfAuthenticated(token);
+      } else {
+        AppLogger.log.w('FCM token not available now (will retry later)');
+        _scheduleTokenRetry();
       }
     } else {
-      AppLogger.log.i('Existing FCM token: $_fcmToken');
+      AppLogger.log.d('FCM token loaded from cache (${_fcmToken!.length} chars)');
       await _syncFcmTokenIfAuthenticated(_fcmToken!);
     }
 
-    FirebaseMessaging.instance.onTokenRefresh.listen((newToken) async {
-      AppLogger.log.i('Token refreshed: $newToken');
-      _fcmToken = newToken;
-      await prefs.setString('fcmToken', newToken);
-      await _syncFcmTokenIfAuthenticated(newToken);
+    // Attach refresh listener once.
+    if (_tokenRefreshAttached) return;
+    _tokenRefreshAttached = true;
+
+    try {
+      FirebaseMessaging.instance.onTokenRefresh.listen((newToken) async {
+        _fcmToken = newToken;
+        _tokenRetryCount = 0;
+        _tokenRetryTimer?.cancel();
+        _tokenRetryTimer = null;
+        AppLogger.log.d('FCM token refreshed (${newToken.length} chars)');
+        try {
+          await prefs.setString('fcmToken', newToken);
+        } catch (_) {}
+        await _syncFcmTokenIfAuthenticated(newToken);
+      });
+    } catch (e) {
+      AppLogger.log.w('onTokenRefresh listen failed: $e');
+    }
+  }
+
+  void _scheduleTokenRetry() {
+    // Best-effort: if token isn't available now (Play services / APNs / network),
+    // retry a few times in the background without spamming.
+    if (_tokenRetryTimer != null) return;
+    if (_tokenRetryCount >= 3) return;
+    _tokenRetryCount++;
+
+    final delay = Duration(seconds: 20 * _tokenRetryCount);
+    _tokenRetryTimer = Timer(delay, () async {
+      _tokenRetryTimer = null;
+      try {
+        await fetchFCMTokenIfNeeded();
+      } catch (e) {
+        AppLogger.log.w('FCM retry failed: $e');
+      }
     });
+  }
+
+  Future<String?> _getFCMTokenWithRetry({int retries = 5}) async {
+    for (int i = 1; i <= retries; i++) {
+      try {
+        // iOS only: ensure APNs token exists before requesting FCM.
+        if (Platform.isIOS) {
+          final apns = await FirebaseMessaging.instance.getAPNSToken();
+          if (apns == null || apns.isEmpty) {
+            await Future<void>.delayed(Duration(seconds: 2 * i));
+            continue;
+          }
+        }
+
+        final token = await FirebaseMessaging.instance.getToken();
+        if (token != null && token.isNotEmpty) return token;
+      } catch (e) {
+        AppLogger.log.w('getToken failed (attempt $i): $e');
+      }
+      await Future<void>.delayed(Duration(seconds: 2 * i));
+    }
+    return null;
   }
 
   Future<void> showNotification(RemoteMessage message) async {

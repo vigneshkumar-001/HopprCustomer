@@ -83,14 +83,23 @@ class ChatController extends GetxController {
 
   Future<void> fetchChatHistory({
     required String bookingId,
+    double? pickupLatitude,
+    double? pickupLongitude,
     required BuildContext context,
   }) async {
     isLoading.value = true;
     try {
+      final id = bookingId.trim();
+      if (id.isEmpty) {
+        isLoading.value = false;
+        AppToasts.showErrorGlobal('Booking ID missing', title: 'Error');
+        return;
+      }
+
       final results = await apiDataSource.chatHistory(
-        bookingId: bookingId,
-        pickupLatitude: '',
-        pickupLongitude: '',
+        bookingId: id,
+        pickupLatitude: pickupLatitude?.toString() ?? '',
+        pickupLongitude: pickupLongitude?.toString() ?? '',
       );
 
       results.fold(

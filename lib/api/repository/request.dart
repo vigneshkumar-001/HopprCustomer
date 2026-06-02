@@ -12,14 +12,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 class Request {
   static bool _isHandlingUnauthorized = false;
 
-  static void _logInfo(String message) {
+  static void _debugLogInfo(String message) {
+    if (!kDebugMode) return;
     AppLogger.log.i(message);
-    debugPrint(message);
   }
 
-  static void _logError(String message) {
+  static void _debugLogError(String message) {
+    if (!kDebugMode) return;
     AppLogger.log.e(message);
-    debugPrint(message);
   }
 
   static String _formatBody(dynamic body) {
@@ -53,26 +53,31 @@ class Request {
     final authToken = headers['Authorization'];
     final rawToken = authToken?.toString().replaceFirst('Bearer ', '');
 
-    _logInfo(
-      'REQUEST [$method]\n'
-      'URL: $url\n'
-      'TOKEN: $rawToken\n'
-      'HEADERS: $headers\n'
-      'QUERY: ${queryParams ?? {}}\n'
-      'BODY: ${_formatBody(body)}',
+    // Debug-only: full request details. Keep production logs clean.
+    _debugLogInfo(
+      'Method: $method\n'
+      'Url: $url\n'
+      'Token: ${rawToken ?? ''}\n'
+      'Body: ${_formatBody(body ?? (queryParams ?? const <String, dynamic>{}))}',
     );
   }
 
   static void _logResponse({
     required String method,
     required String url,
+  
     required Response<dynamic> response,
   }) {
-    _logInfo(
-      'RESPONSE [$method]\n'
-      'URL: $url\n'
-      'STATUS: ${response.statusCode}\n'
-      'DATA: ${response.data}',
+    final authToken = response.requestOptions.headers['Authorization'];
+    final rawToken = authToken?.toString().replaceFirst('Bearer ', '');
+    final reqBody =
+        response.requestOptions.data ?? response.requestOptions.queryParameters;
+    _debugLogInfo(
+      'Method: $method\n'
+      'Url: $url\n'
+      'Token: ${rawToken ?? ''}\n'
+      'Body: ${_formatBody(reqBody)}\n'
+      'Response: ${response.data}',
     );
   }
 
@@ -156,7 +161,7 @@ class Request {
 
       Get.offAll(() => const MobileScreens());
     } catch (e) {
-      _logError('Unauthorized logout failed: $e');
+      _debugLogError('Unauthorized logout failed: $e');
     } finally {
       Future<void>.delayed(const Duration(milliseconds: 300), () {
         _isHandlingUnauthorized = false;
@@ -168,13 +173,13 @@ class Request {
     Response<dynamic>? response,
   ) async {
     if (await _shouldForceLogout(response)) {
-      _logError('Unauthorized response received. Redirecting to login.');
+      _debugLogError('Unauthorized response received. Redirecting to login.');
       await _handleUnauthorized();
       return;
     }
 
     if (response?.statusCode == 401) {
-      _logError(
+      _debugLogError(
         'Received 401 from server while a local token exists. '
         'Skipping forced logout for this response.',
       );
@@ -201,13 +206,11 @@ class Request {
           Response<dynamic> response,
           ResponseInterceptorHandler handler,
         ) {
-          _logInfo(
-            'sendPostRequest \n API: $url \n RESPONSE: ${response.toString()}',
-          );
+          // Keep logs debug-only and standardized via _logResponse().
           return handler.next(response);
         },
         onError: (DioException error, ErrorInterceptorHandler handler) async {
-          _logError('POST API interceptor error: $url \n ERROR: $error');
+          _debugLogError('POST API interceptor error: $url\nERROR: $error');
           await _handleUnauthorizedIfNeeded(error.response);
           if (error.response?.statusCode == 402) {
             return handler.reject(error);
@@ -257,7 +260,7 @@ class Request {
       await _handleUnauthorizedIfNeeded(response);
       return response;
     } catch (e, st) {
-      _logError('API: $url \n ERROR: $e \n STACK: $st');
+      _debugLogError('API ERROR: $url\nERROR: $e\nSTACK: $st');
       return e;
     }
   }
@@ -275,7 +278,6 @@ class Request {
       isTokenRequired: token != null && token.trim().isNotEmpty,
     );
 
-    _logInfo('LOGOUT API: $url');
     try {
       await dio.post(
         url,
@@ -283,7 +285,7 @@ class Request {
         options: Options(headers: headers),
       );
     } catch (e) {
-      _logError('Logout API failed: $e');
+      _debugLogError('Logout API failed: $e');
     }
   }
 
@@ -306,13 +308,11 @@ class Request {
           Response<dynamic> response,
           ResponseInterceptorHandler handler,
         ) {
-          _logInfo(
-            'sendPostRequest \n API: $url \n RESPONSE: ${response.toString()}',
-          );
+          // Keep logs debug-only and standardized via _logResponse().
           return handler.next(response);
         },
         onError: (DioException error, ErrorInterceptorHandler handler) async {
-          _logError('FORM API interceptor error: $url \n ERROR: $error');
+          _debugLogError('FORM API interceptor error: $url\nERROR: $error');
           await _handleUnauthorizedIfNeeded(error.response);
           if (error.response?.statusCode == 402) {
             return handler.reject(error);
@@ -353,7 +353,7 @@ class Request {
       await _handleUnauthorizedIfNeeded(response);
       return response;
     } catch (e, st) {
-      _logError('API: $url \n ERROR: $e \n STACK: $st');
+      _debugLogError('API ERROR: $url\nERROR: $e\nSTACK: $st');
       return e;
     }
   }
@@ -398,11 +398,7 @@ class Request {
           return handler.next(response);
         },
         onError: (DioException error, ErrorInterceptorHandler handler) async {
-          _logError(
-            'GET API interceptor error: ${error.requestOptions.uri} \n'
-            'HEADERS: ${error.requestOptions.headers} \n'
-            'ERROR: $error',
-          );
+          _debugLogError('GET API interceptor error: ${error.requestOptions.uri}\nERROR: $error');
           await _handleUnauthorizedIfNeeded(error.response);
           if (error.response?.statusCode == 402) {
             return handler.reject(error);
@@ -429,7 +425,7 @@ class Request {
       await _handleUnauthorizedIfNeeded(response);
       return response;
     } catch (e, st) {
-      _logError('GET API: $url \n ERROR: $e \n STACK: $st');
+      _debugLogError('GET API ERROR: $url\nERROR: $e\nSTACK: $st');
       return null;
     }
   }
