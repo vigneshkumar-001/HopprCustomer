@@ -5,7 +5,6 @@ import 'dart:math' as math;
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
@@ -14,6 +13,7 @@ import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Core/Consents/app_logger.dart';
 import 'package:hopper/Core/Utility/app_buttons.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
+import 'package:hopper/Core/Utility/phone_launcher.dart';
 import 'package:hopper/Core/Utility/app_toasts.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textFields.dart';
 import 'package:hopper/Presentation/BookRide/Controllers/driver_search_controller.dart';
@@ -29,7 +29,6 @@ import 'package:hopper/uitls/map/customer/customer_ride_map_view.dart';
 import 'package:hopper/uitls/map/customer/marker_icon_cache.dart' as icon_cache;
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:hopper/Presentation/CustomerSupport/screens/customer_support_list_screen.dart';
 
 import 'package:http/http.dart' as http;
@@ -1280,6 +1279,14 @@ class _SharedScreensState extends State<SharedScreens>
           widget.pickupPosition.longitude;
 
       DateTime ts = _parseServerTime(data['timestamp']);
+      if (!_isFreshTrackingTimestamp(ts)) {
+        if (kDebugMode) {
+          AppLogger.log.w(
+            'Ignoring stale shared-ride driver-location ts=$ts lat=$lat lng=$lng',
+          );
+        }
+        return;
+      }
       final now0 = DateTime.now();
       // If server clock is skewed too far into the future, treat it as "now"
       // to avoid the animation waiting/stalling.
@@ -1313,7 +1320,10 @@ class _SharedScreensState extends State<SharedScreens>
             if (_isRoutingToDrop && _customerDropLatLng != null) {
               _requestRoute(newPos, _customerDropLatLng!).then(_setActiveRoute);
             } else if (_isRoutingToPickup && _customerPickupLatLng != null) {
-              _requestRoute(newPos, _customerPickupLatLng!).then(_setActiveRoute);
+              _requestRoute(
+                newPos,
+                _customerPickupLatLng!,
+              ).then(_setActiveRoute);
             }
           }
         }
@@ -1348,6 +1358,17 @@ class _SharedScreensState extends State<SharedScreens>
     } catch (_) {
       return DateTime.now();
     }
+  }
+
+  bool _isFreshTrackingTimestamp(
+    DateTime ts, {
+    Duration maxAge = const Duration(seconds: 20),
+    Duration maxFutureSkew = const Duration(seconds: 12),
+  }) {
+    final now = DateTime.now();
+    if (ts.isAfter(now.add(maxFutureSkew))) return false;
+    if (now.difference(ts) > maxAge) return false;
+    return true;
   }
 
   double _distanceMeters(LatLng a, LatLng b) {
@@ -1556,11 +1577,16 @@ class _SharedScreensState extends State<SharedScreens>
                     routePoints: List<LatLng>.from(_activeRoute),
                     pickup: _customerPickupLatLng ?? widget.pickupPosition,
                     drop: _customerDropLatLng ?? widget.dropPosition,
-                    mode: driverStartedRide ? RideMapMode.toDrop : RideMapMode.toPickup,
+                    mode:
+                        driverStartedRide
+                            ? RideMapMode.toDrop
+                            : RideMapMode.toPickup,
                     etaText: isDriverConfirmed ? _etaChipText : '',
                     distanceText: isDriverConfirmed ? _distanceChipText : '',
                     statusText:
-                        driverStartedRide ? 'Ride in progress' : 'Driver reaching pickup',
+                        driverStartedRide
+                            ? 'Ride in progress'
+                            : 'Driver reaching pickup',
                     mapPadding: const EdgeInsets.only(bottom: 210),
                   ),
                 ),
@@ -1657,11 +1683,7 @@ class _SharedScreensState extends State<SharedScreens>
                         return;
                       }
 
-                      final Uri telUri = Uri(scheme: 'tel', path: normalized);
-                      final ok = await launchUrl(
-                        telUri,
-                        mode: LaunchMode.externalApplication,
-                      );
+                      final ok = await launchPhoneDialer(normalized);
 
                       if (!ok) {
                         AppToasts.showError(context, 'Could not open dialer');
@@ -1931,14 +1953,8 @@ class _SharedScreensState extends State<SharedScreens>
                                           return;
                                         }
 
-                                        final Uri telUri = Uri(
-                                          scheme: 'tel',
-                                          path: normalized,
-                                        );
-
-                                        final ok = await launchUrl(
-                                          telUri,
-                                          mode: LaunchMode.externalApplication,
+                                        final ok = await launchPhoneDialer(
+                                          normalized,
                                         );
 
                                         if (!ok) {

@@ -8,13 +8,20 @@ import 'package:hopper/uitls/map/customer/map_ui_config.dart';
 enum VehicleType { car, bike }
 
 class MarkerIconCache {
-  static final Map<String, BitmapDescriptor> _cache = <String, BitmapDescriptor>{};
+  static final Map<String, BitmapDescriptor> _cache =
+      <String, BitmapDescriptor>{};
 
-  static Future<BitmapDescriptor> vehicleIcon(VehicleType type, {double? dpr}) async {
+  static Future<BitmapDescriptor> vehicleIcon(
+    VehicleType type, {
+    double? dpr,
+  }) async {
     final resolvedDpr = (dpr ?? ui.window.devicePixelRatio).clamp(1.0, 4.0);
     final sizeDp =
-        type == VehicleType.bike ? MapUiConfig.bikeMarkerSizeDp : MapUiConfig.carMarkerSizeDp;
-    final asset = type == VehicleType.bike ? AppImages.packageBike : AppImages.carHop;
+        type == VehicleType.bike
+            ? MapUiConfig.bikeMarkerSizeDp
+            : MapUiConfig.carMarkerSizeDp;
+    final asset =
+        type == VehicleType.bike ? AppImages.bikeImage : AppImages.carImage;
     final key = 'veh|contain|$asset|$sizeDp|$resolvedDpr';
     final cached = _cache[key];
     if (cached != null) return cached;

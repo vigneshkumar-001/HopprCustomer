@@ -1,4 +1,4 @@
-﻿import 'package:hopper/Core/Utility/app_toasts.dart';
+import 'package:hopper/Core/Utility/app_toasts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -14,7 +14,6 @@ import 'package:hopper/Presentation/OnBoarding/Widgets/package_contoiner.dart';
 import 'package:hopper/Presentation/OnBoarding/models/address_models.dart';
 import 'package:hopper/uitls/netWorkHandling/network_handling_screen.dart';
 import 'package:hopper/uitls/map/map_ui_defaults.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hopper/Presentation/OnBoarding/Screens/payment_screen.dart';
 import 'package:http/http.dart' as http;
@@ -23,6 +22,7 @@ import 'package:flutter/material.dart';
 import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Core/Utility/app_buttons.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
+import 'package:hopper/Core/Utility/phone_launcher.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:hopper/uitls/websocket/socket_io_client.dart';
 import 'package:hopper/uitls/map/compact_marker_icons.dart';
@@ -192,6 +192,17 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     } catch (_) {
       return DateTime.now();
     }
+  }
+
+  bool _isFreshTrackingTimestamp(
+    DateTime ts, {
+    Duration maxAge = const Duration(seconds: 20),
+    Duration maxFutureSkew = const Duration(seconds: 12),
+  }) {
+    final now = DateTime.now();
+    if (ts.isAfter(now.add(maxFutureSkew))) return false;
+    if (now.difference(ts) > maxAge) return false;
+    return true;
   }
 
   Map<String, dynamic> _asMap(dynamic v) {
@@ -394,7 +405,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         t.contains('sedan') ||
         t.contains('suv') ||
         t.contains('van');
-    final asset = isCar ? AppImages.carHop : AppImages.packageBike;
+    final asset = isCar ? AppImages.carImage : AppImages.bikeImage;
 
     try {
       final dpr = ui.window.devicePixelRatio;
@@ -643,7 +654,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   }
 
   bool _isValidCoordinate(LatLng p) {
-    if (p.latitude.abs() < 0.000001 && p.longitude.abs() < 0.000001) return false;
+    if (p.latitude.abs() < 0.000001 && p.longitude.abs() < 0.000001)
+      return false;
     if (p.latitude < -90 || p.latitude > 90) return false;
     if (p.longitude < -180 || p.longitude > 180) return false;
     return true;
@@ -800,6 +812,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   DateTime _lastTrimAt = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _trimInterval = Duration(milliseconds: 450);
   static const double _trimMaxSnapMeters = 55.0;
+  static const double _routeSnapToleranceMeters = 42.0;
 
   DateTime _lastBoundsAt = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _boundsInterval = Duration(seconds: 4);
@@ -974,14 +987,26 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     _motion = DriverMotionEngine(
       vsync: this,
       onUpdate: (pos, bearing) {
-        _currentDriverLatLng = pos;
-        _lastBearing = bearing;
-        _updateDriverMarker(pos, bearing);
+        final snapped = _snapAndBearing(
+          pos,
+          rawBearing: bearing,
+          toleranceMeters: _routeSnapToleranceMeters,
+        );
+        _currentDriverLatLng = snapped.position;
+        _lastBearing = snapped.bearing;
+        _updateDriverMarker(snapped.position, snapped.bearing);
       },
       onFrameSideEffects: (pos) {
-        _maybeAutoFollow(pos);
-        _maybeUpdatePolyline(pos);
-        _trimActivePolyline(pos);
+        final snapped = _snapAndBearing(
+          pos,
+          rawBearing: _lastBearing,
+          toleranceMeters: _trimMaxSnapMeters,
+        );
+        _currentDriverLatLng = snapped.position;
+        _lastBearing = snapped.bearing;
+        _maybeAutoFollow(snapped.position);
+        _maybeUpdatePolyline(snapped.position);
+        _trimActivePolyline(snapped.position);
       },
     );
 
@@ -1229,7 +1254,9 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       if (payload.isEmpty) return;
 
       final lat = _toDouble(payload['latitude'] ?? payload['lat']);
-      final lng = _toDouble(payload['longitude'] ?? payload['lng'] ?? payload['lon']);
+      final lng = _toDouble(
+        payload['longitude'] ?? payload['lng'] ?? payload['lon'],
+      );
       if (lat == null || lng == null) {
         AppLogger.log.e("Invalid driver-location payload: $payload");
         return;
@@ -1238,9 +1265,12 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
       if (!_isValidCoordinate(newDriverLatLng)) return;
 
-      final ts = _parseServerTime(payload['timestamp'] ?? payload['ts'] ?? payload['time']);
-      final bearing =
-          _parseBearingDeg(payload['bearing'] ?? payload['heading'] ?? payload['rotation']);
+      final ts = _parseServerTime(
+        payload['timestamp'] ?? payload['ts'] ?? payload['time'],
+      );
+      final bearing = _parseBearingDeg(
+        payload['bearing'] ?? payload['heading'] ?? payload['rotation'],
+      );
 
       final driverPhone = _normalizePhone(
         (payload['driverPhone'] ?? payload['phone'] ?? payload['mobile'] ?? '')
@@ -1254,6 +1284,15 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       // socket GPS -> DriverMotionEngine.ingest -> onUpdate -> marker via ValueNotifier
       final b0 = bearing ?? _lastBearing;
       if (!_motionReady) {
+        if (!_isFreshTrackingTimestamp(ts)) {
+          if (kDebugMode) {
+            AppLogger.log.w(
+              'Ignoring stale initial package driver-location ts=$ts '
+              'lat=${newDriverLatLng.latitude} lng=${newDriverLatLng.longitude}',
+            );
+          }
+          return;
+        }
         _motion.reset(newDriverLatLng, bearing: b0);
         _motionReady = true;
         _currentDriverLatLng = newDriverLatLng;
@@ -1288,7 +1327,9 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
           basePayload['outForDelivery'] == true;
 
       final socketMeters = _parseInt(
-        payload[nextStarted ? 'dropDistanceInMeters' : 'pickupDistanceInMeters'],
+        payload[nextStarted
+            ? 'dropDistanceInMeters'
+            : 'pickupDistanceInMeters'],
       );
       final socketMins = _parseInt(
         payload[nextStarted ? 'dropDurationInMin' : 'pickupDurationInMin'],
@@ -1480,6 +1521,58 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     _maybeAutoFollow(position);
   }
 
+  _SnappedDriverPose _snapAndBearing(
+    LatLng raw, {
+    double? rawBearing,
+    double? toleranceMeters,
+  }) {
+    final fallbackBearing = rawBearing ?? _lastBearing;
+    if (_activeRoutePoints.length < 2) {
+      return _SnappedDriverPose(position: raw, bearing: fallbackBearing);
+    }
+
+    final nearest = nearestPointOnPolyline(raw, _activeRoutePoints);
+    if (nearest == null) {
+      return _SnappedDriverPose(position: raw, bearing: fallbackBearing);
+    }
+
+    final maxSnap = toleranceMeters ?? _routeSnapToleranceMeters;
+    if (!nearest.distanceMeters.isFinite || nearest.distanceMeters > maxSnap) {
+      return _SnappedDriverPose(position: raw, bearing: fallbackBearing);
+    }
+
+    final prevIdx = nearest.segmentIndex.clamp(
+      0,
+      _activeRoutePoints.length - 1,
+    );
+    final nextIdx = (nearest.segmentIndex + 1).clamp(
+      0,
+      _activeRoutePoints.length - 1,
+    );
+    final prev = _activeRoutePoints[prevIdx];
+    final next = _activeRoutePoints[nextIdx];
+    final routeBearing = bearingBetween(prev, next);
+    final smooth = smoothBearing(
+      currentDeg: fallbackBearing,
+      targetDeg: routeBearing,
+      alpha: 0.22,
+    );
+
+    return _SnappedDriverPose(position: nearest.point, bearing: smooth);
+  }
+
+  bool _routeMatchesCurrentPhase(
+    List<LatLng> points,
+    LatLng expectedDestination,
+  ) {
+    if (points.length < 2) return true;
+    final endDistance = haversineDistanceMeters(
+      points.last,
+      expectedDestination,
+    );
+    return endDistance <= 90.0;
+  }
+
   List<LatLng> _decodeStepsPolyline(dynamic legs) {
     try {
       final leg0 =
@@ -1558,11 +1651,21 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         final encoded =
             (data['routes']?[0]?['overview_polyline']?['points'] ?? '')
                 .toString();
-        final decoded = stepPoints.isNotEmpty ? stepPoints : _decodePolyline(encoded);
+        final decoded =
+            stepPoints.isNotEmpty ? stepPoints : _decodePolyline(encoded);
         // Fallback: always show at least a straight line if Directions gives
         // an empty/short polyline (happens on very short routes / edge cases).
         final points =
             decoded.length >= 2 ? decoded : <LatLng>[origin, destination];
+        if (!_routeMatchesCurrentPhase(points, destination)) {
+          if (kDebugMode) {
+            AppLogger.log.w(
+              'Ignoring stale package route id=$polylineId endDistance='
+              '${haversineDistanceMeters(points.last, destination).toStringAsFixed(1)}m',
+            );
+          }
+          return;
+        }
         if (!mounted) return;
         final socketFresh =
             _routeMetricsFromSocket &&
@@ -1593,7 +1696,9 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       } else {
         // Keep the current route if Directions fails (production-safe). If we
         // don't have any route yet, draw a minimal fallback line.
-        if (mounted && _polylinesNotifier.value.isEmpty && !forceKeepOldOnFailure) {
+        if (mounted &&
+            _polylinesNotifier.value.isEmpty &&
+            !forceKeepOldOnFailure) {
           _polylinesNotifier.value = _styledRoutePolylines(
             <LatLng>[origin, destination],
             id: polylineId,
@@ -1608,7 +1713,9 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       }
     } catch (e) {
       // Network hiccup/timeouts shouldn't clear the current route.
-      if (mounted && _polylinesNotifier.value.isEmpty && !forceKeepOldOnFailure) {
+      if (mounted &&
+          _polylinesNotifier.value.isEmpty &&
+          !forceKeepOldOnFailure) {
         _polylinesNotifier.value = _styledRoutePolylines(
           <LatLng>[origin, destination],
           id: polylineId,
@@ -1648,12 +1755,17 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         endCap: Cap.roundCap,
         jointType: JointType.round,
         patterns:
-            isDashed ? <PatternItem>[PatternItem.dash(20), PatternItem.gap(10)] : const <PatternItem>[],
+            isDashed
+                ? <PatternItem>[PatternItem.dash(20), PatternItem.gap(10)]
+                : const <PatternItem>[],
       ),
     };
   }
 
-  void _maybeFitBounds(List<LatLng> routePoints, {List<LatLng> extraPoints = const <LatLng>[]}) {
+  void _maybeFitBounds(
+    List<LatLng> routePoints, {
+    List<LatLng> extraPoints = const <LatLng>[],
+  }) {
     if (_mapController == null) return;
     if (!_autoFollowEnabled) return;
     final now = DateTime.now();
@@ -1662,7 +1774,10 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     _lastBoundsAt = now;
 
     try {
-      final bounds = boundsFromRoutePoints(routePoints, extraPoints: extraPoints);
+      final bounds = boundsFromRoutePoints(
+        routePoints,
+        extraPoints: extraPoints,
+      );
       _mapController?.animateCamera(CameraUpdate.newLatLngBounds(bounds, 120));
     } catch (_) {}
   }
@@ -1874,10 +1989,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
             const SizedBox(width: 6),
             Text(
               text,
-              style: const TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w800,
-              ),
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800),
             ),
           ],
         ),
@@ -1982,15 +2094,21 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     // Only trim when we're close to the current route (avoid trimming while off-route).
     final nearest = nearestPointOnPolyline(driverLatLng, _activeRoutePoints);
     if (nearest == null) return;
-    if (!nearest.distanceMeters.isFinite || nearest.distanceMeters > _trimMaxSnapMeters) {
+    if (!nearest.distanceMeters.isFinite ||
+        nearest.distanceMeters > _trimMaxSnapMeters) {
       return;
     }
-    if (nearest.segmentIndex <= _lastTrimSegIndex) return;
-    _lastTrimSegIndex = nearest.segmentIndex;
+    final maxTrimStart = (_activeRoutePoints.length - 2).clamp(
+      0,
+      _activeRoutePoints.length - 1,
+    );
+    final trimIndex = nearest.segmentIndex.clamp(0, maxTrimStart);
+    if (trimIndex <= _lastTrimSegIndex) return;
+    _lastTrimSegIndex = trimIndex;
 
     final remaining = <LatLng>[
       nearest.point,
-      ..._activeRoutePoints.skip(nearest.segmentIndex + 1),
+      ..._activeRoutePoints.skip(trimIndex + 1),
     ];
     if (remaining.length < 2) return;
 
@@ -2003,7 +2121,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   }
 
   void _maybeRerouteIfOffRoute(LatLng driverLatLng) {
-    final destination = driverStartedRide ? _customerToLatLang : _customerLatLng;
+    final destination =
+        driverStartedRide ? _customerToLatLang : _customerLatLng;
     if (destination == null) return;
     if (_activeRoutePoints.length < 2) return;
 
@@ -2092,11 +2211,15 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                           tiltGesturesEnabled: false,
                           buildingsEnabled: false,
                           indoorViewEnabled: false,
-                          minMaxZoomPreference:
-                              const MinMaxZoomPreference(11.0, 17.0),
+                          minMaxZoomPreference: const MinMaxZoomPreference(
+                            11.0,
+                            17.0,
+                          ),
                           circles: _circles,
-                          onCameraMove: (pos) => _currentZoomLevel =
-                              pos.zoom.clamp(11.0, 17.0).toDouble(),
+                          onCameraMove:
+                              (pos) =>
+                                  _currentZoomLevel =
+                                      pos.zoom.clamp(11.0, 17.0).toDouble(),
                           onCameraMoveStarted: _onUserMapGesture,
                           onTap: (_) => _onUserMapGesture(),
                           initialCameraPosition: CameraPosition(
@@ -2188,26 +2311,14 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
                       // Keep leading + if present; remove spaces and other junk
                       sosNumber = sosNumber.trim();
-                      final hasPlus = sosNumber.startsWith('+');
-                      final digitsOnly = sosNumber.replaceAll(
-                        RegExp(r'[^0-9]'),
-                        '',
-                      );
-                      final normalized = hasPlus ? '+$digitsOnly' : digitsOnly;
+                      final normalized = sanitizePhoneNumber(sosNumber);
 
                       if (normalized.isEmpty) {
                         AppToasts.showError(context, 'Invalid SOS number');
                         return;
                       }
 
-                      final Uri telUri = Uri(scheme: 'tel', path: normalized);
-
-                      // Try opening the dialer
-                      final ok = await launchUrl(
-                        telUri,
-                        mode:
-                            LaunchMode.externalApplication, // opens dialer app
-                      );
+                      final ok = await launchPhoneDialer(normalized);
 
                       if (!ok) {
                         AppToasts.showError(context, 'Could not open dialer');
@@ -2233,7 +2344,6 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
               ),
 
               // Trip info is shown inside the bottom sheet (under the status).
-
               DraggableScrollableSheet(
                 key: ValueKey(_isDriverConfirmed),
 
@@ -2316,8 +2426,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                                           destinationReached
                                               ? 'Ride Completed'
                                               : driverStartedRide
-                                                  ? 'Ride in Progress'
-                                                  : 'Your ride is confirmed',
+                                              ? 'Ride in Progress'
+                                              : 'Your ride is confirmed',
                                       colors: AppColors.commonBlack,
                                       rightImagePath: AppImages.clrTick,
                                     ),
@@ -2358,9 +2468,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
                                           Row(
                                             children: [
-                                              ClipOval(
-                                                child: _driverAvatar(),
-                                              ),
+                                              ClipOval(child: _driverAvatar()),
                                               SizedBox(width: 5),
                                               CustomTextFields.textWithStylesSmall(
                                                 fontSize: 14,
@@ -2415,15 +2523,9 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                                                 return;
                                               }
 
-                                              final Uri url =
-                                                  Uri(scheme: 'tel', path: ph);
-                                              if (await canLaunchUrl(url)) {
-                                                await launchUrl(
-                                                  url,
-                                                  mode: LaunchMode
-                                                      .externalApplication,
-                                                );
-                                              } else {
+                                              final ok =
+                                                  await launchPhoneDialer(ph);
+                                              if (!ok) {
                                                 AppToasts.showError(
                                                   context,
                                                   'Could not open dialer',
@@ -2447,36 +2549,40 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                                           color: AppColors.chatBlueColor,
                                         ),
 
-                                          child: Padding(
-                                            padding: const EdgeInsets.all(8.0),
-                                            child: InkWell(
-                                              onTap: () async {
-                                                final id =
-                                                    (BookingId.trim().isNotEmpty
-                                                            ? BookingId
-                                                            : widget.bookingId)
-                                                        .trim();
-                                                if (id.isEmpty) {
-                                                  AppToasts.showError(
-                                                    context,
-                                                    'Booking ID not available yet',
-                                                  );
-                                                  return;
-                                                }
-                                                Get.to(
-                                                  () => ChatScreen(
-                                                    bookingId: id,
-                                                    pickupLatitude:
-                                                        widget.senderData.latitude,
-                                                    pickupLongitude:
-                                                        widget.senderData.longitude,
-                                                  ),
+                                        child: Padding(
+                                          padding: const EdgeInsets.all(8.0),
+                                          child: InkWell(
+                                            onTap: () async {
+                                              final id =
+                                                  (BookingId.trim().isNotEmpty
+                                                          ? BookingId
+                                                          : widget.bookingId)
+                                                      .trim();
+                                              if (id.isEmpty) {
+                                                AppToasts.showError(
+                                                  context,
+                                                  'Booking ID not available yet',
                                                 );
-                                              },
-                                              child: Image.asset(
-                                                AppImages.chat,
-                                                height: 20,
-                                                width: 20,
+                                                return;
+                                              }
+                                              Get.to(
+                                                () => ChatScreen(
+                                                  bookingId: id,
+                                                  pickupLatitude:
+                                                      widget
+                                                          .senderData
+                                                          .latitude,
+                                                  pickupLongitude:
+                                                      widget
+                                                          .senderData
+                                                          .longitude,
+                                                ),
+                                              );
+                                            },
+                                            child: Image.asset(
+                                              AppImages.chat,
+                                              height: 20,
+                                              width: 20,
                                             ),
                                           ),
                                         ),
@@ -3495,4 +3601,11 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       ),
     );
   }
+}
+
+class _SnappedDriverPose {
+  final LatLng position;
+  final double bearing;
+
+  const _SnappedDriverPose({required this.position, required this.bearing});
 }

@@ -6,8 +6,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_sound/flutter_sound.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:hopper/Core/Utility/phone_launcher.dart';
 
 import 'package:hopper/Presentation/OnBoarding/Controller/chat_controller.dart';
 import 'package:hopper/Presentation/OnBoarding/models/chat_history_response.dart';
@@ -251,9 +251,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _initializeSocketAndData() async {
     await _loadCustomerAndDriverInfo();
 
-    socketService.initSocket(
-      'https://bk.myhoppr.com',
-    );
+    socketService.initSocket('https://bk.myhoppr.com');
 
     socketService.onConnect(() {
       socketService.registerUser(customerId);
@@ -554,18 +552,13 @@ class _ChatScreenState extends State<ChatScreen> {
                     borderRadius: BorderRadius.circular(50),
                     onTap: () async {
                       var raw = driverPhone;
-                      final sanitized = raw.replaceAll(RegExp(r'\s+'), '');
-                      final uri = Uri(scheme: 'tel', path: sanitized);
+                      final sanitized = sanitizePhoneNumber(raw);
                       AppLogger.log.i(raw);
-                      AppLogger.log.i(uri);
+                      AppLogger.log.i('tel:$sanitized');
 
                       try {
-                        if (await canLaunchUrl(uri)) {
-                          await launchUrl(
-                            uri,
-                            mode: LaunchMode.externalApplication,
-                          );
-                        } else {
+                        final ok = await launchPhoneDialer(sanitized);
+                        if (!ok) {
                           if (context.mounted) {
                             ScaffoldMessenger.of(context).showSnackBar(
                               const SnackBar(

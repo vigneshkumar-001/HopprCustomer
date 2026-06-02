@@ -50,7 +50,9 @@ class CustomerRideMapView extends StatefulWidget {
     required this.etaText,
     required this.distanceText,
     this.statusText,
-    this.mapPadding = const EdgeInsets.only(bottom: MapUiConfig.defaultBottomPadding),
+    this.mapPadding = const EdgeInsets.only(
+      bottom: MapUiConfig.defaultBottomPadding,
+    ),
     this.onMapReady,
   });
 
@@ -73,7 +75,6 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
 
   List<LatLng> _fullRoute = const <LatLng>[];
   List<LatLng> _remainingRoute = const <LatLng>[];
-  List<LatLng> _completedRoute = const <LatLng>[];
   int _lastTrimIndex = 0;
   String _routeSig = '';
 
@@ -111,10 +112,22 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
 
     _motion = DriverMotionEngine(
       vsync: this,
-      onUpdate: (pos, bearing) => _queueVehicleMarker(pos, bearing),
+      onUpdate: (pos, bearing) {
+        final snapped = _snapAndBearing(
+          pos,
+          rawBearing: bearing,
+          toleranceMeters: MapUiConfig.snapToRouteToleranceMeters + 10.0,
+        );
+        _queueVehicleMarker(snapped.position, snapped.bearing);
+      },
       onFrameSideEffects: (pos) {
-        _maybeTrimRoute(pos);
-        _maybeFollowCamera(pos);
+        final snapped = _snapAndBearing(
+          pos,
+          rawBearing: _vehicleBearing,
+          toleranceMeters: MapUiConfig.snapToRouteToleranceMeters + 10.0,
+        );
+        _maybeTrimRoute(snapped.position);
+        _maybeFollowCamera(snapped.position);
       },
       // Debounce raw GPS packets (ignore <5m moves).
       minMoveMeters: 5.0,
@@ -162,7 +175,9 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       _requestFitBounds(reason: 'pickup_drop_changed');
     }
     if (oldWidget.mode != widget.mode) {
+      _syncRoute(force: true);
       _syncMarkers(force: true);
+      _rebuildPolylines();
       _requestFitBounds(reason: 'mode_changed');
     }
 
@@ -183,9 +198,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
 
   Future<void> _loadMapStyle() async {
     try {
-      _mapStyle = await rootBundle.loadString(
-        'assets/map_style.json',
-      );
+      _mapStyle = await rootBundle.loadString('assets/map_style.json');
       if (_mapController != null) {
         await _mapController!.setMapStyle(_mapStyle);
       }
@@ -195,7 +208,10 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   Future<void> _loadIcons() async {
     final dpr = ui.window.devicePixelRatio;
     try {
-      _vehIcon = await MarkerIconCache.vehicleIcon(widget.vehicleType, dpr: dpr);
+      _vehIcon = await MarkerIconCache.vehicleIcon(
+        widget.vehicleType,
+        dpr: dpr,
+      );
     } catch (e) {
       if (kDebugMode) {
         AppLogger.log.w('vehicle icon load failed: $e');
@@ -215,11 +231,32 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     if (!force && sig == _routeSig) return;
 
     _routeSig = sig;
+    if (!_routeMatchesCurrentMode(pts)) {
+      _fullRoute = const <LatLng>[];
+      _remainingRoute = const <LatLng>[];
+      _lastTrimIndex = 0;
+      _rebuildPolylines();
+      return;
+    }
     _fullRoute = List<LatLng>.unmodifiable(List<LatLng>.from(pts));
     _remainingRoute = _fullRoute;
-    _completedRoute = const <LatLng>[];
     _lastTrimIndex = 0;
+    final livePos = _vehiclePos ?? widget.driverLocation;
+    if (livePos != null) {
+      final snapped = _snapAndBearing(livePos);
+      _vehiclePos = snapped.position;
+      _vehicleBearing = snapped.bearing;
+      _maybeTrimRoute(snapped.position, force: true);
+    }
     _rebuildPolylines();
+  }
+
+  bool _routeMatchesCurrentMode(List<LatLng> pts) {
+    if (pts.length < 2) return true;
+    final expectedDestination =
+        widget.mode == RideMapMode.toDrop ? widget.drop : widget.pickup;
+    final endDistance = haversineDistanceMeters(pts.last, expectedDestination);
+    return endDistance <= 90.0;
   }
 
   void _requestFitBounds({required String reason}) {
@@ -265,20 +302,23 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
 
   String _computeRouteSig(List<LatLng> pts) {
     if (pts.length < 2) return 'len:${pts.length}';
-    final idxs = <int>{
-      0,
-      pts.length - 1,
-      (pts.length * 1 ~/ 4),
-      (pts.length * 2 ~/ 4),
-      (pts.length * 3 ~/ 4),
-    }.toList()
-      ..sort();
+    final idxs =
+        <int>{
+            0,
+            pts.length - 1,
+            (pts.length * 1 ~/ 4),
+            (pts.length * 2 ~/ 4),
+            (pts.length * 3 ~/ 4),
+          }.toList()
+          ..sort();
 
     final sb = StringBuffer('len:${pts.length}');
     for (final i in idxs) {
       final p = pts[i.clamp(0, pts.length - 1)];
       sb.write('|');
-      sb.write('${p.latitude.toStringAsFixed(5)},${p.longitude.toStringAsFixed(5)}');
+      sb.write(
+        '${p.latitude.toStringAsFixed(5)},${p.longitude.toStringAsFixed(5)}',
+      );
     }
     return sb.toString();
   }
@@ -291,11 +331,11 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     // Phase 2: pickup -> drop (blue solid), and we trim as driver advances
     // by updating `_remainingRoute`.
     if (widget.mode == RideMapMode.toPickup) {
-      final pts = _fullRoute.length >= 2 ? _fullRoute : const <LatLng>[];
+      final pts = _remainingRoute.length >= 2 ? _remainingRoute : _fullRoute;
       if (pts.length >= 2) {
         set.add(
           Polyline(
-            polylineId: const PolylineId('driver_to_pickup'),
+            polylineId: const PolylineId('active_route'),
             points: pts,
             color: Colors.grey.shade600,
             width: 4,
@@ -308,11 +348,12 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
         );
       }
     } else if (widget.mode == RideMapMode.toDrop) {
-      final remaining = _remainingRoute.length >= 2 ? _remainingRoute : _fullRoute;
+      final remaining =
+          _remainingRoute.length >= 2 ? _remainingRoute : _fullRoute;
       if (remaining.length >= 2) {
         set.add(
           Polyline(
-            polylineId: const PolylineId('driver_to_drop'),
+            polylineId: const PolylineId('active_route'),
             points: remaining,
             color: const Color(0xFF000000),
             width: 5,
@@ -337,21 +378,22 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     }
 
     final markers = <Marker>{
-      Marker(
-        markerId: const MarkerId('pickup'),
-        position: widget.pickup,
-        icon: _pickupIcon ?? BitmapDescriptor.defaultMarker,
-        anchor: const Offset(0.5, MapUiConfig.pickupDropAnchorY),
-        zIndex: 1,
-        infoWindow: InfoWindow.noText,
-      ),
+      if (widget.mode != RideMapMode.toDrop)
+        Marker(
+          markerId: const MarkerId('pickup'),
+          position: widget.pickup,
+          icon: _pickupIcon ?? BitmapDescriptor.defaultMarker,
+          anchor: const Offset(0.5, MapUiConfig.pickupDropAnchorY),
+          zIndexInt: 1,
+          infoWindow: InfoWindow.noText,
+        ),
       if (widget.mode == RideMapMode.toDrop)
         Marker(
           markerId: const MarkerId('drop'),
           position: widget.drop,
           icon: _dropIcon ?? BitmapDescriptor.defaultMarker,
           anchor: const Offset(0.5, MapUiConfig.pickupDropAnchorY),
-          zIndex: 1,
+          zIndexInt: 1,
           infoWindow: InfoWindow.noText,
         ),
     };
@@ -366,7 +408,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
           flat: true,
           anchor: const Offset(0.5, MapUiConfig.vehicleAnchorY),
           icon: _vehIcon ?? BitmapDescriptor.defaultMarker,
-          zIndex: 2,
+          zIndexInt: 2,
           infoWindow: InfoWindow.noText,
         ),
       );
@@ -423,7 +465,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
         flat: true,
         anchor: const Offset(0.5, MapUiConfig.vehicleAnchorY),
         icon: _vehIcon ?? BitmapDescriptor.defaultMarker,
-        zIndex: 4,
+        zIndexInt: 4,
         infoWindow: InfoWindow.noText,
       ),
     );
@@ -431,28 +473,44 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     if (mounted) setState(() {});
   }
 
-  _SnappedPose _snapAndBearing(LatLng raw) {
-    if (_fullRoute.length < 2) {
-      return _SnappedPose(position: raw, bearing: _vehicleBearing);
+  _SnappedPose _snapAndBearing(
+    LatLng raw, {
+    double? rawBearing,
+    double? toleranceMeters,
+  }) {
+    final routeForSnap =
+        widget.mode == RideMapMode.toDrop && _remainingRoute.length >= 2
+            ? _remainingRoute
+            : _fullRoute;
+    final fallbackBearing = rawBearing ?? _vehicleBearing;
+
+    if (routeForSnap.length < 2) {
+      return _SnappedPose(position: raw, bearing: fallbackBearing);
     }
 
-    final nearest = nearestPointOnPolyline(raw, _fullRoute);
+    final nearest = nearestPointOnPolyline(raw, routeForSnap);
     if (nearest == null) {
-      return _SnappedPose(position: raw, bearing: _vehicleBearing);
+      return _SnappedPose(position: raw, bearing: fallbackBearing);
     }
 
     // If we're too far from the route, don't snap. Snapping aggressively causes
     // "parallel road lock" and makes the vehicle appear to cut across streets.
-    if (nearest.distanceMeters > MapUiConfig.snapToRouteToleranceMeters) {
-      return _SnappedPose(position: raw, bearing: _vehicleBearing);
+    if (nearest.distanceMeters >
+        (toleranceMeters ?? MapUiConfig.snapToRouteToleranceMeters)) {
+      return _SnappedPose(position: raw, bearing: fallbackBearing);
     }
 
-    final nextIdx = (nearest.segmentIndex + 1).clamp(0, _fullRoute.length - 1);
-    final next = _fullRoute[nextIdx];
+    final nextIdx = (nearest.segmentIndex + 1).clamp(
+      0,
+      routeForSnap.length - 1,
+    );
+    final prevIdx = nearest.segmentIndex.clamp(0, routeForSnap.length - 1);
+    final prev = routeForSnap[prevIdx];
+    final next = routeForSnap[nextIdx];
 
-    final routeBearing = bearingBetween(nearest.point, next);
+    final routeBearing = bearingBetween(prev, next);
     final smooth = smoothBearing(
-      currentDeg: _vehicleBearing,
+      currentDeg: fallbackBearing,
       targetDeg: routeBearing,
       alpha: 0.22,
     );
@@ -492,12 +550,13 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     return bestIdx;
   }
 
-  void _maybeTrimRoute(LatLng vehiclePos) {
-    if (widget.mode != RideMapMode.toDrop) return;
+  void _maybeTrimRoute(LatLng vehiclePos, {bool force = false}) {
     if (_fullRoute.length < 2) return;
 
     final now = DateTime.now();
-    if (now.difference(_lastPolylineTrimAt) < _polyTrimInterval) return;
+    if (!force && now.difference(_lastPolylineTrimAt) < _polyTrimInterval) {
+      return;
+    }
     _lastPolylineTrimAt = now;
 
     final idx = _nearestIndexInWindow(
@@ -513,9 +572,14 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     if (idx + 2 < _lastTrimIndex) return;
     if ((idx - _lastTrimIndex).abs() < 1) return;
 
-    _lastTrimIndex = idx;
-    final clamped = idx.clamp(0, _fullRoute.length - 1);
-    _completedRoute = List<LatLng>.unmodifiable(_fullRoute.sublist(0, clamped));
+    final maxTrimStart = (_fullRoute.length - 2).clamp(
+      0,
+      _fullRoute.length - 1,
+    );
+    final clamped = idx.clamp(0, maxTrimStart);
+    if (clamped <= _lastTrimIndex) return;
+
+    _lastTrimIndex = clamped;
     _remainingRoute = List<LatLng>.unmodifiable(_fullRoute.sublist(clamped));
 
     _rebuildPolylines();
@@ -528,16 +592,20 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   void _maybeFollowCamera(LatLng vehiclePos) {
     if (_mapController == null) return;
     if (DateTime.now().isBefore(_pauseFollowUntil)) return;
-    if (DateTime.now().difference(_lastCameraAt) < MapUiConfig.cameraFollowInterval) return;
+    if (DateTime.now().difference(_lastCameraAt) <
+        MapUiConfig.cameraFollowInterval) {
+      return;
+    }
     _lastCameraAt = DateTime.now();
 
-    final z = widget.mode != RideMapMode.idle
-        ? 17.0
-        : CameraUtils.clampZoom(
-            _currentZoom,
-            min: MapUiConfig.followMinZoom,
-            max: MapUiConfig.maxZoom,
-          );
+    final z =
+        widget.mode != RideMapMode.idle
+            ? 17.0
+            : CameraUtils.clampZoom(
+              _currentZoom,
+              min: MapUiConfig.followMinZoom,
+              max: MapUiConfig.maxZoom,
+            );
 
     final isActiveRide = widget.mode != RideMapMode.idle;
 
@@ -561,13 +629,14 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     if (_mapController == null || pos == null) return;
     _pauseFollowUntil = DateTime.fromMillisecondsSinceEpoch(0);
     // Ensure recenter always feels like a "focus" action (not stuck zoomed out).
-    final z = widget.mode != RideMapMode.idle
-        ? 17.0
-        : CameraUtils.clampZoom(
-            _currentZoom,
-            min: MapUiConfig.followMinZoom,
-            max: MapUiConfig.maxZoom,
-          );
+    final z =
+        widget.mode != RideMapMode.idle
+            ? 17.0
+            : CameraUtils.clampZoom(
+              _currentZoom,
+              min: MapUiConfig.followMinZoom,
+              max: MapUiConfig.maxZoom,
+            );
     try {
       await _mapController!.animateCamera(
         CameraUpdate.newCameraPosition(
@@ -593,9 +662,10 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
         widget.drop,
       ];
       final hasRoute = _fullRoute.length >= 2;
-      final bounds = hasRoute
-          ? boundsFromRoutePoints(_fullRoute, extraPoints: extras)
-          : CameraUtils.boundsFromPoints(extras);
+      final bounds =
+          hasRoute
+              ? boundsFromRoutePoints(_fullRoute, extraPoints: extras)
+              : CameraUtils.boundsFromPoints(extras);
       await _mapController!.animateCamera(
         CameraUpdate.newLatLngBounds(bounds, padding),
       );
@@ -652,7 +722,9 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
               );
             },
             gestureRecognizers: {
-              Factory<OneSequenceGestureRecognizer>(() => EagerGestureRecognizer()),
+              Factory<OneSequenceGestureRecognizer>(
+                () => EagerGestureRecognizer(),
+              ),
             },
           ),
         ),

@@ -1,18 +1,16 @@
 import 'dart:async';
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
+import 'package:hopper/Core/Utility/phone_launcher.dart';
 import 'package:hopper/Presentation/BookRide/Controllers/order_confrim_controller.dart';
 import 'package:hopper/uitls/map/customer/customer_ride_map_view.dart';
 import 'package:hopper/uitls/map/customer/marker_icon_cache.dart' as icon_cache;
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:hopper/Presentation/CustomerSupport/screens/customer_support_list_screen.dart';
 
 import 'package:hopper/Core/Consents/app_colors.dart';
@@ -132,14 +130,8 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
         _toDouble(widget.destinationData['lng']) ??
         _toDouble(widget.destinationData['longitude']);
 
-    _pickupLatLng = LatLng(
-      pickupLat ?? 9.9144908,
-      pickupLng ?? 78.0970899,
-    );
-    _dropLatLng = LatLng(
-      dropLat ?? 9.9144908,
-      dropLng ?? 78.0970899,
-    );
+    _pickupLatLng = LatLng(pickupLat ?? 9.9144908, pickupLng ?? 78.0970899);
+    _dropLatLng = LatLng(dropLat ?? 9.9144908, dropLng ?? 78.0970899);
 
     c.init(
       bookingId: widget.bookingId,
@@ -302,22 +294,26 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                 height: 550,
                 width: double.infinity,
                 child: RepaintBoundary(
-                  child: Obx(
-                    () {
-                      final raw = c.etaChipText.value;
-                      final pieces = raw
-                          .split('|')
-                          .map((e) => e.trim())
-                          .where((e) => e.isNotEmpty)
-                          .toList();
-                      final etaText =
-                          pieces.isNotEmpty ? pieces.first : raw.trim();
-                      final distText = pieces.length >= 2 ? pieces.last : '';
+                  child: Obx(() {
+                    final raw = c.etaChipText.value;
+                    final pieces =
+                        raw
+                            .split('|')
+                            .map((e) => e.trim())
+                            .where((e) => e.isNotEmpty)
+                            .toList();
+                    final etaText =
+                        pieces.isNotEmpty ? pieces.first : raw.trim();
+                    final distText = pieces.length >= 2 ? pieces.last : '';
+                    final effectiveVehicleType =
+                        c.cartypeFromServer.value.trim().isNotEmpty
+                            ? c.cartypeFromServer.value
+                            : widget.carType;
 
-                      return CustomerRideMapView(
+                    return CustomerRideMapView(
                       key: _mapKey,
                       vehicleType:
-                          widget.carType.toLowerCase().contains('bike')
+                          effectiveVehicleType.toLowerCase().contains('bike')
                               ? icon_cache.VehicleType.bike
                               : icon_cache.VehicleType.car,
                       driverLocation: c.driverLocation.value,
@@ -339,9 +335,8 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                       // Bottom sheet overlays the lower portion; keep map padding
                       // so Google logo/controls never overlap the sheet.
                       mapPadding: const EdgeInsets.only(bottom: 210),
-                      );
-                    },
-                  ),
+                    );
+                  }),
                 ),
               ),
 
@@ -372,25 +367,15 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                       }
 
                       sosNumber = sosNumber.trim();
-                      final hasPlus = sosNumber.startsWith('+');
-                      final digitsOnly = sosNumber.replaceAll(
-                        RegExp(r'[^0-9]'),
-                        '',
-                      );
-                      final normalized = hasPlus ? '+$digitsOnly' : digitsOnly;
-
+                      final normalized = sanitizePhoneNumber(sosNumber);
                       if (normalized.isEmpty) {
                         AppToasts.showError(context, 'Invalid SOS number');
                         return;
                       }
-
-                      final uri = Uri(scheme: 'tel', path: normalized);
-                      final ok = await launchUrl(
-                        uri,
-                        mode: LaunchMode.externalApplication,
-                      );
-                      if (!ok)
+                      final ok = await launchPhoneDialer(normalized);
+                      if (!ok) {
                         AppToasts.showError(context, 'Could not open dialer');
+                      }
                     } catch (_) {
                       AppToasts.showError(context, 'Failed to start call');
                     }
@@ -670,31 +655,13 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                           return;
                         }
 
-                        final hasPlus = rawNumber.startsWith('+');
-                        final digitsOnly = rawNumber.replaceAll(
-                          RegExp(r'[^0-9]'),
-                          '',
-                        );
-                        final normalized =
-                            hasPlus ? '+$digitsOnly' : digitsOnly;
+                        final normalized = sanitizePhoneNumber(rawNumber);
                         if (normalized.isEmpty) {
                           AppToasts.showError(context, 'Invalid number');
                           return;
                         }
-
-                        final uri = Uri(scheme: 'tel', path: normalized);
-                        if (await canLaunchUrl(uri)) {
-                          final ok = await launchUrl(
-                            uri,
-                            mode: LaunchMode.externalApplication,
-                          );
-                          if (!ok) {
-                            AppToasts.showError(
-                              context,
-                              'Could not open dialer',
-                            );
-                          }
-                        } else {
+                        final ok = await launchPhoneDialer(normalized);
+                        if (!ok) {
                           AppToasts.showError(context, 'Could not open dialer');
                         }
                       } catch (_) {
@@ -1322,10 +1289,10 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
         ),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 15),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              CustomTextFields.textWithImage(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final compact = constraints.maxWidth < 340;
+              final cancelAction = CustomTextFields.textWithImage(
                 onTap: () {
                   if (rideInProgress) {
                     AppToasts.showInfoGlobal(
@@ -1366,14 +1333,8 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                     canCancel
                         ? AppColors.cancelRideColor
                         : AppColors.cancelRideColor.withOpacity(0.55),
-              ),
-              const SizedBox(width: 10),
-              const SizedBox(
-                height: 24,
-                child: VerticalDivider(color: Colors.grey, thickness: 1),
-              ),
-              const SizedBox(width: 10),
-              CustomTextFields.textWithImage(
+              );
+              final supportAction = CustomTextFields.textWithImage(
                 onTap: () {
                   if (!hasId) return;
                   Get.to(() => CustomerSupportListScreen(bookingId: id));
@@ -1383,14 +1344,8 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                 colors: AppColors.cancelRideColor,
                 imagePath: AppImages.support,
                 imageColors: AppColors.cancelRideColor,
-              ),
-              const SizedBox(width: 10),
-              const SizedBox(
-                height: 24,
-                child: VerticalDivider(color: Colors.grey, thickness: 1),
-              ),
-              const SizedBox(width: 10),
-              CustomTextFields.textWithImage(
+              );
+              final shareAction = CustomTextFields.textWithImage(
                 onTap: () {
                   if (!hasId) return;
                   final url =
@@ -1402,8 +1357,40 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                 colors: AppColors.cancelRideColor,
                 imagePath: AppImages.share,
                 imageColors: AppColors.cancelRideColor,
-              ),
-            ],
+              );
+
+              if (compact) {
+                return Wrap(
+                  alignment: WrapAlignment.center,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 16,
+                  runSpacing: 12,
+                  children: [cancelAction, supportAction, shareAction],
+                );
+              }
+
+              Widget scaled(Widget child) => Expanded(
+                child: Center(
+                  child: FittedBox(fit: BoxFit.scaleDown, child: child),
+                ),
+              );
+
+              return Row(
+                children: [
+                  scaled(cancelAction),
+                  const SizedBox(
+                    height: 24,
+                    child: VerticalDivider(color: Colors.grey, thickness: 1),
+                  ),
+                  scaled(supportAction),
+                  const SizedBox(
+                    height: 24,
+                    child: VerticalDivider(color: Colors.grey, thickness: 1),
+                  ),
+                  scaled(shareAction),
+                ],
+              );
+            },
           ),
         ),
       );

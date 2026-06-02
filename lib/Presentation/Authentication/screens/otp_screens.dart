@@ -8,10 +8,8 @@ import 'package:hopper/Core/Consents/app_texts.dart';
 import 'package:hopper/Core/Utility/app_buttons.dart';
 import 'package:hopper/Core/Utility/app_loader.dart';
 import 'package:hopper/Presentation/Authentication/controller/otp_controller.dart';
-import 'package:hopper/Presentation/Authentication/controller/location_gate_controller.dart';
-import 'package:hopper/Presentation/Authentication/screens/permission_screens.dart';
+import 'package:hopper/Presentation/Authentication/screens/otp_processing_screen.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
-import 'package:hopper/Presentation/OnBoarding/Widgets/custom_bottomnavigation.dart';
 import 'package:pin_code_fields/pin_code_fields.dart';
 import 'package:get/get.dart';
 
@@ -43,44 +41,44 @@ class _OtpScreensState extends State<OtpScreens> {
     } catch (_) {}
   }
 
-  Future<void> _goNextAfterOtp() async {
+  Future<void> _startOtpVerification() async {
     if (_navigating) return;
-    if (mounted) setState(() => _navigating = true);
+    if (otp.text.length != 4) {
+      errorController?.add(ErrorAnimationType.shake);
+      setState(() {
+        otpError = 'Please enter a valid 4-digit OTP';
+      });
+      return;
+    }
+    if (mounted) {
+      setState(() {
+        otpError = null;
+        _navigating = true;
+      });
+    }
     await _hideKeyboard();
-    await Future.delayed(const Duration(milliseconds: 40));
-
-    final gate = Get.find<LocationGateController>();
-    await gate.checkNow();
-
     if (!mounted) return;
-    final Widget next =
-        gate.isReady.value
-            ? const CommonBottomNavigation()
-            : const PermissionScreens();
-    await Navigator.of(context).pushReplacement(
+    await Navigator.of(context).push(
       PageRouteBuilder(
-        pageBuilder: (_, __, ___) => next,
-        transitionDuration: const Duration(milliseconds: 260),
-        reverseTransitionDuration: const Duration(milliseconds: 200),
+        pageBuilder:
+            (_, __, ___) => OtpProcessingScreen(
+              mobileNumber: widget.mobileNumber ?? '',
+              countryCode: widget.countyCode ?? '',
+              otp: otp.text,
+            ),
+        transitionDuration: const Duration(milliseconds: 180),
+        reverseTransitionDuration: const Duration(milliseconds: 160),
         transitionsBuilder: (_, animation, __, child) {
           final curved = CurvedAnimation(
             parent: animation,
             curve: Curves.easeOutCubic,
           );
-          return FadeTransition(
-            opacity: curved,
-            child: SlideTransition(
-              position:
-                  Tween<Offset>(
-                    begin: const Offset(0, 0.02),
-                    end: Offset.zero,
-                  ).animate(curved),
-              child: child,
-            ),
-          );
+          return FadeTransition(opacity: curved, child: child);
         },
       ),
     );
+    if (!mounted) return;
+    setState(() => _navigating = false);
   }
 
   @override
@@ -149,236 +147,169 @@ class _OtpScreensState extends State<OtpScreens> {
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
 
-                              children: [
-                                AppButtons.backButton(context: context),
-                                SizedBox(height: 25),
-                                CustomTextFields.textWithStyles700(
-                                  AppTexts.otpText,
-                                  text1:
-                                      ' ${widget.countyCode} ${widget.mobileNumber}',
-                                ),
-                                SizedBox(height: 30),
+                                  children: [
+                                    AppButtons.backButton(context: context),
+                                    SizedBox(height: 25),
+                                    CustomTextFields.textWithStyles700(
+                                      AppTexts.otpText,
+                                      text1:
+                                          ' ${widget.countyCode} ${widget.mobileNumber}',
+                                    ),
+                                    SizedBox(height: 30),
 
-                                Form(
-                                  key: formKey,
-                                  child: PinCodeTextField(
-                                    focusNode: otpFocusNode,
-                                    onCompleted: (value) async {
-                                      FocusScope.of(context).unfocus();
-                                      await Future.delayed(
-                                        Duration(milliseconds: 150),
-                                      );
-                                      otpController.otpVerify(
-                                        otp: otp.text,
-                                        onSuccess: () async {
-                                          // if (mounted) {
-                                          //   LocationPermission permission =
-                                          //       await Geolocator.checkPermission();
-                                          //   bool serviceEnabled =
-                                          //       await Geolocator.isLocationServiceEnabled();
-                                          //
-                                          //   if (serviceEnabled &&
-                                          //       (permission ==
-                                          //               LocationPermission
-                                          //                   .always ||
-                                          //           permission ==
-                                          //               LocationPermission
-                                          //                   .whileInUse)) {
-                                          //     // ✅ Already granted → go home
-                                          //     Navigator.pushReplacement(
-                                          //       context,
-                                          //       MaterialPageRoute(
-                                          //         builder:
-                                          //             (context) =>
-                                          //                 CommonBottomNavigation(),
-                                          //       ),
-                                          //     );
-                                          //   } else {
-                                          //     // 🚪 Not granted → show permission screen
-                                          //     Navigator.pushReplacement(
-                                          //       context,
-                                          //       MaterialPageRoute(
-                                          //         builder:
-                                          //             (context) =>
-                                          //                 PermissionScreens(),
-                                          //       ),
-                                          //     );
-                                          //   }
-                                          // }
-
-                                          await _goNextAfterOtp();
+                                    Form(
+                                      key: formKey,
+                                      child: PinCodeTextField(
+                                        focusNode: otpFocusNode,
+                                        onCompleted: (value) {
+                                          FocusScope.of(context).unfocus();
                                         },
-                                        onError: (error) {
-                                          setState(() {
-                                            otpError = error;
-                                          });
-                                        },
-                                        mobileNumber: widget.mobileNumber ?? '',
-                                        context: context,
-                                        countryCode: widget.countyCode ?? '',
-                                      );
-                                      otp.text = '';
-                                    },
 
-                                    autoFocus: otp.text.isEmpty,
+                                        autoFocus: otp.text.isEmpty,
 
-                                    appContext: context,
-                                    // pastedTextStyle: TextStyle(
-                                    //   color: Colors.green.shade600,
-                                    //   fontWeight: FontWeight.bold,
-                                    // ),
-                                    length: 4,
+                                        appContext: context,
+                                        // pastedTextStyle: TextStyle(
+                                        //   color: Colors.green.shade600,
+                                        //   fontWeight: FontWeight.bold,
+                                        // ),
+                                        length: 4,
 
-                                    // obscureText: true,
-                                    // obscuringCharacter: '*',
-                                    // obscuringWidget: const FlutterLogo(size: 24,),
-                                    blinkWhenObscuring: true,
-                                    mainAxisAlignment: MainAxisAlignment.start,
-                                    autoDisposeControllers: false,
-                                    animationType: AnimationType.fade,
+                                        // obscureText: true,
+                                        // obscuringCharacter: '*',
+                                        // obscuringWidget: const FlutterLogo(size: 24,),
+                                        blinkWhenObscuring: true,
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.start,
+                                        autoDisposeControllers: false,
+                                        animationType: AnimationType.fade,
 
-                                    // validator: (v) {
-                                    //   if (v == null || v.length != 4)
-                                    //     return 'Enter valid 4-digit OTP';
-                                    //   return null;
-                                    // },
-                                    pinTheme: PinTheme(
-                                      shape: PinCodeFieldShape.box,
-                                      borderRadius: BorderRadius.circular(5.sp),
-                                      fieldHeight: 48.sp,
-                                      fieldWidth: 48.sp,
-                                      selectedColor: AppColors.commonBlack,
-                                      activeColor: AppColors.containerColor,
-                                      activeFillColor: AppColors.containerColor,
-                                      inactiveColor: AppColors.containerColor,
-                                      selectedFillColor:
-                                          AppColors.containerColor,
-                                      fieldOuterPadding: EdgeInsets.symmetric(
-                                        horizontal: 5,
-                                      ),
-                                      inactiveFillColor:
-                                          AppColors.containerColor,
-                                    ),
-                                    cursorColor: Colors.black,
-                                    animationDuration: const Duration(
-                                      milliseconds: 300,
-                                    ),
-                                    enableActiveFill: true,
-                                    errorAnimationController: errorController,
-                                    controller: otp,
-                                    keyboardType: TextInputType.number,
-                                    boxShadows: const [
-                                      BoxShadow(
-                                        offset: Offset(0, 1),
-                                        color: Colors.black12,
-                                        blurRadius: 5,
-                                      ),
-                                    ],
-                                    // validator: (value) {
-                                    //   if (value == null || value.length != 4) {
-                                    //     return 'Please enter a valid 4-digit OTP';
-                                    //   }
-                                    //   return null;
-                                    // },
-                                    // onCompleted: (value) async {},
-                                    onChanged: (value) {
-                                      debugPrint(value);
-
-                                      verifyCode = value;
-                                      if (value.length == 4 &&
-                                          otpError != null) {
-                                        setState(() {
-                                          otpError = null;
-                                        });
-                                      }
-                                    },
-                                    beforeTextPaste: (text) {
-                                      debugPrint("Allowing to paste $text");
-                                      return true;
-                                    },
-                                  ),
-                                ),
-                                if (otpError != null)
-                                  Text(
-                                    otpError!,
-                                    style: TextStyle(
-                                      color: Colors.red,
-                                      fontSize: 14,
-                                    ),
-                                    textAlign: TextAlign.center,
-                                  ),
-                                SizedBox(height: 20),
-
-                                _start > 0
-                                    ? Text(
-                                      '${AppTexts.youWillGetCodeBySmsIn} (00:${_start.toString().padLeft(2, '0')})',
-                                    )
-                                    : GestureDetector(
-                                      onTap: _resendOtp,
-                                      child: Text(
-                                        AppTexts.resendCode,
-                                        style: TextStyle(
-                                          color: AppColors.resendBlue,
-                                          fontWeight: FontWeight.bold,
+                                        // validator: (v) {
+                                        //   if (v == null || v.length != 4)
+                                        //     return 'Enter valid 4-digit OTP';
+                                        //   return null;
+                                        // },
+                                        pinTheme: PinTheme(
+                                          shape: PinCodeFieldShape.box,
+                                          borderRadius: BorderRadius.circular(
+                                            5.sp,
+                                          ),
+                                          fieldHeight: 48.sp,
+                                          fieldWidth: 48.sp,
+                                          selectedColor: AppColors.commonBlack,
+                                          activeColor: AppColors.containerColor,
+                                          activeFillColor:
+                                              AppColors.containerColor,
+                                          inactiveColor:
+                                              AppColors.containerColor,
+                                          selectedFillColor:
+                                              AppColors.containerColor,
+                                          fieldOuterPadding:
+                                              EdgeInsets.symmetric(
+                                                horizontal: 5,
+                                              ),
+                                          inactiveFillColor:
+                                              AppColors.containerColor,
                                         ),
+                                        cursorColor: Colors.black,
+                                        animationDuration: const Duration(
+                                          milliseconds: 300,
+                                        ),
+                                        enableActiveFill: true,
+                                        errorAnimationController:
+                                            errorController,
+                                        controller: otp,
+                                        keyboardType: TextInputType.number,
+                                        boxShadows: const [
+                                          BoxShadow(
+                                            offset: Offset(0, 1),
+                                            color: Colors.black12,
+                                            blurRadius: 5,
+                                          ),
+                                        ],
+                                        // validator: (value) {
+                                        //   if (value == null || value.length != 4) {
+                                        //     return 'Please enter a valid 4-digit OTP';
+                                        //   }
+                                        //   return null;
+                                        // },
+                                        // onCompleted: (value) async {},
+                                        onChanged: (value) {
+                                          debugPrint(value);
+
+                                          verifyCode = value;
+                                          if (value.length == 4 &&
+                                              otpError != null) {
+                                            setState(() {
+                                              otpError = null;
+                                            });
+                                          }
+                                        },
+                                        beforeTextPaste: (text) {
+                                          debugPrint("Allowing to paste $text");
+                                          return true;
+                                        },
                                       ),
                                     ),
-                              ],
+                                    if (otpError != null)
+                                      Text(
+                                        otpError!,
+                                        style: TextStyle(
+                                          color: Colors.red,
+                                          fontSize: 14,
+                                        ),
+                                        textAlign: TextAlign.center,
+                                      ),
+                                    SizedBox(height: 20),
+
+                                    _start > 0
+                                        ? Text(
+                                          '${AppTexts.youWillGetCodeBySmsIn} (00:${_start.toString().padLeft(2, '0')})',
+                                        )
+                                        : GestureDetector(
+                                          onTap: _resendOtp,
+                                          child: Text(
+                                            AppTexts.resendCode,
+                                            style: TextStyle(
+                                              color: AppColors.resendBlue,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            AppButtons.button(
+                              onTap: () {
+                                _startOtpVerification();
+
+                                // if (otp.text.length != 4) {
+                                //   errorController?.add(ErrorAnimationType.shake);
+                                //   setState(() {
+                                //     otpError = 'Please enter a valid 4-digit OTP';
+                                //     isButtonDisabled = false;
+                                //   });
+                                //   return;
+                                // }
+                              },
+                              text: AppTexts.verify,
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (_navigating)
+                        Positioned.fill(
+                          child: AbsorbPointer(
+                            absorbing: true,
+                            child: Container(
+                              color: Colors.white54,
+                              alignment: Alignment.center,
+                              child: AppLoader.appLoader(),
                             ),
                           ),
                         ),
-                        AppButtons.button(
-                          onTap: () {
-                            if (otp.text.length != 4) {
-                              errorController?.add(ErrorAnimationType.shake);
-                              setState(() {
-                                otpError = 'Please enter a valid 4-digit OTP';
-                                isButtonDisabled = false;
-                              });
-                              return;
-                            } else {
-                              otpController.otpVerify(
-                                onSuccess: () async => _goNextAfterOtp(),
-                                onError: (error) {
-                                  setState(() {
-                                    otpError = error;
-                                  });
-                                },
-
-                                mobileNumber: widget.mobileNumber ?? '',
-                                context: context,
-                                countryCode: widget.countyCode ?? '',
-                                otp: otp.text,
-                              );
-                            }
-
-                            // if (otp.text.length != 4) {
-                            //   errorController?.add(ErrorAnimationType.shake);
-                            //   setState(() {
-                            //     otpError = 'Please enter a valid 4-digit OTP';
-                            //     isButtonDisabled = false;
-                            //   });
-                            //   return;
-                            // }
-                          },
-                          text: AppTexts.verify,
-                        ),
-                      ],
-                    ),
+                    ],
                   ),
-                  if (_navigating)
-                    Positioned.fill(
-                      child: AbsorbPointer(
-                        absorbing: true,
-                        child: Container(
-                          color: Colors.white54,
-                          alignment: Alignment.center,
-                          child: AppLoader.appLoader(),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
         ),
       ),
     );

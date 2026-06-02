@@ -74,6 +74,33 @@ bool _isPaymentPending(ActiveBookingData ride) {
       st.contains('PENDING');
 }
 
+bool _isPaymentSettled(ActiveBookingData ride) {
+  final ps = (ride.paymentStatus ?? '').toString().trim().toUpperCase();
+  if (ps.isEmpty) return false;
+  return ps == 'PAID' ||
+      ps == 'COMPLETED' ||
+      ps == 'SUCCESS' ||
+      ps == 'SUCCEEDED' ||
+      ps == 'CAPTURED' ||
+      ps.contains('PAID') ||
+      ps.contains('SUCCESS');
+}
+
+bool _isCompletedStatus(ActiveBookingData ride) {
+  final st = ride.status.trim().toUpperCase();
+  return st == 'COMPLETED' ||
+      st == 'COMPLETE' ||
+      st == 'FINISHED' ||
+      st.contains('COMPLETED') ||
+      st.contains('FINISHED');
+}
+
+bool _isCustomerTerminalRide(ActiveBookingData ride) {
+  if (ride.cancelled) return true;
+  if (_isCompletedStatus(ride)) return true;
+  return ride.destinationReached && _isPaymentSettled(ride);
+}
+
 AddressModel _activeBookingToAddress({
   required ActiveBookingData ride,
   required bool pickup,
@@ -250,8 +277,7 @@ class _HomeScreensState extends State<HomeScreens>
     });
 
     try {
-      const url =
-          'https://bk.myhoppr.com/api/customer/advertisement-banners';
+      const url = 'https://bk.myhoppr.com/api/customer/advertisement-banners';
       final res = await Request.sendGetRequest(
         url,
         {'placement': 'HOME_HERO', 'limit': 5},
@@ -454,7 +480,7 @@ class _HomeScreensState extends State<HomeScreens>
             response.success &&
             response.hasActiveBooking &&
             data != null &&
-            !data.cancelled;
+            !_isCustomerTerminalRide(data);
 
         setState(() {
           _checkingActiveRide = false;
@@ -486,6 +512,17 @@ class _HomeScreensState extends State<HomeScreens>
   Future<void> _resumeActiveRide() async {
     final ride = _activeRide;
     if (ride == null) return;
+
+    if (_isCustomerTerminalRide(ride)) {
+      if (mounted) {
+        setState(() {
+          _activeRide = null;
+          _lastDismissedBookingId = null;
+          _showActiveRideCard.value = false;
+        });
+      }
+      return;
+    }
 
     debugPrint(
       'ResumeActiveRide bookingType=${ride.bookingType} '
@@ -811,11 +848,11 @@ class _HomeScreensState extends State<HomeScreens>
                 return SizedBox(
                   key: _mapKey,
                   child: GoogleMap(
-                     initialCameraPosition: CameraPosition(
-                       target: pos,
-                       // Nearby drivers on pickup screen.
-                       zoom: 15.5,
-                     ),
+                    initialCameraPosition: CameraPosition(
+                      target: pos,
+                      // Nearby drivers on pickup screen.
+                      zoom: 15.5,
+                    ),
                     // Keep padding zero so map projection matches overlay pin coordinates.
                     padding: EdgeInsets.zero,
                     markers: mapC.markers.toSet(),
@@ -848,10 +885,10 @@ class _HomeScreensState extends State<HomeScreens>
                     myLocationButtonEnabled: false,
                     buildingsEnabled: false,
                     tiltGesturesEnabled: false,
-                     minMaxZoomPreference: const MinMaxZoomPreference(
+                    minMaxZoomPreference: const MinMaxZoomPreference(
                       14.0,
                       18.0,
-                     ),
+                    ),
                     mapToolbarEnabled: false,
                     zoomControlsEnabled: false,
                     gestureRecognizers: {

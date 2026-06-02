@@ -251,8 +251,28 @@ class OrderConfirmController extends GetxController
   double? _pendingDriverMarkerBearing;
 
   bool _isRideStartedStatus(String status) {
+    return _isDropPhaseStatus(status);
+  }
+
+  bool _isDropPhaseStatus(String status) {
     final s = status.trim().toUpperCase();
-    return s == 'STARTED' || s == 'RIDE_STARTED' || s == 'TRIP_STARTED';
+    return s == 'STARTED' ||
+        s == 'RIDE_STARTED' ||
+        s == 'TRIP_STARTED' ||
+        s == 'PICKED_UP' ||
+        s == 'ON_TRIP' ||
+        s == 'IN_PROGRESS' ||
+        s == 'RIDE_IN_PROGRESS' ||
+        s == 'TRIP_IN_PROGRESS';
+  }
+
+  bool _isCompletedStatus(String status) {
+    final s = status.trim().toUpperCase();
+    return s == 'COMPLETED' ||
+        s == 'RIDE_COMPLETED' ||
+        s == 'TRIP_COMPLETED' ||
+        s == 'DESTINATION_REACHED' ||
+        s == 'DRIVER_REACHED_DESTINATION';
   }
 
   // =================================================================
@@ -262,6 +282,9 @@ class OrderConfirmController extends GetxController
   LatLng? _displayPos;
   LatLng? _emaPos;
   double _lastBearing = 0.0;
+  DateTime _lastAcceptedDriverLocationTs = DateTime.fromMillisecondsSinceEpoch(
+    0,
+  );
 
   // =================================================================
   //                        POLYLINE CONTROL
@@ -346,9 +369,7 @@ class OrderConfirmController extends GetxController
 
   Future<void> _loadMapStyle() async {
     try {
-      mapStyle = await rootBundle.loadString(
-        'assets/map_style.json',
-      );
+      mapStyle = await rootBundle.loadString('assets/map_style.json');
     } catch (_) {}
   }
 
@@ -529,7 +550,7 @@ class OrderConfirmController extends GetxController
 
     try {
       carIcon = await CompactMarkerIcons.assetContained(
-        assetPath: AppImages.carHop,
+        assetPath: AppImages.carImage,
         sizeDp: MapUiDefaults.vehicleBadgeDiameterDp,
         dpr: dpr,
       );
@@ -541,7 +562,7 @@ class OrderConfirmController extends GetxController
 
     try {
       bikeIcon = await CompactMarkerIcons.assetContained(
-        assetPath: AppImages.packageBike,
+        assetPath: AppImages.bikeImage,
         sizeDp: MapUiDefaults.vehicleBadgeDiameterDp,
         dpr: dpr,
       );
@@ -849,7 +870,8 @@ class OrderConfirmController extends GetxController
       _updateRideMetrics(data);
       latestRideStatus.value =
           latestStatus.isEmpty ? 'SEARCHING' : latestStatus;
-      final joinedRideStarted = _isRideStartedStatus(latestStatus);
+      final joinedRideStarted = _isDropPhaseStatus(latestStatus);
+      final joinedRideCompleted = _isCompletedStatus(latestStatus);
       final hasAssignedDriver =
           driverAccepted ||
           joinedRideStarted ||
@@ -869,6 +891,12 @@ class OrderConfirmController extends GetxController
       if (joinedRideStarted) {
         driverStartedRide.value = true;
         _seedStaticMarkers(forceRecreate: false);
+      }
+      if (joinedRideCompleted) {
+        driverStartedRide.value = true;
+        destinationReached.value = true;
+        nearDestination.value = true;
+        _clearActiveRoute();
       }
 
       // Enforce correct marker visibility even if server status is noisy.
@@ -897,16 +925,28 @@ class OrderConfirmController extends GetxController
     socketService.on('driver-location', (data) {
       if (isClosed) return;
 
-      final lat = _toDouble(data['latitude']);
-      final lng = _toDouble(data['longitude']);
+      final lat = _toDouble(data['latitude'] ?? data['lat']);
+      final lng = _toDouble(data['longitude'] ?? data['lng']);
       if (lat == null || lng == null) {
         AppLogger.log.e("Invalid driver-location payload: $data");
         return;
       }
+      final rawTs = _parseServerTime(data['timestamp']);
+      if (!_isFreshTrackingTimestamp(rawTs)) {
+        if (kDebugMode) {
+          AppLogger.log.w(
+            'Ignoring stale ride driver-location ts=$rawTs lat=$lat lng=$lng',
+          );
+        }
+        return;
+      }
+      if (rawTs.isBefore(_lastAcceptedDriverLocationTs)) {
+        return;
+      }
+      _lastAcceptedDriverLocationTs = rawTs;
+
       final newPos = LatLng(lat, lng);
       driverLocation.value = newPos;
-
-      final rawTs = _parseServerTime(data['timestamp']);
 
       final srvBearing = _toDouble(data['bearing']);
       final liveRideType =
@@ -917,15 +957,33 @@ class OrderConfirmController extends GetxController
       final latestStatus =
           (data['latestStatus'] ?? '').toString().toUpperCase();
       _updateRideMetrics(data);
-      final derivedRideStarted = _isRideStartedStatus(latestStatus);
+      final derivedRideStarted = _isDropPhaseStatus(latestStatus);
+      final derivedRideCompleted = _isCompletedStatus(latestStatus);
       final effectiveStatus =
-          latestStatus.trim().isNotEmpty ? latestStatus : latestRideStatus.value;
+          latestStatus.trim().isNotEmpty
+              ? latestStatus
+              : latestRideStatus.value;
 
       if (derivedRideStarted && !driverStartedRide.value) {
         driverStartedRide.value = true;
         _seedStaticMarkers(forceRecreate: false);
         _refreshPulseCircles();
-        _updatePolylinesForStatus(effectiveStatus, driverPos: newPos, force: true);
+        _updatePolylinesForStatus(
+          effectiveStatus,
+          driverPos: newPos,
+          force: true,
+        );
+      }
+      if (derivedRideCompleted) {
+        if (!driverStartedRide.value) {
+          driverStartedRide.value = true;
+        }
+        destinationReached.value = true;
+        nearDestination.value = true;
+        etaChipText.value = 'Arrived at destination';
+        _seedStaticMarkers(forceRecreate: false);
+        _refreshPulseCircles();
+        _clearActiveRoute();
       }
       // first point -> show immediately
       if (_displayPos == null) {
@@ -938,7 +996,11 @@ class OrderConfirmController extends GetxController
         _fitDriverAndPickupOnce();
 
         // polyline driver->pickup once
-        _updatePolylinesForStatus(effectiveStatus, driverPos: newPos, force: true);
+        _updatePolylinesForStatus(
+          effectiveStatus,
+          driverPos: newPos,
+          force: true,
+        );
         return;
       }
 
@@ -991,9 +1053,10 @@ class OrderConfirmController extends GetxController
 
       // redraw pickup->drop immediately (once)
       if (status && customerToLatLng != null) {
-        final polyOrigin =
-            _emaPos ?? _displayPos ?? customerLatLng ?? customerToLatLng!;
-        _maybeRerouteFromDriver(polyOrigin, force: true);
+        final polyOrigin = _emaPos ?? _displayPos;
+        if (polyOrigin != null) {
+          _maybeRerouteFromDriver(polyOrigin, force: true);
+        }
 
         // Ola like: fit pickup+drop after ride started (skip if user manually
         // took over the camera via focus/zoom/drag).
@@ -1052,6 +1115,17 @@ class OrderConfirmController extends GetxController
     } catch (_) {
       return DateTime.now();
     }
+  }
+
+  bool _isFreshTrackingTimestamp(
+    DateTime ts, {
+    Duration maxAge = const Duration(seconds: 20),
+    Duration maxFutureSkew = const Duration(seconds: 12),
+  }) {
+    final now = DateTime.now();
+    if (ts.isAfter(now.add(maxFutureSkew))) return false;
+    if (now.difference(ts) > maxAge) return false;
+    return true;
   }
 
   double? _toDouble(dynamic value) {
@@ -1657,10 +1731,7 @@ class OrderConfirmController extends GetxController
   // =================================================================
   //                           POLYLINES
   // =================================================================
-  String _routeKey({
-    required bool toDrop,
-    required LatLng destination,
-  }) {
+  String _routeKey({required bool toDrop, required LatLng destination}) {
     return '${toDrop ? 'toDrop' : 'toPickup'}|dest:${destination.latitude.toStringAsFixed(5)},${destination.longitude.toStringAsFixed(5)}';
   }
 
@@ -1687,20 +1758,23 @@ class OrderConfirmController extends GetxController
 
   String _routeSig(List<LatLng> pts) {
     if (pts.length < 2) return 'len:${pts.length}';
-    final idxs = <int>{
-      0,
-      pts.length - 1,
-      (pts.length * 1 ~/ 4),
-      (pts.length * 2 ~/ 4),
-      (pts.length * 3 ~/ 4),
-    }.toList()
-      ..sort();
+    final idxs =
+        <int>{
+            0,
+            pts.length - 1,
+            (pts.length * 1 ~/ 4),
+            (pts.length * 2 ~/ 4),
+            (pts.length * 3 ~/ 4),
+          }.toList()
+          ..sort();
 
     final sb = StringBuffer('len:${pts.length}');
     for (final i in idxs) {
       final p = pts[i.clamp(0, pts.length - 1)];
       sb.write('|');
-      sb.write('${p.latitude.toStringAsFixed(5)},${p.longitude.toStringAsFixed(5)}');
+      sb.write(
+        '${p.latitude.toStringAsFixed(5)},${p.longitude.toStringAsFixed(5)}',
+      );
     }
     return sb.toString();
   }
@@ -1859,7 +1933,9 @@ class OrderConfirmController extends GetxController
       final cached = _routeCache[resolvedCacheKey];
       if (cached != null && cached.length >= 2) {
         if (kDebugMode) {
-          AppLogger.log.i('🧭 route cache hit: $resolvedCacheKey (${cached.length} pts)');
+          AppLogger.log.i(
+            '🧭 route cache hit: $resolvedCacheKey (${cached.length} pts)',
+          );
         }
         final sig = _routeSig(cached);
         if (sig != _activeRouteSig) {
@@ -1932,7 +2008,6 @@ class OrderConfirmController extends GetxController
   // =================================================================
   //                         MATH
   // =================================================================
-
 
   // =================================================================
   //                         EXPOSED

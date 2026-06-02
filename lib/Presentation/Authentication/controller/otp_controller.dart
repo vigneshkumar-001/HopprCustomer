@@ -48,15 +48,17 @@ class OtpController extends GetxController {
           await prefs.setString('customer_Id', response.data.customer.id);
 
           accessToken = response.data.token;
-          this.customerId = response.data.customer.id;
+          customerId = response.data.customer.id;
           AppLogger.log.i('Response = $accessToken');
           final savedToken = prefs.getString('token');
           final savedCustomerId = prefs.getString('customer_Id');
           AppLogger.log.i('token = $savedToken');
           AppLogger.log.i('token = $savedCustomerId');
+          isLoading.value = false;
+          onSuccess();
           final fcmToken = prefs.getString('fcmToken');
           if (fcmToken != null && fcmToken.isNotEmpty) {
-            await sendFcmToken(fcmToken: fcmToken);
+            unawaited(sendFcmToken(fcmToken: fcmToken));
           }
 
           final profileController =
@@ -66,9 +68,6 @@ class OtpController extends GetxController {
           profileController.clearSession();
           unawaited(profileController.getProfileData());
           unawaited(controller.getRideHistory());
-
-          isLoading.value = false;
-          onSuccess();
           // Navigator.push(
           //   context,
           //   MaterialPageRoute(
