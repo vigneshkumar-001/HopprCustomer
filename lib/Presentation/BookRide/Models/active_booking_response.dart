@@ -1,3 +1,5 @@
+import 'package:hopper/Presentation/BookRide/Models/pricing_insights_model.dart';
+
 class ActiveBookingResponse {
   final bool success;
   final bool hasActiveBooking;
@@ -60,6 +62,7 @@ class ActiveBookingData {
   final bool rideStarted;
   final bool cancelled;
   final ActiveBookingVehicle? vehicle;
+  final PricingInsights? pricingInsights;
 
   ActiveBookingData({
     required this.bookingId,
@@ -97,6 +100,7 @@ class ActiveBookingData {
     required this.rideStarted,
     required this.cancelled,
     this.vehicle,
+    this.pricingInsights,
   });
 
   static double? _parseNum(dynamic v) {
@@ -197,6 +201,12 @@ class ActiveBookingData {
           json['vehicle'] is Map<String, dynamic>
               ? ActiveBookingVehicle.fromJson(json['vehicle'])
               : null,
+      pricingInsights:
+          json['pricingInsights'] is Map<String, dynamic>
+              ? PricingInsights.fromJson(json['pricingInsights'])
+              : (breakdown['pricingInsights'] is Map<String, dynamic>
+                  ? PricingInsights.fromJson(breakdown['pricingInsights'])
+                  : null),
     );
   }
 }

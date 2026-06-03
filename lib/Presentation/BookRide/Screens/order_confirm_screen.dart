@@ -295,16 +295,6 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                 width: double.infinity,
                 child: RepaintBoundary(
                   child: Obx(() {
-                    final raw = c.etaChipText.value;
-                    final pieces =
-                        raw
-                            .split('|')
-                            .map((e) => e.trim())
-                            .where((e) => e.isNotEmpty)
-                            .toList();
-                    final etaText =
-                        pieces.isNotEmpty ? pieces.first : raw.trim();
-                    final distText = pieces.length >= 2 ? pieces.last : '';
                     final effectiveVehicleType =
                         c.cartypeFromServer.value.trim().isNotEmpty
                             ? c.cartypeFromServer.value
@@ -325,8 +315,8 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                           c.driverStartedRide.value
                               ? RideMapMode.toDrop
                               : RideMapMode.toPickup,
-                      etaText: c.isDriverConfirmed.value ? etaText : '',
-                      distanceText: c.isDriverConfirmed.value ? distText : '',
+                      etaText: '',
+                      distanceText: '',
                       statusText:
                           c.driverStartedRide.value
                               ? 'Ride in progress'
@@ -337,18 +327,6 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                       mapPadding: const EdgeInsets.only(bottom: 210),
                     );
                   }),
-                ),
-              ),
-
-              Positioned(
-                top: 350,
-                right: 10,
-                child: FloatingActionButton(
-                  heroTag: 'ride_my_location_${widget.bookingId}',
-                  mini: true,
-                  backgroundColor: Colors.white,
-                  onPressed: () => _mapKey.currentState?.recenter(),
-                  child: const Icon(Icons.my_location, color: Colors.black),
                 ),
               ),
 
@@ -428,17 +406,16 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                     onPressed: () async {
                       if (c.focusDriverOnNextTap.value) {
                         c.focusDriverOnNextTap.value = false;
-                        await _mapKey.currentState?.fitRoute(padding: 120);
+                        await _mapKey.currentState?.fitRoute(padding: 170);
                         return;
                       }
                       c.focusDriverOnNextTap.value = true;
                       await _mapKey.currentState?.recenter();
                     },
                     child: Icon(
-                      // 1st tap focuses driver, next tap fits bounds.
                       c.focusDriverOnNextTap.value
                           ? Icons.fit_screen
-                          : Icons.navigation,
+                          : Icons.my_location,
                       color: Colors.black,
                     ),
                   ),
@@ -560,6 +537,12 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
           ),
           const SizedBox(height: 6),
           Center(child: _rideTypePill(shared: false)),
+          if (c.isDriverConfirmed.value &&
+              !c.destinationReached.value &&
+              c.etaChipText.value.trim().isNotEmpty) ...[
+            const SizedBox(height: 10),
+            _tripInfoInline(),
+          ],
           const SizedBox(height: 12),
           _rideStatusTimeline(),
           if (c.otp.value.isNotEmpty &&
@@ -764,130 +747,44 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
     });
   }
 
-  Widget _etaChip() {
+  Widget _tripInfoInline() {
     final raw = c.etaChipText.value;
     final pieces =
         raw.split('|').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
     final etaText = pieces.isNotEmpty ? pieces.first : raw.trim();
     final distText = pieces.length >= 2 ? pieces.last : '';
 
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(22),
-        boxShadow: const [
-          BoxShadow(
-            color: Colors.black12,
-            blurRadius: 10,
-            offset: Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Flexible(
-            child: Text(
-              etaText,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
-            ),
-          ),
-          if (distText.isNotEmpty) ...[
-            const SizedBox(width: 10),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.06),
-                borderRadius: BorderRadius.circular(18),
-              ),
-              child: Text(
-                distText,
-                style: const TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
+    if (etaText.isEmpty && distText.isEmpty) return const SizedBox.shrink();
+
+    Widget chip(IconData icon, String text) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: Colors.black.withOpacity(0.05),
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 16, color: Colors.black),
+            const SizedBox(width: 6),
+            Text(
+              text,
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800),
             ),
           ],
-          const SizedBox(width: 10),
-          const Icon(Icons.timer_outlined, size: 18, color: Colors.black),
-        ],
-      ),
-    );
-  }
+        ),
+      );
+    }
 
-  Future<void> _showEtaDistanceSheet() async {
-    final raw = c.etaChipText.value;
-    final pieces =
-        raw.split('|').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
-    final etaText = pieces.isNotEmpty ? pieces.first : raw.trim();
-    final distText = pieces.length >= 2 ? pieces.last : '';
-
-    if (etaText.isEmpty && distText.isEmpty) return;
-
-    await showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
-      ),
-      builder: (context) {
-        return SafeArea(
-          top: false,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 10, 16, 18),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Trip info',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
-                ),
-                const SizedBox(height: 12),
-                if (etaText.isNotEmpty)
-                  Row(
-                    children: [
-                      const Icon(Icons.timer_outlined, size: 18),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          etaText,
-                          style: const TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                if (etaText.isNotEmpty && distText.isNotEmpty)
-                  const SizedBox(height: 10),
-                if (distText.isNotEmpty)
-                  Row(
-                    children: [
-                      const Icon(Icons.route_rounded, size: 18),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          distText,
-                          style: const TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-              ],
-            ),
-          ),
-        );
-      },
+    return Wrap(
+      spacing: 10,
+      runSpacing: 8,
+      alignment: WrapAlignment.center,
+      children: [
+        if (etaText.isNotEmpty) chip(Icons.timer_outlined, etaText),
+        if (distText.isNotEmpty) chip(Icons.route_rounded, distText),
+      ],
     );
   }
 

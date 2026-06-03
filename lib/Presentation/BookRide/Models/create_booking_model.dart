@@ -1,3 +1,5 @@
+import 'package:hopper/Presentation/BookRide/Models/pricing_insights_model.dart';
+
 class CreateBookingModel {
   final int status;
   final BookingData data;
@@ -18,11 +20,7 @@ class CreateBookingModel {
   }
 
   Map<String, dynamic> toJson() {
-    return {
-      "status": status,
-      "data": data.toJson(),
-      "message": message,
-    };
+    return {"status": status, "data": data.toJson(), "message": message};
   }
 }
 
@@ -70,6 +68,7 @@ class BookingData {
   final String updatedAt;
   final int v;
   final double walletAmount;
+  final PricingInsights? pricingInsights;
 
   BookingData({
     required this.bookingType,
@@ -115,55 +114,73 @@ class BookingData {
     required this.updatedAt,
     required this.v,
     required this.walletAmount,
+    this.pricingInsights,
   });
 
   factory BookingData.fromJson(Map<String, dynamic> json) {
+    final Map<String, dynamic> breakdown =
+        (json['fareBreakdown'] is List &&
+                (json['fareBreakdown'] as List).isNotEmpty &&
+                (json['fareBreakdown'] as List).first is Map<String, dynamic>)
+            ? ((json['fareBreakdown'] as List).first as Map<String, dynamic>)
+            : const <String, dynamic>{};
+
     return BookingData(
       bookingType: json['bookingType']?.toString() ?? "",
-      bookingCustomerlocation: BookingCustomerLocation.fromJson(json['bookingCustomerlocation'] ?? {}),
+      bookingCustomerlocation: BookingCustomerLocation.fromJson(
+        json['bookingCustomerlocation'] ?? {},
+      ),
       carType: json['carType']?.toString() ?? "",
       bookingId: json['bookingId']?.toString() ?? "",
-      fromLatitude: (json['fromLatitude'] ?? 0).toDouble(),
-      fromLongitude: (json['fromLongitude'] ?? 0).toDouble(),
-      toLatitude: (json['toLatitude'] ?? 0).toDouble(),
-      toLongitude: (json['toLongitude'] ?? 0).toDouble(),
+      fromLatitude: _asDouble(json['fromLatitude']),
+      fromLongitude: _asDouble(json['fromLongitude']),
+      toLatitude: _asDouble(json['toLatitude']),
+      toLongitude: _asDouble(json['toLongitude']),
       customerId: json['customerId']?.toString() ?? "",
       sharedBooking: json['sharedBooking'] ?? false,
-      sharedCount: json['sharedCount'] ?? 0,
-      amount: (json['amount'] ?? 0).toDouble(),
+      sharedCount: _asInt(json['sharedCount']),
+      amount: _asDouble(json['amount']),
       status: json['status']?.toString() ?? "",
       otpVerified: json['otpVerified'] ?? false,
       scheduled: json['scheduled'] ?? false,
       trackingEnabled: json['trackingEnabled'] ?? false,
-      baseFare: (json['baseFare'] ?? 0).toDouble(),
-      serviceFare: (json['serviceFare'] ?? 0).toDouble(),
-      distance: (json['distance'] ?? 0).toDouble(),
-      duration: json['duration'] ?? 0,
-      driverDistance: (json['driverDistance'] ?? 0).toDouble(),
-      total: (json['total'] ?? 0).toDouble(),
+      baseFare: _asDouble(json['baseFare']),
+      serviceFare: _asDouble(json['serviceFare']),
+      distance: _asDouble(json['distance']),
+      duration: _asInt(json['duration']),
+      driverDistance: _asDouble(json['driverDistance']),
+      total: _asDouble(json['total']),
       pickupAddress: json['pickupAddress']?.toString() ?? "",
       dropAddress: json['dropAddress']?.toString() ?? "",
       rideType: json['rideType']?.toString() ?? "",
       serviceLocationId: json['serviceLocationId']?.toString() ?? "",
       serviceLocationName: json['serviceLocationName']?.toString() ?? "",
-      maxWeight: (json['maxWeight'] ?? 0).toDouble(),
+      maxWeight: _asDouble(json['maxWeight']),
       specificLocation: json['specificLocation'] ?? false,
-      distanceFareAmount: (json['distanceFareAmount'] ?? 0).toDouble(),
-      timeFareAmount: (json['timeFareAmount'] ?? 0).toDouble(),
-      surgeMultiplier: (json['surgeMultiplier'] ?? 0).toDouble(),
-      surgeFareAmount: (json['surgeFareAmount'] ?? 0).toDouble(),
-      bookingFeeAmount: (json['bookingFeeAmount'] ?? 0).toDouble(),
-      driverReceivedAmount: (json['driverReceivedAmount'] ?? 0).toDouble(),
-      fareBreakdown: (json['fareBreakdown'] as List? ?? [])
-          .map((e) => FareBreakdown.fromJson(e))
-          .toList(),
+      distanceFareAmount: _asDouble(json['distanceFareAmount']),
+      timeFareAmount: _asDouble(json['timeFareAmount']),
+      surgeMultiplier: _asDouble(json['surgeMultiplier']),
+      surgeFareAmount: _asDouble(json['surgeFareAmount']),
+      bookingFeeAmount: _asDouble(json['bookingFeeAmount']),
+      driverReceivedAmount: _asDouble(json['driverReceivedAmount']),
+      fareBreakdown:
+          (json['fareBreakdown'] as List? ?? [])
+              .whereType<Map<String, dynamic>>()
+              .map(FareBreakdown.fromJson)
+              .toList(),
       id: json['_id']?.toString() ?? "",
       otpGeneratedAt: json['otpGeneratedAt']?.toString() ?? "",
       rideStatusHistory: json['rideStatusHistory'] ?? [],
       createdAt: json['createdAt']?.toString() ?? "",
       updatedAt: json['updatedAt']?.toString() ?? "",
-      v: json['__v'] ?? 0,
-      walletAmount: (json['walletAmount'] ?? 0).toDouble(),
+      v: _asInt(json['__v']),
+      walletAmount: _asDouble(json['walletAmount']),
+      pricingInsights:
+          json['pricingInsights'] is Map<String, dynamic>
+              ? PricingInsights.fromJson(json['pricingInsights'])
+              : (breakdown['pricingInsights'] is Map<String, dynamic>
+                  ? PricingInsights.fromJson(breakdown['pricingInsights'])
+                  : null),
     );
   }
 
@@ -212,6 +229,7 @@ class BookingData {
       "updatedAt": updatedAt,
       "__v": v,
       "walletAmount": walletAmount,
+      "pricingInsights": pricingInsights?.toJson(),
     };
   }
 }
@@ -220,25 +238,19 @@ class BookingCustomerLocation {
   final String type;
   final List<double> coordinates;
 
-  BookingCustomerLocation({
-    required this.type,
-    required this.coordinates,
-  });
+  BookingCustomerLocation({required this.type, required this.coordinates});
 
   factory BookingCustomerLocation.fromJson(Map<String, dynamic> json) {
     return BookingCustomerLocation(
       type: json['type']?.toString() ?? "",
       coordinates: List<double>.from(
-        (json['coordinates'] ?? []).map((x) => (x ?? 0).toDouble()),
+        (json['coordinates'] ?? []).map((x) => _asDouble(x)),
       ),
     );
   }
 
   Map<String, dynamic> toJson() {
-    return {
-      "type": type,
-      "coordinates": coordinates,
-    };
+    return {"type": type, "coordinates": coordinates};
   }
 }
 
@@ -289,23 +301,25 @@ class FareBreakdown {
     return FareBreakdown(
       locationId: json['locationId']?.toString() ?? '',
       locationName: json['locationName']?.toString() ?? '',
-      baseFare: (json['baseFare'] ?? 0).toDouble(),
-      rideDistanceInKm: (json['RideDistanceInKm'] ?? 0).toDouble(),
-      perKilometerRate: (json['perKilometerRate'] ?? 0).toDouble(),
-      distanceFare: (json['distanceFare'] ?? 0).toDouble(),
-      rideDuration: json['Rideduration'] ?? 0,
-      timeFareAmount: (json['timeFareAmount'] ?? 0).toDouble(),
-      timeFare: (json['timeFare'] ?? 0).toDouble(),
-      driverDistancePerKm: (json['driverDistancePerKm'] ?? 0).toDouble(),
-      pickupFareAmount: (json['pickupFareAmount'] ?? 0).toDouble(),
-      pickupFare: (json['pickupFare'] ?? 0).toDouble(),
-      bookingFee: (json['bookingFee'] ?? 0).toDouble(),
-      subtotal: (json['subtotal'] ?? 0).toDouble(),
-      surgeFareDetails: SurgeFareDetails.fromJson(json['surgeFareDetails'] ?? {}),
-      commissionPercent: (json['commissionPercent'] ?? 0).toDouble(),
-      commissionAmount: (json['commissionAmount'] ?? 0).toDouble(),
-      estimatedPrice: (json['estimatedPrice'] ?? 0).toDouble(),
-      driverEarnings: (json['driverEarnings'] ?? 0).toDouble(),
+      baseFare: _asDouble(json['baseFare']),
+      rideDistanceInKm: _asDouble(json['RideDistanceInKm']),
+      perKilometerRate: _asDouble(json['perKilometerRate']),
+      distanceFare: _asDouble(json['distanceFare']),
+      rideDuration: _asInt(json['Rideduration']),
+      timeFareAmount: _asDouble(json['timeFareAmount']),
+      timeFare: _asDouble(json['timeFare']),
+      driverDistancePerKm: _asDouble(json['driverDistancePerKm']),
+      pickupFareAmount: _asDouble(json['pickupFareAmount']),
+      pickupFare: _asDouble(json['pickupFare']),
+      bookingFee: _asDouble(json['bookingFee']),
+      subtotal: _asDouble(json['subtotal']),
+      surgeFareDetails: SurgeFareDetails.fromJson(
+        json['surgeFareDetails'] ?? {},
+      ),
+      commissionPercent: _asDouble(json['commissionPercent']),
+      commissionAmount: _asDouble(json['commissionAmount']),
+      estimatedPrice: _asDouble(json['estimatedPrice']),
+      driverEarnings: _asDouble(json['driverEarnings']),
     );
   }
 
@@ -355,13 +369,13 @@ class SurgeFareDetails {
 
   factory SurgeFareDetails.fromJson(Map<String, dynamic> json) {
     return SurgeFareDetails(
-      customerPays: (json['customerPays'] ?? 0).toDouble(),
+      customerPays: _asDouble(json['customerPays']),
       demandareaId: json['demandareaId']?.toString() ?? '',
-      demands: (json['demands'] ?? 0).toDouble(),
-      supplies: (json['supplies'] ?? 0).toDouble(),
-      surgeMultiplier: (json['surgeMultiplier'] ?? 0).toDouble(),
-      surgeMultiplierAmount: (json['surgeMultiplierAmount'] ?? 0).toDouble(),
-      surgeFare: (json['surgeFare'] ?? 0).toDouble(),
+      demands: _asDouble(json['demands']),
+      supplies: _asDouble(json['supplies']),
+      surgeMultiplier: _asDouble(json['surgeMultiplier']),
+      surgeMultiplierAmount: _asDouble(json['surgeMultiplierAmount']),
+      surgeFare: _asDouble(json['surgeFare']),
     );
   }
 
@@ -376,4 +390,14 @@ class SurgeFareDetails {
       "surgeFare": surgeFare,
     };
   }
+}
+
+double _asDouble(dynamic value) {
+  if (value is num) return value.toDouble();
+  return double.tryParse((value ?? '').toString()) ?? 0.0;
+}
+
+int _asInt(dynamic value) {
+  if (value is num) return value.toInt();
+  return int.tryParse((value ?? '').toString()) ?? 0;
 }

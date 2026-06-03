@@ -12,12 +12,9 @@ import 'package:hopper/Core/Utility/app_buttons.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Core/Utility/app_loader.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
-import 'package:hopper/Presentation/BookRide/Controllers/driver_search_controller.dart';
-import 'package:hopper/Presentation/BookRide/Screens/order_confirm_screen.dart';
+import 'package:hopper/Presentation/BookRide/Models/pricing_insights_model.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:get/get.dart';
-import 'package:hopper/Presentation/OnBoarding/Screens/payment_screen.dart';
-import 'package:hopper/dummy_screen.dart';
 
 import '../../../../Core/Utility/compressImage.dart';
 
@@ -427,6 +424,37 @@ class _SharedConfrimBookingState extends State<SharedConfrimBooking> {
                       ),
                     );
                   }),
+                  Obx(() {
+                    final pricing =
+                        driverController.sharedBooking.value?.pricingInsights;
+                    if (pricing == null || !pricing.hasDynamicPricing) {
+                      return const SizedBox.shrink();
+                    }
+                    return Padding(
+                      padding: const EdgeInsets.only(top: 16),
+                      child: _buildDynamicPricingCard(pricing),
+                    );
+                  }),
+                  SizedBox(height: 24),
+                  CustomTextFields.textWithStyles700(
+                    'Trip Summary',
+                    fontSize: 17,
+                  ),
+                  SizedBox(height: 12),
+                  Obx(() {
+                    final booking = driverController.sharedBooking.value;
+                    return _buildRideSummaryCard(
+                      rideTypeLabel: widget.selectedCarType ?? 'Ride',
+                      rideModeLabel: 'Shared ride',
+                      etaText: formatDuration(booking?.duration ?? 0),
+                      distanceText: formatDistance(
+                        (booking?.distance ?? 0).toDouble(),
+                      ),
+                      amountText: (booking?.amount ?? 0).toString(),
+                      pickupAddress: widget.pickupAddress,
+                      dropAddress: widget.destinationAddress,
+                    );
+                  }),
 
                   SizedBox(height: 10),
                   CustomTextFields.textWithStylesSmall(
@@ -521,6 +549,261 @@ class _SharedConfrimBookingState extends State<SharedConfrimBooking> {
               ),
             );
       }),
+    );
+  }
+
+  Widget _buildRideSummaryCard({
+    required String rideTypeLabel,
+    required String rideModeLabel,
+    required String etaText,
+    required String distanceText,
+    required String amountText,
+    required String pickupAddress,
+    required String dropAddress,
+  }) {
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: AppColors.containerColor,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: AppColors.commonBlack.withOpacity(0.06)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  height: 42,
+                  width: 42,
+                  decoration: BoxDecoration(
+                    color: AppColors.commonWhite,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Icon(
+                    Icons.groups_rounded,
+                    color: AppColors.commonBlack,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      CustomTextFields.textWithStyles700(
+                        rideTypeLabel,
+                        fontSize: 16,
+                      ),
+                      const SizedBox(height: 4),
+                      CustomTextFields.textWithStylesSmall(
+                        rideModeLabel,
+                        colors: AppColors.commonBlack.withOpacity(0.65),
+                      ),
+                    ],
+                  ),
+                ),
+                CustomTextFields.textWithImage(
+                  text: amountText,
+                  imagePath: AppImages.nBlackCurrency,
+                  fontWeight: FontWeight.w900,
+                  colors: AppColors.commonBlack,
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                _buildSummaryChip(icon: Icons.schedule_rounded, label: etaText),
+                _buildSummaryChip(
+                  icon: Icons.route_rounded,
+                  label: distanceText,
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            _buildSummaryAddressRow(
+              iconPath: AppImages.circleStart,
+              title: 'Pickup',
+              value: pickupAddress,
+            ),
+            const SizedBox(height: 10),
+            _buildSummaryAddressRow(
+              iconPath: AppImages.rectangleDest,
+              title: 'Drop',
+              value: dropAddress,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDynamicPricingCard(PricingInsights pricing) {
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF8E8),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFFFD68A)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  height: 36,
+                  width: 36,
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(
+                    Icons.bolt_rounded,
+                    color: Color(0xFFB86A00),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: CustomTextFields.textWithStyles700(
+                    'Dynamic Pricing',
+                    fontSize: 16,
+                  ),
+                ),
+                CustomTextFields.textWithImage(
+                  text: pricing.totalIncreaseAmount.toStringAsFixed(0),
+                  imagePath: AppImages.nBlackCurrency,
+                  fontWeight: FontWeight.w900,
+                  colors: AppColors.commonBlack,
+                ),
+              ],
+            ),
+            if (pricing.summary.trim().isNotEmpty) ...[
+              const SizedBox(height: 10),
+              CustomTextFields.textWithStylesSmall(
+                pricing.summary,
+                maxLines: 4,
+                overflow: TextOverflow.visible,
+                colors: AppColors.commonBlack.withOpacity(0.72),
+              ),
+            ],
+            if (pricing.activeReasons.isNotEmpty) ...[
+              const SizedBox(height: 14),
+              ...pricing.activeReasons.map(_buildDynamicPricingRow),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDynamicPricingRow(PricingReason reason) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                CustomTextFields.textWithStyles600(
+                  reason.label.isEmpty
+                      ? _fallbackReasonLabel(reason.code)
+                      : reason.label,
+                  fontSize: 13,
+                ),
+                if (reason.percentage > 0)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: CustomTextFields.textWithStylesSmall(
+                      '${reason.percentage.toStringAsFixed(0)}% applied',
+                      colors: AppColors.commonBlack.withOpacity(0.6),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          CustomTextFields.textWithImage(
+            text: reason.amount.toStringAsFixed(0),
+            imagePath: AppImages.nCurrency,
+            fontWeight: FontWeight.w900,
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _fallbackReasonLabel(String code) {
+    switch (code) {
+      case 'rain':
+        return 'Rain surcharge';
+      case 'thunderstorm':
+        return 'Thunderstorm surcharge';
+      case 'weather':
+        return 'Weather surcharge';
+      case 'night_surge':
+        return 'Night surge';
+      case 'demand_area_surge':
+        return 'Demand area surge';
+      default:
+        return 'Surcharge';
+    }
+  }
+
+  Widget _buildSummaryChip({required IconData icon, required String label}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppColors.commonWhite,
+        borderRadius: BorderRadius.circular(30),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 18, color: AppColors.commonBlack),
+          const SizedBox(width: 8),
+          CustomTextFields.textWithStyles600(label, fontSize: 13),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSummaryAddressRow({
+    required String iconPath,
+    required String title,
+    required String value,
+  }) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 2),
+          child: Image.asset(iconPath, height: 16, width: 16),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              CustomTextFields.textWithStyles600(title, fontSize: 13),
+              const SizedBox(height: 2),
+              CustomTextFields.textWithStylesSmall(
+                value,
+                maxLines: 2,
+                colors: AppColors.commonBlack.withOpacity(0.65),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 
@@ -639,27 +922,26 @@ class _SharedConfrimBookingState extends State<SharedConfrimBooking> {
                               infoWindow: const InfoWindow(title: 'Drop'),
                             ),
                           };
-AppLogger.log.w(allData);
-AppLogger.log.w('Booking Fee: ${ allData?.fareBreakdown[0].bookingFee}');
+                          AppLogger.log.w(allData);
+                          AppLogger.log.w(
+                            'Booking Fee: ${allData?.fareBreakdown[0].bookingFee}',
+                          );
                           Navigator.push(
                             context,
                             MaterialPageRoute(
                               builder:
                                   (context) => SharedScreens(
-
-
-
                                     baseFare:
-                                    allData?.fareBreakdown[0].baseFare,
-                                    bookingFee:   allData?.fareBreakdown[0].bookingFee,
-
+                                        allData?.fareBreakdown[0].baseFare,
+                                    bookingFee:
+                                        allData?.fareBreakdown[0].bookingFee,
 
                                     pickupFare:
-                                    allData?.fareBreakdown[0].pickupFare,
+                                        allData?.fareBreakdown[0].pickupFare,
                                     timeFare:
-                                    allData?.fareBreakdown[0].timeFare,
+                                        allData?.fareBreakdown[0].timeFare,
                                     distanceFare:
-                                    allData?.fareBreakdown[0].distanceFare,
+                                        allData?.fareBreakdown[0].distanceFare,
 
                                     pickupAddress: widget.pickupAddress,
                                     destinationAddress:
@@ -752,7 +1034,12 @@ AppLogger.log.w('Booking Fee: ${ allData?.fareBreakdown[0].bookingFee}');
     final original = File(photo.path);
     printImageSize(original, label: "Original Image");
     // Compress it
-    final compressed = await compressImage(original, quality: 60, minWidth: 720, minHeight: 720);
+    final compressed = await compressImage(
+      original,
+      quality: 60,
+      minWidth: 720,
+      minHeight: 720,
+    );
     if (compressed == null) {
       debugPrint("❌ Compression FAILED (returning original)");
       return original;

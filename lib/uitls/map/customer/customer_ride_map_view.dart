@@ -280,10 +280,11 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     if (_mapController == null) return;
     if (DateTime.now().isBefore(_pauseFollowUntil)) return;
 
+    final activeTarget =
+        widget.mode == RideMapMode.toDrop ? widget.drop : widget.pickup;
     final extras = <LatLng>[
       if (_vehiclePos != null) _vehiclePos!,
-      widget.pickup,
-      if (widget.mode == RideMapMode.toDrop) widget.drop,
+      activeTarget,
     ];
 
     if (_fullRoute.length < 2 && extras.length < 2) return;
@@ -291,11 +292,49 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     _pendingFit = false;
     _lastFitAt = DateTime.now();
 
-    final bounds = boundsFromRoutePoints(_fullRoute, extraPoints: extras);
-    final padding = 80.0;
+    final fitPoints =
+        _fullRoute.length >= 2 ? <LatLng>[..._fullRoute, ...extras] : extras;
+    await _animateBoundsSafe(focusPoints: fitPoints);
+  }
+
+  Future<void> _animateBoundsSafe({
+    List<LatLng> focusPoints = const <LatLng>[],
+  }) async {
+    final controller = _mapController;
+    if (controller == null) return;
+    final pts = focusPoints;
+    if (pts.length < 2) return;
+
+    double minLat = pts.first.latitude;
+    double maxLat = pts.first.latitude;
+    double minLng = pts.first.longitude;
+    double maxLng = pts.first.longitude;
+    for (final p in pts.skip(1)) {
+      if (p.latitude < minLat) minLat = p.latitude;
+      if (p.latitude > maxLat) maxLat = p.latitude;
+      if (p.longitude < minLng) minLng = p.longitude;
+      if (p.longitude > maxLng) maxLng = p.longitude;
+    }
+
+    final diag = Geolocator.distanceBetween(minLat, minLng, maxLat, maxLng);
+    final target = LatLng((minLat + maxLat) / 2, (minLng + maxLng) / 2);
+    final zoom =
+        diag <= 250
+            ? 16.8
+            : diag <= 700
+            ? 16.0
+            : diag <= 1500
+            ? 15.2
+            : diag <= 3000
+            ? 14.4
+            : diag <= 6000
+            ? 13.7
+            : 13.0;
     try {
-      await _mapController!.animateCamera(
-        CameraUpdate.newLatLngBounds(bounds, padding),
+      await controller.animateCamera(
+        CameraUpdate.newCameraPosition(
+          CameraPosition(target: target, zoom: zoom, bearing: 0, tilt: 0),
+        ),
       );
     } catch (_) {}
   }
@@ -654,21 +693,19 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   Future<void> fitRoute({double padding = 80}) async {
     if (_mapController == null) return;
     try {
-      // Prefer fitting the actual route polyline so the entire leg is visible.
-      // Fallback to marker points if route isn't ready yet.
+      final activeTarget =
+          widget.mode == RideMapMode.toDrop ? widget.drop : widget.pickup;
       final extras = <LatLng>[
         if (_vehiclePos != null) _vehiclePos!,
-        widget.pickup,
-        widget.drop,
+        activeTarget,
       ];
-      final hasRoute = _fullRoute.length >= 2;
-      final bounds =
-          hasRoute
-              ? boundsFromRoutePoints(_fullRoute, extraPoints: extras)
-              : CameraUtils.boundsFromPoints(extras);
-      await _mapController!.animateCamera(
-        CameraUpdate.newLatLngBounds(bounds, padding),
-      );
+      if (extras.length < 2) {
+        await recenter();
+        return;
+      }
+      final fitPoints =
+          _fullRoute.length >= 2 ? <LatLng>[..._fullRoute, ...extras] : extras;
+      await _animateBoundsSafe(focusPoints: fitPoints);
     } catch (_) {}
   }
 

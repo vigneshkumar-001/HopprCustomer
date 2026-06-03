@@ -82,6 +82,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   bool _autoFollowEnabled = true;
   final ValueNotifier<bool> _isFollowingNotifier = ValueNotifier<bool>(true);
   bool _locationToggleFit = false;
+  bool _didFitDriverToPickup = false;
+  bool _didFitDriverToDrop = false;
   bool _isDrawingPolyline = false;
   LatLng? _customerLatLng;
   LatLng? _customerToLatLang;
@@ -399,13 +401,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   }
 
   Future<void> _loadCustomMarkerForVehicle(String vehicleType) async {
-    final t = vehicleType.trim().toLowerCase();
-    final isCar =
-        t.contains('car') ||
-        t.contains('sedan') ||
-        t.contains('suv') ||
-        t.contains('van');
-    final asset = isCar ? AppImages.carImage : AppImages.bikeImage;
+    final asset = AppImages.packageBike;
 
     try {
       final dpr = ui.window.devicePixelRatio;
@@ -884,16 +880,32 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     } catch (_) {}
   }
 
-  Future<void> _fitPickupDropBounds() async {
+  Future<void> _fitActiveBounds() async {
     if (_mapController == null) return;
+    final driverPos = _currentDriverLatLng;
+    final target = driverStartedRide ? _customerToLatLang : _customerLatLng;
+    if (_activeRoutePoints.length >= 2) {
+      try {
+        await _animateBoundsSafe(
+          focusPoints: [
+            ..._activeRoutePoints,
+            if (driverPos != null) driverPos,
+            if (target != null) target,
+          ],
+        );
+      } catch (_) {}
+      return;
+    }
+    if (driverPos != null && target != null) {
+      try {
+        await _animateBoundsSafe(focusPoints: [driverPos, target]);
+      } catch (_) {}
+      return;
+    }
     if (_customerLatLng == null || _customerToLatLang == null) return;
     try {
-      final bounds = MapUiDefaults.boundsFrom2(
-        _customerLatLng!,
-        _customerToLatLang!,
-      );
-      await _mapController!.animateCamera(
-        CameraUpdate.newLatLngBounds(bounds, 120),
+      await _animateBoundsSafe(
+        focusPoints: [_customerLatLng!, _customerToLatLang!],
       );
     } catch (_) {}
   }
@@ -907,7 +919,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     _pauseAutoFollowUntil = DateTime.fromMillisecondsSinceEpoch(0);
     if (_locationToggleFit) {
       _locationToggleFit = false;
-      await _fitPickupDropBounds();
+      await _fitActiveBounds();
       return;
     }
 
@@ -923,10 +935,77 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         CameraUpdate.newCameraPosition(
           CameraPosition(
             target: target,
-            zoom: math.max(_currentZoomLevel, MapUiDefaults.focusZoom),
+            zoom: math.max(_currentZoomLevel, 17.6),
             bearing: 0,
             tilt: 0,
           ),
+        ),
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _fitDriverAndTargetOnce({required bool toDrop}) async {
+    if (_mapController == null) return;
+    final driverPos = _currentDriverLatLng;
+    final target = toDrop ? _customerToLatLang : _customerLatLng;
+    if (driverPos == null || target == null) return;
+
+    if (toDrop) {
+      if (_didFitDriverToDrop) return;
+      _didFitDriverToDrop = true;
+    } else {
+      if (_didFitDriverToPickup) return;
+      _didFitDriverToPickup = true;
+    }
+
+    try {
+      if (_activeRoutePoints.length >= 2) {
+        await _animateBoundsSafe(
+          focusPoints: [..._activeRoutePoints, driverPos, target],
+        );
+      } else {
+        await _animateBoundsSafe(focusPoints: [driverPos, target]);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _animateBoundsSafe({
+    List<LatLng> focusPoints = const <LatLng>[],
+  }) async {
+    final controller = _mapController;
+    if (controller == null) return;
+    final pts = focusPoints;
+    if (pts.length < 2) return;
+
+    double minLat = pts.first.latitude;
+    double maxLat = pts.first.latitude;
+    double minLng = pts.first.longitude;
+    double maxLng = pts.first.longitude;
+    for (final p in pts.skip(1)) {
+      if (p.latitude < minLat) minLat = p.latitude;
+      if (p.latitude > maxLat) maxLat = p.latitude;
+      if (p.longitude < minLng) minLng = p.longitude;
+      if (p.longitude > maxLng) maxLng = p.longitude;
+    }
+
+    final diag = Geolocator.distanceBetween(minLat, minLng, maxLat, maxLng);
+    final target = LatLng((minLat + maxLat) / 2, (minLng + maxLng) / 2);
+    final zoom =
+        diag <= 250
+            ? 16.8
+            : diag <= 700
+            ? 16.0
+            : diag <= 1500
+            ? 15.2
+            : diag <= 3000
+            ? 14.4
+            : diag <= 6000
+            ? 13.7
+            : 13.0;
+    try {
+      await controller.animateCamera(
+        CameraUpdate.newCameraPosition(
+          CameraPosition(target: target, zoom: zoom, bearing: 0, tilt: 0),
         ),
       );
     } catch (_) {}
@@ -1158,8 +1237,21 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         _customerToLatLang = LatLng(toLat, toLng);
       }
 
+      final driverLoc =
+          (payload['driverLocation'] as Map?) ??
+          ((payload['basePayload'] as Map?)?['driverLocation'] as Map?);
+      final joinedDriverLat = _toDouble(
+        driverLoc?['latitude'] ?? driverLoc?['lat'],
+      );
+      final joinedDriverLng = _toDouble(
+        driverLoc?['longitude'] ?? driverLoc?['lng'] ?? driverLoc?['lon'],
+      );
+
       setState(() {
-        _vehicleType = type.toString();
+        _vehicleType =
+            type.toString().trim().isNotEmpty
+                ? type.toString()
+                : (payload['serviceType'] ?? carType).toString();
         plateNumber = plate;
         driverName = '$driverFullName ⭐ $rating';
         carDetails = '$color - $brand';
@@ -1192,11 +1284,28 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         AppLogger.log.i("🚕 driverAccepted ==  $driverAccepted");
       }
 
-      _loadCustomMarkerForVehicle(type.toString());
+      _loadCustomMarkerForVehicle(_vehicleType);
       _loadPickupDropIcons().whenComplete(() {
         _seedPickupDropMarkers();
         _syncPhaseMarkers();
       });
+
+      if (joinedDriverLat != null && joinedDriverLng != null) {
+        final joinedDriverPos = LatLng(joinedDriverLat, joinedDriverLng);
+        _currentDriverLatLng = joinedDriverPos;
+        _pendingDriverMarkerPos = joinedDriverPos;
+        _pendingDriverMarkerBearing = _lastBearing;
+        if (!_motionReady) {
+          _motion.reset(joinedDriverPos, bearing: _lastBearing);
+          _motionReady = true;
+        }
+        _commitDriverMarker(force: true);
+        _maybeUpdatePolyline(joinedDriverPos, force: true);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          _fitDriverAndTargetOnce(toDrop: driverStartedRide);
+        });
+      }
 
       // If driver-location reached the screen before joined-booking (common),
       // we may already have driver lat/lng but couldn't render a route yet.
@@ -1298,6 +1407,10 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         _currentDriverLatLng = newDriverLatLng;
         _lastBearing = b0;
         _maybeUpdatePolyline(newDriverLatLng, force: true);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          _fitDriverAndTargetOnce(toDrop: driverStartedRide);
+        });
       } else {
         _motion.ingest(newDriverLatLng, serverTs: ts, bearing: b0);
         if (_polylinesNotifier.value.isEmpty) {
@@ -1360,8 +1473,15 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       });
 
       if (prevStarted != nextStarted) {
+        if (nextStarted) {
+          _didFitDriverToDrop = false;
+        }
         _maybeUpdatePolyline(newDriverLatLng, force: true);
         _syncPhaseMarkers();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          _fitDriverAndTargetOnce(toDrop: nextStarted);
+        });
       }
     });
 
@@ -1390,7 +1510,12 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
       if (status) _syncPhaseMarkers();
       if (status && _currentDriverLatLng != null) {
+        _didFitDriverToDrop = false;
         _maybeUpdatePolyline(_currentDriverLatLng!, force: true);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          _fitDriverAndTargetOnce(toDrop: true);
+        });
       }
     });
     socketService.on('driver-reached-destination', (data) {
@@ -2229,6 +2354,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                               _preferredInitialZoom,
                             ),
                           ),
+                          padding: const EdgeInsets.only(bottom: 230),
                           markers: markers,
                           onMapCreated: (controller) async {
                             _mapController = controller;
@@ -2237,21 +2363,33 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                             ).loadString('assets/map_style.json');
                             _mapController?.setMapStyle(style);
 
-                            final focus = _customerLatLng ?? _currentPosition;
-                            if (focus != null) {
-                              _mapController?.animateCamera(
-                                CameraUpdate.newCameraPosition(
-                                  CameraPosition(
-                                    target: focus,
-                                    zoom: math.max(
-                                      _currentZoomLevel,
-                                      _preferredInitialZoom,
+                            if (_currentDriverLatLng != null &&
+                                (driverStartedRide
+                                    ? _customerToLatLang != null
+                                    : _customerLatLng != null)) {
+                              WidgetsBinding.instance.addPostFrameCallback((_) {
+                                if (!mounted) return;
+                                _fitDriverAndTargetOnce(
+                                  toDrop: driverStartedRide,
+                                );
+                              });
+                            } else {
+                              final focus = _customerLatLng ?? _currentPosition;
+                              if (focus != null) {
+                                _mapController?.animateCamera(
+                                  CameraUpdate.newCameraPosition(
+                                    CameraPosition(
+                                      target: focus,
+                                      zoom: math.max(
+                                        _currentZoomLevel,
+                                        _preferredInitialZoom,
+                                      ),
+                                      bearing: 0,
+                                      tilt: 0,
                                     ),
-                                    bearing: 0,
-                                    tilt: 0,
                                   ),
-                                ),
-                              );
+                                );
+                              }
                             }
                           },
                           polylines: polylines,

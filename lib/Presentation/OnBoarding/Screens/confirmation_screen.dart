@@ -1099,6 +1099,13 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                             ),
                           ),
                         ),
+                        const SizedBox(height: 18),
+                        CustomTextFields.textWithStyles700(
+                          'Delivery Summary',
+                          fontSize: 16,
+                        ),
+                        const SizedBox(height: 10),
+                        _buildPackageSummaryCard(),
                       ],
                     ),
                   ),
@@ -1207,6 +1214,159 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
           ),
         );
       }),
+    );
+  }
+
+  Widget _buildPackageSummaryCard() {
+    final amountText = _totalAfterDiscount.toStringAsFixed(2);
+    final parcelLabel =
+        (widget.parcelType == null || widget.parcelType!.trim().isEmpty)
+            ? 'Package'
+            : widget.parcelType!.trim();
+    final weightLabel =
+        (widget.weight == null || widget.weight!.trim().isEmpty)
+            ? 'Not added'
+            : widget.weight!.trim();
+    final senderAddress =
+        widget.sender.mapAddress.isNotEmpty
+            ? widget.sender.mapAddress
+            : widget.sender.address;
+    final receiverAddress =
+        widget.receiver.mapAddress.isNotEmpty
+            ? widget.receiver.mapAddress
+            : widget.receiver.address;
+
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: AppColors.containerColor,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: AppColors.commonBlack.withOpacity(0.06)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  height: 42,
+                  width: 42,
+                  decoration: BoxDecoration(
+                    color: AppColors.commonWhite,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Icon(
+                    Icons.inventory_2_rounded,
+                    color: AppColors.commonBlack,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      CustomTextFields.textWithStyles700(
+                        parcelLabel,
+                        fontSize: 16,
+                      ),
+                      const SizedBox(height: 4),
+                      CustomTextFields.textWithStylesSmall(
+                        'Delivery details at a glance',
+                        colors: AppColors.commonBlack.withOpacity(0.65),
+                      ),
+                    ],
+                  ),
+                ),
+                CustomTextFields.textWithImage(
+                  text: amountText,
+                  imagePath: AppImages.nBlackCurrency,
+                  fontWeight: FontWeight.w900,
+                  colors: AppColors.commonBlack,
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                _buildSummaryChip(
+                  icon: Icons.scale_rounded,
+                  label: weightLabel,
+                ),
+                _buildSummaryChip(
+                  icon: Icons.local_shipping_outlined,
+                  label: parcelLabel,
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            _buildSummaryAddressRow(
+              iconPath: AppImages.circleStart,
+              title: 'Pickup',
+              value: senderAddress,
+            ),
+            const SizedBox(height: 10),
+            _buildSummaryAddressRow(
+              iconPath: AppImages.rectangleDest,
+              title: 'Drop',
+              value: receiverAddress,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSummaryChip({required IconData icon, required String label}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppColors.commonWhite,
+        borderRadius: BorderRadius.circular(30),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 18, color: AppColors.commonBlack),
+          const SizedBox(width: 8),
+          CustomTextFields.textWithStyles600(label, fontSize: 13),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSummaryAddressRow({
+    required String iconPath,
+    required String title,
+    required String value,
+  }) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 2),
+          child: Image.asset(iconPath, height: 16, width: 16),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              CustomTextFields.textWithStyles600(title, fontSize: 13),
+              const SizedBox(height: 2),
+              CustomTextFields.textWithStylesSmall(
+                value,
+                maxLines: 2,
+                colors: AppColors.commonBlack.withOpacity(0.65),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

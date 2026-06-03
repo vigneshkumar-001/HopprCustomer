@@ -21,7 +21,7 @@ class MarkerIconCache {
             ? MapUiConfig.bikeMarkerSizeDp
             : MapUiConfig.carMarkerSizeDp;
     final asset =
-        type == VehicleType.bike ? AppImages.bikeImage : AppImages.carImage;
+        type == VehicleType.bike ? AppImages.bikeImage : AppImages.carHop;
     final key = 'veh|contain|$asset|$sizeDp|$resolvedDpr';
     final cached = _cache[key];
     if (cached != null) return cached;

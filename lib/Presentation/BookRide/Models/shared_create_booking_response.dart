@@ -1,20 +1,19 @@
+import 'package:hopper/Presentation/BookRide/Models/pricing_insights_model.dart';
+
 class SharedBookingCreateResponse {
   final int status;
   final SharedBookingData? data;
   final String? message;
 
-  SharedBookingCreateResponse({
-    required this.status,
-    this.data,
-    this.message,
-  });
+  SharedBookingCreateResponse({required this.status, this.data, this.message});
 
   factory SharedBookingCreateResponse.fromJson(Map<String, dynamic> json) {
     return SharedBookingCreateResponse(
       status: json['status'] ?? 0,
-      data: json['data'] != null
-          ? SharedBookingData.fromJson(json['data'])
-          : null,
+      data:
+          json['data'] != null
+              ? SharedBookingData.fromJson(json['data'])
+              : null,
       message: json['message'],
     );
   }
@@ -31,6 +30,7 @@ class SharedBookingData {
   final double distance;
   final int duration;
   final List<FareBreakdown> fareBreakdown;
+  final PricingInsights? pricingInsights;
 
   SharedBookingData({
     this.customerId,
@@ -43,26 +43,41 @@ class SharedBookingData {
     required this.distance,
     required this.duration,
     required this.fareBreakdown,
+    this.pricingInsights,
   });
 
   factory SharedBookingData.fromJson(Map<String, dynamic> json) {
+    final Map<String, dynamic> breakdown =
+        (json['fareBreakdown'] is List &&
+                (json['fareBreakdown'] as List).isNotEmpty &&
+                (json['fareBreakdown'] as List).first is Map<String, dynamic>)
+            ? ((json['fareBreakdown'] as List).first as Map<String, dynamic>)
+            : const <String, dynamic>{};
+
     return SharedBookingData(
       customerId: json['customerId'],
       carType: json['carType'],
       bookingId: json['bookingId'],
       sharedCount: json['sharedCount']?.toString(),
-      amount: (json['amount'] as num?)?.toDouble(),
+      amount: _asDoubleOrNull(json['amount']),
       pickupAddress: json['pickupAddress'],
       dropAddress: json['dropAddress'],
-      distance: (json['distance'] as num?)?.toDouble() ?? 0.0,
-      duration: json['duration'] ?? 0,
-      fareBreakdown: (json['fareBreakdown'] as List<dynamic>? ?? [])
-          .map((e) => FareBreakdown.fromJson(e))
-          .toList(),
+      distance: _asDouble(json['distance']),
+      duration: _asInt(json['duration']),
+      fareBreakdown:
+          (json['fareBreakdown'] as List<dynamic>? ?? [])
+              .whereType<Map<String, dynamic>>()
+              .map(FareBreakdown.fromJson)
+              .toList(),
+      pricingInsights:
+          json['pricingInsights'] is Map<String, dynamic>
+              ? PricingInsights.fromJson(json['pricingInsights'])
+              : (breakdown['pricingInsights'] is Map<String, dynamic>
+                  ? PricingInsights.fromJson(breakdown['pricingInsights'])
+                  : null),
     );
   }
 }
-
 
 class FareBreakdown {
   final double baseFare;
@@ -102,29 +117,39 @@ class FareBreakdown {
   });
 
   factory FareBreakdown.fromJson(Map<String, dynamic> json) {
-    double parseDouble(dynamic v) =>
-        double.tryParse(v?.toString() ?? '0') ?? 0;
-
-    int parseInt(dynamic v) =>
-        int.tryParse(v?.toString() ?? '0') ?? 0;
-
     return FareBreakdown(
-      baseFare: parseDouble(json['baseFare']),
-      rideDistanceInKm: parseDouble(json['RideDistanceInKm']),
-      perKilometerRate: parseDouble(json['perKilometerRate']),
-      distanceFare: parseDouble(json['distanceFare']),
-      rideDuration: parseInt(json['Rideduration']),
-      timeFareAmount: parseDouble(json['timeFareAmount']),
-      timeFare: parseDouble(json['timeFare']),
-      driverDistancePerKm: parseDouble(json['driverDistancePerKm']),
-      pickupFareAmount: parseDouble(json['pickupFareAmount']),
-      pickupFare: parseDouble(json['pickupFare']),
-      bookingFee: parseDouble(json['bookingFee']),
-      subtotal: parseDouble(json['subtotal']),
-      commissionPercent: parseDouble(json['commissionPercent']),
-      commissionAmount: parseDouble(json['commissionAmount']),
-      estimatedPrice: parseDouble(json['estimatedPrice']),
-      driverEarnings: parseDouble(json['driverEarnings']),
+      baseFare: _asDouble(json['baseFare']),
+      rideDistanceInKm: _asDouble(json['RideDistanceInKm']),
+      perKilometerRate: _asDouble(json['perKilometerRate']),
+      distanceFare: _asDouble(json['distanceFare']),
+      rideDuration: _asInt(json['Rideduration']),
+      timeFareAmount: _asDouble(json['timeFareAmount']),
+      timeFare: _asDouble(json['timeFare']),
+      driverDistancePerKm: _asDouble(json['driverDistancePerKm']),
+      pickupFareAmount: _asDouble(json['pickupFareAmount']),
+      pickupFare: _asDouble(json['pickupFare']),
+      bookingFee: _asDouble(json['bookingFee']),
+      subtotal: _asDouble(json['subtotal']),
+      commissionPercent: _asDouble(json['commissionPercent']),
+      commissionAmount: _asDouble(json['commissionAmount']),
+      estimatedPrice: _asDouble(json['estimatedPrice']),
+      driverEarnings: _asDouble(json['driverEarnings']),
     );
   }
+}
+
+double _asDouble(dynamic value) {
+  if (value is num) return value.toDouble();
+  return double.tryParse((value ?? '').toString()) ?? 0.0;
+}
+
+double? _asDoubleOrNull(dynamic value) {
+  if (value == null) return null;
+  if (value is num) return value.toDouble();
+  return double.tryParse(value.toString());
+}
+
+int _asInt(dynamic value) {
+  if (value is num) return value.toInt();
+  return int.tryParse((value ?? '').toString()) ?? 0;
 }

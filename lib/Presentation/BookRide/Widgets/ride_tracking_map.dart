@@ -162,9 +162,7 @@ class RideTrackingMapState extends State<RideTrackingMap>
 
   Future<void> _loadMapStyle() async {
     try {
-      final style = await rootBundle.loadString(
-        'assets/map_style.json',
-      );
+      final style = await rootBundle.loadString('assets/map_style.json');
       _mapStyle = style;
       if (_mapController != null) {
         await _mapController!.setMapStyle(_mapStyle);
@@ -180,7 +178,7 @@ class RideTrackingMapState extends State<RideTrackingMap>
       _vehicleIcon = await CompactMarkerIcons.assetContained(
         assetPath:
             widget.vehicleType == VehicleType.bike
-                ? AppImages.packageBike
+                ? AppImages.bikeImage
                 : AppImages.carHop,
         sizeDp: MapUiDefaults.vehicleBadgeDiameterDp,
         dpr: dpr,
@@ -444,7 +442,9 @@ class RideTrackingMapState extends State<RideTrackingMap>
     );
 
     try {
-      await _mapController!.animateCamera(CameraUpdate.newLatLngBounds(bounds, padding));
+      await _mapController!.animateCamera(
+        CameraUpdate.newLatLngBounds(bounds, padding),
+      );
     } catch (_) {
       await Future.delayed(const Duration(milliseconds: 280));
       try {
@@ -475,7 +475,10 @@ class RideTrackingMapState extends State<RideTrackingMap>
         onCameraMoveStarted: _onUserMapGesture,
         onTap: (_) => _onUserMapGesture(),
         onCameraMove: (pos) {
-          _currentZoom = pos.zoom.clamp(MapUiDefaults.minZoom, MapUiDefaults.maxZoom).toDouble();
+          _currentZoom =
+              pos.zoom
+                  .clamp(MapUiDefaults.minZoom, MapUiDefaults.maxZoom)
+                  .toDouble();
         },
         initialCameraPosition: CameraPosition(
           target: initialTarget,

@@ -1,3 +1,5 @@
+import 'package:hopper/Presentation/BookRide/Models/pricing_insights_model.dart';
+
 // ---------- Safe casting helpers ----------
 double _asDouble(dynamic v, {double def = 0.0}) {
   if (v == null) return def;
@@ -68,6 +70,7 @@ class DriverData {
   final double distance;
   final String estimatedPrice;
   final int estimatedTime;
+  final List<EstimateFareByLocation> faresByLocation;
 
   // Optional extras you may want later (present in payload):
   final String? serviceType; // e.g. "Car"
@@ -88,6 +91,7 @@ class DriverData {
     required this.distance,
     required this.estimatedPrice,
     required this.estimatedTime,
+    required this.faresByLocation,
     this.serviceType,
     this.carType,
   });
@@ -124,6 +128,11 @@ class DriverData {
         json['estimatedPrice'],
       ), // API gives "1315.52 - 3337.60"
       estimatedTime: _asInt(json['estimatedTime']),
+      faresByLocation:
+          (json['faresByLocation'] as List? ?? const [])
+              .whereType<Map<String, dynamic>>()
+              .map(EstimateFareByLocation.fromJson)
+              .toList(),
       serviceType:
           _asString(json['serviceType'], def: '').isEmpty
               ? null
@@ -181,4 +190,48 @@ class DriverDetails {
 
   factory DriverDetails.empty() =>
       DriverDetails(id: '', firstName: '', lastName: '');
+}
+
+class EstimateFareByLocation {
+  final String locationId;
+  final String locationName;
+  final double baseFare;
+  final double distanceFare;
+  final double timeFare;
+  final double pickupFare;
+  final double bookingFee;
+  final double subtotal;
+  final double estimatedPrice;
+  final PricingInsights? pricingInsights;
+
+  EstimateFareByLocation({
+    required this.locationId,
+    required this.locationName,
+    required this.baseFare,
+    required this.distanceFare,
+    required this.timeFare,
+    required this.pickupFare,
+    required this.bookingFee,
+    required this.subtotal,
+    required this.estimatedPrice,
+    this.pricingInsights,
+  });
+
+  factory EstimateFareByLocation.fromJson(Map<String, dynamic> json) {
+    return EstimateFareByLocation(
+      locationId: _asString(json['locationId']),
+      locationName: _asString(json['locationName']),
+      baseFare: _asDouble(json['baseFare']),
+      distanceFare: _asDouble(json['distanceFare']),
+      timeFare: _asDouble(json['timeFare']),
+      pickupFare: _asDouble(json['pickupFare']),
+      bookingFee: _asDouble(json['bookingFee']),
+      subtotal: _asDouble(json['subtotal']),
+      estimatedPrice: _asDouble(json['estimatedPrice']),
+      pricingInsights:
+          json['pricingInsights'] is Map<String, dynamic>
+              ? PricingInsights.fromJson(json['pricingInsights'])
+              : null,
+    );
+  }
 }

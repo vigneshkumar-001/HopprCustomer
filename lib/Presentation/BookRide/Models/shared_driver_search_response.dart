@@ -1,20 +1,19 @@
+import 'package:hopper/Presentation/BookRide/Models/pricing_insights_model.dart';
+
 class SharedDriverSearchResponse {
   final int? status;
   final List<SharedDriverData>? data;
   final int? count;
 
-  SharedDriverSearchResponse({
-    this.status,
-    this.data,
-    this.count,
-  });
+  SharedDriverSearchResponse({this.status, this.data, this.count});
 
   factory SharedDriverSearchResponse.fromJson(Map<String, dynamic> json) {
     return SharedDriverSearchResponse(
       status: json['status'] as int?,
-      data: (json['data'] as List<dynamic>?)
-          ?.map((e) => SharedDriverData.fromJson(e as Map<String, dynamic>))
-          .toList(),
+      data:
+          (json['data'] as List<dynamic>?)
+              ?.map((e) => SharedDriverData.fromJson(e as Map<String, dynamic>))
+              .toList(),
       count: json['count'] as int?,
     );
   }
@@ -37,6 +36,7 @@ class SharedDriverData {
   final int? estimatedTime;
   final int? maxSeats;
   final List<SharedSeat>? seats;
+  final List<SharedFareByLocation> faresByLocation;
 
   SharedDriverData({
     this.driverId,
@@ -47,22 +47,32 @@ class SharedDriverData {
     this.estimatedTime,
     this.maxSeats,
     this.seats,
+    this.faresByLocation = const [],
   });
 
   factory SharedDriverData.fromJson(Map<String, dynamic> json) {
     return SharedDriverData(
-      driverId: json['driverId'] != null
-          ? SharedDriverId.fromJson(json['driverId'] as Map<String, dynamic>)
-          : null,
+      driverId:
+          json['driverId'] != null
+              ? SharedDriverId.fromJson(
+                json['driverId'] as Map<String, dynamic>,
+              )
+              : null,
       sharedBooking: json['sharedBooking'] as bool?,
       occupiedSeats: json['occupiedSeats'] as int?,
       estimatedPrice: json['estimatedPrice'] as String?,
       carType: json['carType'] as String?,
       estimatedTime: json['estimatedTime'] as int?,
       maxSeats: json['maxSeats'] as int?, // may be null / absent
-      seats: (json['seats'] as List<dynamic>?)
-          ?.map((e) => SharedSeat.fromJson(e as Map<String, dynamic>))
-          .toList(),
+      seats:
+          (json['seats'] as List<dynamic>?)
+              ?.map((e) => SharedSeat.fromJson(e as Map<String, dynamic>))
+              .toList(),
+      faresByLocation:
+          (json['faresByLocation'] as List<dynamic>? ?? const [])
+              .whereType<Map<String, dynamic>>()
+              .map(SharedFareByLocation.fromJson)
+              .toList(),
     );
   }
 
@@ -76,6 +86,7 @@ class SharedDriverData {
       'estimatedTime': estimatedTime,
       'maxSeats': maxSeats,
       'seats': seats?.map((e) => e.toJson()).toList(),
+      'faresByLocation': faresByLocation.map((e) => e.toJson()).toList(),
     };
   }
 }
@@ -129,11 +140,7 @@ class SharedSeat {
   final String? passengerId;
   final String? customerId;
 
-  SharedSeat({
-    this.seatNumber,
-    this.passengerId,
-    this.customerId,
-  });
+  SharedSeat({this.seatNumber, this.passengerId, this.customerId});
 
   factory SharedSeat.fromJson(Map<String, dynamic> json) {
     return SharedSeat(
@@ -149,6 +156,70 @@ class SharedSeat {
       'seatNumber': seatNumber,
       'passengerId': passengerId,
       'customerId': customerId,
+    };
+  }
+}
+
+class SharedFareByLocation {
+  final String locationId;
+  final String locationName;
+  final double baseFare;
+  final double distanceFare;
+  final double timeFare;
+  final double pickupFare;
+  final double bookingFee;
+  final double subtotal;
+  final double estimatedPrice;
+  final PricingInsights? pricingInsights;
+
+  SharedFareByLocation({
+    required this.locationId,
+    required this.locationName,
+    required this.baseFare,
+    required this.distanceFare,
+    required this.timeFare,
+    required this.pickupFare,
+    required this.bookingFee,
+    required this.subtotal,
+    required this.estimatedPrice,
+    this.pricingInsights,
+  });
+
+  factory SharedFareByLocation.fromJson(Map<String, dynamic> json) {
+    double asDouble(dynamic value) {
+      if (value is num) return value.toDouble();
+      return double.tryParse((value ?? '').toString()) ?? 0.0;
+    }
+
+    return SharedFareByLocation(
+      locationId: json['locationId']?.toString() ?? '',
+      locationName: json['locationName']?.toString() ?? '',
+      baseFare: asDouble(json['baseFare']),
+      distanceFare: asDouble(json['distanceFare']),
+      timeFare: asDouble(json['timeFare']),
+      pickupFare: asDouble(json['pickupFare']),
+      bookingFee: asDouble(json['bookingFee']),
+      subtotal: asDouble(json['subtotal']),
+      estimatedPrice: asDouble(json['estimatedPrice']),
+      pricingInsights:
+          json['pricingInsights'] is Map<String, dynamic>
+              ? PricingInsights.fromJson(json['pricingInsights'])
+              : null,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'locationId': locationId,
+      'locationName': locationName,
+      'baseFare': baseFare,
+      'distanceFare': distanceFare,
+      'timeFare': timeFare,
+      'pickupFare': pickupFare,
+      'bookingFee': bookingFee,
+      'subtotal': subtotal,
+      'estimatedPrice': estimatedPrice,
+      'pricingInsights': pricingInsights?.toJson(),
     };
   }
 }
