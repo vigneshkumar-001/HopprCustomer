@@ -32,7 +32,7 @@ class PackageController extends GetxController {
     return Get.put(RideHistoryController(), permanent: true);
   }
 
-  Future<String?> paymentDetails({
+  Future<bool> paymentDetails({
     required String bookingId,
     required String paymentType,
     required BuildContext context,
@@ -50,17 +50,17 @@ class PackageController extends GetxController {
           AppToasts.showErrorGlobal(failure.message, title: "Error");
 
           isButtonLoading.value = false;
-          return failure.message;
+          return false;
         },
         (response) {
           isButtonLoading.value = false;
 
-          return '';
+          return true;
         },
       );
     } catch (e) {
       isButtonLoading.value = false;
-      return 'An error occurred';
+      return false;
     }
   }
 

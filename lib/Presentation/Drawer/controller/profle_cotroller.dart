@@ -148,6 +148,7 @@ class ProfleCotroller extends GetxController {
       emergencyNumber: emergencyNumber,
       frontImageFile: frontImageFile,
       profileImage: profileImagePath.value,
+      context: context,
     );
 
     if (result != null) {
@@ -183,7 +184,7 @@ class ProfleCotroller extends GetxController {
               (failure) {
             AppLogger.log.e("Front Upload Failed: ${failure.message}");
             if (context != null) {
-              AppToasts.customToast(context, failure.message);
+              AppToasts.showError(context, failure.message);
             }
             return null;
           },
@@ -215,7 +216,9 @@ class ProfleCotroller extends GetxController {
             (failure) {
           isLoading.value = false;
           if (context != null) {
-            AppToasts.customToast(context, failure.message);
+            AppToasts.showError(context, failure.message);
+          } else {
+            AppToasts.showErrorGlobal(failure.message);
           }
           AppLogger.log.e("Failure: ${failure.message}");
           return null; // important
@@ -231,7 +234,9 @@ class ProfleCotroller extends GetxController {
       isLoading.value = false;
       AppLogger.log.e(e);
       if (context != null) {
-        AppToasts.customToast(context, "Something went wrong");
+        AppToasts.showError(context, "Something went wrong");
+      } else {
+        AppToasts.showErrorGlobal("Something went wrong");
       }
       return null;
     }

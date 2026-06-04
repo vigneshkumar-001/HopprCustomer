@@ -938,6 +938,31 @@ class ApiDataSource extends BaseApiDataSource {
         false,
       );
 
+      if (response is DioException) {
+        final responseData = response.response?.data;
+        final backendMessage =
+            responseData is Map<String, dynamic>
+                ? (responseData['message'] ?? '').toString()
+                : '';
+        final fallbackMessage =
+            response.response?.statusCode == 500
+                ? 'Server error. Please try again.'
+                : 'Something went wrong';
+        return Left(
+          ServerFailure(
+            backendMessage.trim().isNotEmpty
+                ? backendMessage
+                : (response.message?.trim().isNotEmpty ?? false)
+                ? response.message!.trim()
+                : fallbackMessage,
+          ),
+        );
+      }
+
+      if (response is! Response) {
+        return Left(ServerFailure("Unknown error occurred"));
+      }
+
       if (response.statusCode == 200) {
         if (response.data['success'] == true) {
           return Right(UserSubmitResponse.fromJson(response.data));
@@ -946,12 +971,10 @@ class ApiDataSource extends BaseApiDataSource {
             ServerFailure(response.data['message'] ?? "Profile update failed"),
           );
         }
-      } else if (response is Response) {
+      } else {
         return Left(
           ServerFailure(response.data['message'] ?? "Unexpected error"),
         );
-      } else {
-        return Left(ServerFailure("Unknown error occurred"));
       }
     } catch (e) {
       AppLogger.log.e(e);

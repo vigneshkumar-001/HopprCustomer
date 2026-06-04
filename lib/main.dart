@@ -50,8 +50,12 @@ Future<void> _bootstrapBackgroundServices() async {
     final firebaseService = FirebaseService();
     await firebaseService.initializeFirebase();
     firebaseService.listenToMessages();
-    await firebaseService.fetchFCMTokenIfNeeded();
-    AppLogger.log.i('FirebaseService initialized and FCM token handled');
+    final hasFcmToken = await firebaseService.fetchFCMTokenIfNeeded();
+    AppLogger.log.i(
+      hasFcmToken
+          ? 'FirebaseService initialized and FCM token is ready'
+          : 'FirebaseService initialized; FCM token will retry in background',
+    );
   } catch (e, st) {
     AppLogger.log.e('Background bootstrap failed: $e\n$st');
   }

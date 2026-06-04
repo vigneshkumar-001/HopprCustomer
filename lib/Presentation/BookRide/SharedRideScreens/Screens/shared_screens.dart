@@ -7,6 +7,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:get/get.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:hopper/Core/Consents/app_colors.dart';
@@ -149,6 +150,9 @@ class _SharedScreensState extends State<SharedScreens>
   LatLng? _customerPickupLatLng;
   LatLng? _customerDropLatLng;
   LatLng? _driverLatLng; // last known driver position
+  DateTime _lastAcceptedDriverLocationTsUtc =
+      DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+  LatLng? _lastAcceptedDriverLocationPos;
 
   // ---------- ROUTE / POLYLINE STATE ----------
   /// Current active route (either driver→pickup OR pickup→drop)
@@ -1148,9 +1152,6 @@ class _SharedScreensState extends State<SharedScreens>
         }
       }
 
-      if (driverId.trim().isNotEmpty) {
-        rideShareSocket.emit('track-driver', {'driverId': driverId.trim()});
-      }
     });
 
     // OTP generated
@@ -1278,8 +1279,20 @@ class _SharedScreensState extends State<SharedScreens>
           (data['longitude'] as num?)?.toDouble() ??
           widget.pickupPosition.longitude;
 
-      DateTime ts = _parseServerTime(data['timestamp']);
-      if (!_isFreshTrackingTimestamp(ts)) {
+      final isSimulated =
+          data['simulated'] == true ||
+          (data['source'] ?? '').toString().trim().toLowerCase() ==
+              'ride-simulator';
+      DateTime ts = _normalizeTrackingTimestampUtc(
+        _parseServerTime(data['timestamp']),
+        simulated: isSimulated,
+      );
+      final newPos = LatLng(lat, lng);
+      if (!_shouldAcceptTrackingPacket(
+        receivedTsUtc: ts,
+        position: newPos,
+        simulated: isSimulated,
+      )) {
         if (kDebugMode) {
           AppLogger.log.w(
             'Ignoring stale shared-ride driver-location ts=$ts lat=$lat lng=$lng',
@@ -1287,14 +1300,19 @@ class _SharedScreensState extends State<SharedScreens>
         }
         return;
       }
-      final now0 = DateTime.now();
+      _lastAcceptedDriverLocationTsUtc =
+          isSimulated && ts.isBefore(_lastAcceptedDriverLocationTsUtc)
+              ? _lastAcceptedDriverLocationTsUtc.add(
+                  const Duration(milliseconds: 1),
+                )
+              : ts;
+      _lastAcceptedDriverLocationPos = newPos;
+      final now0 = DateTime.now().toUtc();
       // If server clock is skewed too far into the future, treat it as "now"
       // to avoid the animation waiting/stalling.
       if (ts.isAfter(now0.add(const Duration(seconds: 12)))) {
         ts = now0;
       }
-
-      final newPos = LatLng(lat, lng);
       _driverLatLng = newPos;
 
       // Trim route according to driver progress
@@ -1342,32 +1360,108 @@ class _SharedScreensState extends State<SharedScreens>
 
   DateTime _parseServerTime(dynamic ts) {
     try {
-      if (ts == null) return DateTime.now();
+      if (ts == null) return DateTime.now().toUtc();
       if (ts is int) {
         // Some backends send seconds (10-digit). Some send milliseconds.
         if (ts < 2000000000) {
-          return DateTime.fromMillisecondsSinceEpoch(ts * 1000);
+          return DateTime.fromMillisecondsSinceEpoch(ts * 1000, isUtc: true);
         }
-        return DateTime.fromMillisecondsSinceEpoch(ts);
+        return DateTime.fromMillisecondsSinceEpoch(ts, isUtc: true);
       }
       if (ts is String) {
         final parsed = DateTime.tryParse(ts);
-        if (parsed != null) return parsed.toLocal();
+        if (parsed != null) return parsed.toUtc();
       }
-      return DateTime.now();
+      return DateTime.now().toUtc();
     } catch (_) {
-      return DateTime.now();
+      return DateTime.now().toUtc();
     }
   }
 
-  bool _isFreshTrackingTimestamp(
+  DateTime _normalizeTrackingTimestampUtc(
     DateTime ts, {
-    Duration maxAge = const Duration(seconds: 20),
+    required bool simulated,
     Duration maxFutureSkew = const Duration(seconds: 12),
   }) {
-    final now = DateTime.now();
-    if (ts.isAfter(now.add(maxFutureSkew))) return false;
-    if (now.difference(ts) > maxAge) return false;
+    final nowUtc = DateTime.now().toUtc();
+    if (simulated) {
+      return nowUtc;
+    }
+    if (ts.isAfter(nowUtc.add(maxFutureSkew))) {
+      return nowUtc;
+    }
+    return ts;
+  }
+
+  bool _isSameTrackingPoint(LatLng a, LatLng b, {double epsilonMeters = 0.6}) {
+    return Geolocator.distanceBetween(
+          a.latitude,
+          a.longitude,
+          b.latitude,
+          b.longitude,
+        ) <=
+        epsilonMeters;
+  }
+
+  bool _shouldAcceptTrackingPacket({
+    required DateTime receivedTsUtc,
+    required LatLng position,
+    required bool simulated,
+  }) {
+    final lastAcceptedTsUtc = _lastAcceptedDriverLocationTsUtc;
+    final lastAcceptedPos = _lastAcceptedDriverLocationPos;
+    String decision = 'accepted';
+
+    if (lastAcceptedPos != null) {
+      final samePoint = _isSameTrackingPoint(lastAcceptedPos, position);
+      final tsDiffMs =
+          receivedTsUtc.difference(lastAcceptedTsUtc).inMilliseconds.abs();
+      if (samePoint && tsDiffMs <= 2500) {
+        decision = 'duplicate_same_point';
+        if (kDebugMode) {
+          AppLogger.log.d(
+            'shared tracking decision receivedTsUtc=$receivedTsUtc '
+            'lastAcceptedTsUtc=$lastAcceptedTsUtc staleDecision=$decision markerUpdated=false',
+          );
+        }
+        return false;
+      }
+      if (receivedTsUtc.isBefore(
+        lastAcceptedTsUtc.subtract(const Duration(seconds: 3)),
+      )) {
+        if (simulated && !samePoint) {
+          decision = 'simulator_reordered_accept';
+        } else {
+          decision = simulated ? 'simulator_out_of_order' : 'older_than_last';
+          if (kDebugMode) {
+            AppLogger.log.d(
+              'shared tracking decision receivedTsUtc=$receivedTsUtc '
+              'lastAcceptedTsUtc=$lastAcceptedTsUtc staleDecision=$decision markerUpdated=false',
+            );
+          }
+          return false;
+        }
+      }
+    } else if (!simulated) {
+      final age = DateTime.now().toUtc().difference(receivedTsUtc);
+      if (age > const Duration(minutes: 2)) {
+        decision = 'too_old_initial';
+        if (kDebugMode) {
+          AppLogger.log.d(
+            'shared tracking decision receivedTsUtc=$receivedTsUtc '
+            'lastAcceptedTsUtc=$lastAcceptedTsUtc staleDecision=$decision markerUpdated=false',
+          );
+        }
+        return false;
+      }
+    }
+
+    if (kDebugMode) {
+      AppLogger.log.d(
+        'shared tracking decision receivedTsUtc=$receivedTsUtc '
+        'lastAcceptedTsUtc=$lastAcceptedTsUtc staleDecision=$decision markerUpdated=true',
+      );
+    }
     return true;
   }
 

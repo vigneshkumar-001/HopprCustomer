@@ -20,6 +20,7 @@ import 'package:hopper/Presentation/OnBoarding/models/recent_location_model.dart
 import 'package:hopper/api/repository/api_consents.dart';
 import 'package:hopper/uitls/map/compact_marker_icons.dart';
 import 'package:hopper/uitls/map/map_ui_defaults.dart';
+import 'package:hopper/uitls/map/route_tracking_math.dart';
 import 'package:hopper/uitls/websocket/socket_io_client.dart';
 import 'package:hopper/uitls/websocket/shared_web_socket.dart';
 
@@ -110,6 +111,8 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
 
   // Debounce micro updates: ignore <5m moves to avoid jitter + churn.
   static const double _ignoreMoveMeters = 5.0;
+  static const double _overlapDetectMeters = 6.0;
+  static const double _overlapSpreadMeters = 4.5;
 
   static const double _reverseGeocodeMinMoveMeters = 15.0;
 
@@ -1161,9 +1164,65 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
   void _publishMarkersDebounced() {
     _publishDebounce?.cancel();
     _publishDebounce = Timer(const Duration(milliseconds: 60), () {
-      markers.assignAll(_driverMarkers.values.toSet());
+      markers.assignAll(_buildPublishedDriverMarkers());
       markersRevision.value++;
     });
+  }
+
+  Set<Marker> _buildPublishedDriverMarkers() {
+    final entries =
+        _driverMarkers.entries.toList()
+          ..sort((a, b) => a.key.compareTo(b.key));
+
+    final groups = <List<MapEntry<String, Marker>>>[];
+    for (final entry in entries) {
+      bool added = false;
+      for (final group in groups) {
+        final anchor = group.first.value.position;
+        if (_haversineMeters(anchor, entry.value.position) <= _overlapDetectMeters) {
+          group.add(entry);
+          added = true;
+          break;
+        }
+      }
+      if (!added) groups.add(<MapEntry<String, Marker>>[entry]);
+    }
+
+    final published = <Marker>{};
+    for (final group in groups) {
+      if (group.length == 1) {
+        published.add(group.first.value);
+        continue;
+      }
+
+      final center = _groupCenter(group.map((e) => e.value.position).toList());
+      for (int i = 0; i < group.length; i++) {
+        final entry = group[i];
+        final spreadBearing = (360.0 / group.length) * i;
+        final adjustedPos = offsetLatLngMeters(
+          center,
+          spreadBearing,
+          _overlapSpreadMeters,
+        );
+        published.add(
+          entry.value.copyWith(
+            positionParam: adjustedPos,
+            zIndexParam: 10.0 + i,
+          ),
+        );
+      }
+    }
+    return published;
+  }
+
+  LatLng _groupCenter(List<LatLng> points) {
+    double lat = 0;
+    double lng = 0;
+    for (final point in points) {
+      lat += point.latitude;
+      lng += point.longitude;
+    }
+    return LatLng(lat / points.length, lng / points.length);
   }
 
   double _degreesToRadians(double degrees) => degrees * math.pi / 180;

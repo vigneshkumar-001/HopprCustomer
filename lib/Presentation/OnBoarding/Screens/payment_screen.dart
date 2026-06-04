@@ -52,6 +52,8 @@ class PaymentScreen extends StatefulWidget {
 }
 
 class _PaymentScreenState extends State<PaymentScreen> {
+  static const String _customerCompletedCashBookingKey =
+      'customer_completed_cash_booking_id';
   int selectedIndex = 3;
 
   final DriverSearchController driverSearchController =
@@ -69,6 +71,13 @@ class _PaymentScreenState extends State<PaymentScreen> {
   bool payPalLoading = false;
   bool flutterWaveLoading = false;
   bool payStackLoading = false;
+
+  Future<void> _markCustomerCashPaymentCompleted() async {
+    final bookingId = (widget.bookingId ?? '').trim();
+    if (bookingId.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_customerCompletedCashBookingKey, bookingId);
+  }
 
   void _goToHomeAfterPayment() {
     if (!mounted) return;
@@ -1586,15 +1595,14 @@ class _PaymentScreenState extends State<PaymentScreen> {
                             return;
                           }
 
-                          final result = await packageController.paymentDetails(
+                          final success = await packageController.paymentDetails(
                             bookingId: widget.bookingId ?? '',
                             paymentType: 'WALLET',
                             context: context,
                           );
 
                           // call ONCE after success (adjust according to your API’s success contract)
-                          if (result ==
-                              '' /* success per your current code */ ) {
+                          if (success) {
                             await _completePaymentFlow(paymentMethod: 'Wallet');
                           }
                           return;
@@ -1602,13 +1610,14 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
                         if (selectedIndex == 3) {
                           // COD
-                          final result = await packageController.paymentDetails(
+                          final success = await packageController.paymentDetails(
                             bookingId: widget.bookingId ?? '',
                             paymentType: 'COD',
                             context: context,
                           );
                           // show ONCE after success
-                          if (result == '' /* success */ ) {
+                          if (success) {
+                            await _markCustomerCashPaymentCompleted();
                             await _completePaymentFlow(paymentMethod: 'Cash on Delivery');
                           }
                           return;

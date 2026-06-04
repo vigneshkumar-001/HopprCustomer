@@ -80,10 +80,10 @@ class RideTrackingMapState extends State<RideTrackingMap>
   LatLng? _pendingMarkerPos;
   double? _pendingMarkerBearing;
   DateTime _lastMarkerCommitAt = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _markerMinInterval = Duration(milliseconds: 90);
+  static const Duration _markerMinInterval = Duration(milliseconds: 70);
 
   DateTime _lastPolylineTrimAt = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _polyTrimInterval = Duration(milliseconds: 260);
+  static const Duration _polyTrimInterval = Duration(milliseconds: 180);
 
   DateTime _lastCameraAt = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _cameraInterval = Duration(milliseconds: 900);
@@ -114,8 +114,12 @@ class RideTrackingMapState extends State<RideTrackingMap>
         _maybeTrimRoute(pos);
         _maybeFollowCamera(pos);
       },
-      // Debounce raw GPS packets (ignore <5m moves).
-      minMoveMeters: 5.0,
+      playbackDelay: const Duration(milliseconds: 220),
+      minSeg: const Duration(milliseconds: 320),
+      maxSeg: const Duration(milliseconds: 900),
+      minMoveMeters: 1.5,
+      stationarySpeedThresholdMps: 0.35,
+      stationaryIgnoreUnderMeters: 1.8,
     );
 
     _loadMapStyle();

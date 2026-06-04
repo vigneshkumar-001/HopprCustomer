@@ -773,13 +773,14 @@ class _ConfirmBookingState extends State<ConfirmBooking> {
 
   Future<void> _showPhotoConfirmationDialog(BuildContext context) async {
     File? capturedImage;
+    bool isDialogSubmitting = false;
 
     await showDialog(
       context: context,
       barrierDismissible: false,
       builder: (context) {
         return StatefulBuilder(
-          builder: (context, setState) {
+          builder: (context, setDialogState) {
             return AlertDialog(
               backgroundColor: AppColors.commonWhite,
               shape: RoundedRectangleBorder(
@@ -813,11 +814,14 @@ class _ConfirmBookingState extends State<ConfirmBooking> {
                   ),
                   if (capturedImage != null)
                     TextButton.icon(
-                      onPressed: () async {
+                      onPressed: isDialogSubmitting
+                          ? null
+                          : () async {
                         // Retake selfie
                         final image = await _captureSelfie();
+                        if (!context.mounted) return;
                         if (image != null) {
-                          setState(() => capturedImage = image);
+                          setDialogState(() => capturedImage = image);
                         }
                       },
                       icon: const Icon(Icons.refresh, color: Colors.black),
@@ -828,101 +832,142 @@ class _ConfirmBookingState extends State<ConfirmBooking> {
                     ),
                 ],
               ),
+              actionsAlignment: MainAxisAlignment.center,
+              actionsPadding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
               actions: [
-                if (capturedImage == null)
-                  TextButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: const Text(
-                      "Cancel",
-                      style: TextStyle(color: Colors.grey),
-                    ),
-                  ),
-                ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.black,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                  ),
-                  onPressed: () async {
-                    if (capturedImage == null) {
-                      final image = await _captureSelfie();
-                      if (image != null) setState(() => capturedImage = image);
-                    } else {
-                      setState(() => _isLoading = true); // start loader
-                      try {
-                        final success = await _uploadPhotoAndBook(
-                          capturedImage!,
-                        );
-                        if (success) {
-                          Navigator.pop(context); // Close dialog
-                          final allData = driverController.carBooking.value;
-                          final fareBreakdown = allData?.fareBreakdown;
-                          final fare =
-                              (fareBreakdown != null &&
-                                      fareBreakdown.isNotEmpty)
-                                  ? fareBreakdown.first
-                                  : null;
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder:
-                                  (context) => OrderConfirmScreen(
-                                    carType: widget.carType ?? '',
-                                    bookingId:
-                                        allData?.bookingId.toString() ?? '',
-                                    baseFare: allData?.baseFare ?? 0.0,
-                                    bookingFee: fare?.bookingFee ?? 0.0,
-                                    pickupFare: fare?.pickupFare ?? 0.0,
-                                    timeFare: fare?.timeFare ?? 0.0,
-                                    distanceFare: fare?.distanceFare ?? 0.0,
-                                    serviceFare: allData?.serviceFare ?? 0.0,
-                                    pickupData: {
-                                      'description': widget.pickupAddress,
-                                      'lat': _pickupPosition?.latitude ?? 0.0,
-                                      'lng': _pickupPosition?.longitude ?? 0.0,
-                                    },
-                                    destinationData: {
-                                      'description': widget.destinationAddress,
-                                      'lat':
-                                          _destinationPosition?.latitude ?? 0.0,
-                                      'lng':
-                                          _destinationPosition?.longitude ??
-                                          0.0,
-                                    },
-                                    pickupAddress: widget.pickupAddress,
-                                    destinationAddress:
-                                        widget.destinationAddress,
-                                  ),
-                            ),
-                          );
-                        }
-                      } finally {
-                        setState(() => _isLoading = false);
-                      }
-                    }
-                  },
-                  child:
-                      _isLoading
-                          ? const Center(
-                            child: SizedBox(
-                              height: 24,
-                              width: 24,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
-                              ),
-                            ),
-                          )
-                          : Text(
-                            capturedImage == null
-                                ? "Take Photo"
-                                : "Upload and Confirm Booking",
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w600,
+                SizedBox(
+                  width: double.infinity,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (capturedImage == null)
+                        TextButton(
+                          onPressed: isDialogSubmitting
+                              ? null
+                              : () => Navigator.pop(context),
+                          child: const Text(
+                            "Cancel",
+                            style: TextStyle(color: Colors.grey),
+                          ),
+                        ),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.black,
+                            minimumSize: const Size.fromHeight(50),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(10),
                             ),
                           ),
+                          onPressed: isDialogSubmitting
+                              ? null
+                              : () async {
+                                  if (capturedImage == null) {
+                                    final image = await _captureSelfie();
+                                    if (!context.mounted) return;
+                                    if (image != null) {
+                                      setDialogState(() => capturedImage = image);
+                                    }
+                                    return;
+                                  }
+
+                                  if (isDialogSubmitting) return;
+
+                                  setDialogState(() => isDialogSubmitting = true);
+                                  try {
+                                    final success = await _uploadPhotoAndBook(
+                                      capturedImage!,
+                                    );
+                                    if (!context.mounted) return;
+
+                                    if (success) {
+                                      Navigator.pop(context); // Close dialog
+                                      final allData = driverController.carBooking.value;
+                                      final fareBreakdown = allData?.fareBreakdown;
+                                      final fare =
+                                          (fareBreakdown != null &&
+                                                  fareBreakdown.isNotEmpty)
+                                              ? fareBreakdown.first
+                                              : null;
+                                      if (!mounted) return;
+                                      Navigator.push(
+                                        context,
+                                        MaterialPageRoute(
+                                          builder:
+                                              (context) => OrderConfirmScreen(
+                                                carType: widget.carType ?? '',
+                                                bookingId:
+                                                    allData?.bookingId.toString() ??
+                                                    '',
+                                                baseFare: allData?.baseFare ?? 0.0,
+                                                bookingFee: fare?.bookingFee ?? 0.0,
+                                                pickupFare: fare?.pickupFare ?? 0.0,
+                                                timeFare: fare?.timeFare ?? 0.0,
+                                                distanceFare: fare?.distanceFare ?? 0.0,
+                                                serviceFare:
+                                                    allData?.serviceFare ?? 0.0,
+                                                pickupData: {
+                                                  'description': widget.pickupAddress,
+                                                  'lat':
+                                                      _pickupPosition?.latitude ??
+                                                      0.0,
+                                                  'lng':
+                                                      _pickupPosition?.longitude ??
+                                                      0.0,
+                                                },
+                                                destinationData: {
+                                                  'description':
+                                                      widget.destinationAddress,
+                                                  'lat':
+                                                      _destinationPosition
+                                                          ?.latitude ??
+                                                      0.0,
+                                                  'lng':
+                                                      _destinationPosition
+                                                          ?.longitude ??
+                                                      0.0,
+                                                },
+                                                pickupAddress:
+                                                    widget.pickupAddress,
+                                                destinationAddress:
+                                                    widget.destinationAddress,
+                                              ),
+                                        ),
+                                      );
+                                    }
+                                  } finally {
+                                    if (context.mounted) {
+                                      setDialogState(
+                                        () => isDialogSubmitting = false,
+                                      );
+                                    }
+                                  }
+                                },
+                          child:
+                              isDialogSubmitting
+                                  ? const SizedBox(
+                                    height: 24,
+                                    width: 24,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Colors.white,
+                                    ),
+                                  )
+                                  : Text(
+                                    capturedImage == null
+                                        ? "Take Photo"
+                                        : "Upload and Confirm Booking",
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ],
             );
@@ -931,8 +976,6 @@ class _ConfirmBookingState extends State<ConfirmBooking> {
       },
     );
   }
-
-  bool _isLoading = false;
   Future<bool> _uploadPhotoAndBook(File image) async {
     try {
       printImageSize(image, label: "Before Upload (input)");

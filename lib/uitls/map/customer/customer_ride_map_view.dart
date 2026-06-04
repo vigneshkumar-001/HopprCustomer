@@ -93,10 +93,10 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   LatLng? _pendingMarkerPos;
   double? _pendingMarkerBearing;
   DateTime _lastMarkerCommitAt = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _markerMinInterval = Duration(milliseconds: 90);
+  static const Duration _markerMinInterval = Duration(milliseconds: 70);
 
   DateTime _lastPolylineTrimAt = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _polyTrimInterval = Duration(milliseconds: 260);
+  static const Duration _polyTrimInterval = Duration(milliseconds: 180);
 
   double _bearingWithVehicleIconOffset(double bearing) {
     final offset =
@@ -129,8 +129,12 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
         _maybeTrimRoute(snapped.position);
         _maybeFollowCamera(snapped.position);
       },
-      // Debounce raw GPS packets (ignore <5m moves).
-      minMoveMeters: 5.0,
+      playbackDelay: const Duration(milliseconds: 220),
+      minSeg: const Duration(milliseconds: 320),
+      maxSeg: const Duration(milliseconds: 900),
+      minMoveMeters: 1.5,
+      stationarySpeedThresholdMps: 0.35,
+      stationaryIgnoreUnderMeters: 1.8,
     );
 
     _loadMapStyle();
@@ -527,7 +531,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       return _SnappedPose(position: raw, bearing: fallbackBearing);
     }
 
-    final nearest = nearestPointOnPolyline(raw, routeForSnap);
+    final nearest = _nearestSnapCandidate(raw, routeForSnap);
     if (nearest == null) {
       return _SnappedPose(position: raw, bearing: fallbackBearing);
     }
@@ -548,13 +552,137 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     final next = routeForSnap[nextIdx];
 
     final routeBearing = bearingBetween(prev, next);
+    final bearingMismatch =
+        rawBearing != null
+            ? shortestAngleDelta(rawBearing, routeBearing).abs()
+            : 0.0;
+    if (rawBearing != null &&
+        bearingMismatch > 85.0 &&
+        nearest.distanceMeters > 4.0) {
+      return _SnappedPose(position: raw, bearing: fallbackBearing);
+    }
+
+    final snappedMoveFromCurrent =
+        _vehiclePos == null
+            ? 0.0
+            : Geolocator.distanceBetween(
+              _vehiclePos!.latitude,
+              _vehiclePos!.longitude,
+              nearest.point.latitude,
+              nearest.point.longitude,
+            );
+    final rawMoveFromCurrent =
+        _vehiclePos == null
+            ? 0.0
+            : Geolocator.distanceBetween(
+              _vehiclePos!.latitude,
+              _vehiclePos!.longitude,
+              raw.latitude,
+              raw.longitude,
+            );
+    if (nearest.distanceMeters > 6.0 &&
+        snappedMoveFromCurrent > rawMoveFromCurrent + 14.0) {
+      return _SnappedPose(position: raw, bearing: fallbackBearing);
+    }
+
     final smooth = smoothBearing(
       currentDeg: fallbackBearing,
       targetDeg: routeBearing,
       alpha: 0.22,
     );
 
-    return _SnappedPose(position: nearest.point, bearing: smooth);
+    final resolved = _resolveDisplayPosition(
+      raw: raw,
+      snapped: nearest.point,
+      maxSnapMeters:
+          (toleranceMeters ?? MapUiConfig.snapToRouteToleranceMeters),
+    );
+
+    return _SnappedPose(position: resolved, bearing: smooth);
+  }
+
+  LatLng _resolveDisplayPosition({
+    required LatLng raw,
+    required LatLng snapped,
+    required double maxSnapMeters,
+  }) {
+    final currentDisplay = _vehiclePos;
+    if (currentDisplay == null) return snapped;
+
+    final rawMove = Geolocator.distanceBetween(
+      currentDisplay.latitude,
+      currentDisplay.longitude,
+      raw.latitude,
+      raw.longitude,
+    );
+    final snappedMove = Geolocator.distanceBetween(
+      currentDisplay.latitude,
+      currentDisplay.longitude,
+      snapped.latitude,
+      snapped.longitude,
+    );
+    final rawToSnap = Geolocator.distanceBetween(
+      raw.latitude,
+      raw.longitude,
+      snapped.latitude,
+      snapped.longitude,
+    );
+
+    final likelySnapFreeze =
+        rawMove >= 2.4 &&
+        snappedMove < 0.9 &&
+        rawToSnap <= maxSnapMeters &&
+        rawToSnap >= 1.2;
+
+    if (!likelySnapFreeze) {
+      return snapped;
+    }
+
+    final alpha = rawToSnap <= 6.0 ? 0.35 : 0.55;
+    return LatLng(
+      snapped.latitude + (raw.latitude - snapped.latitude) * alpha,
+      snapped.longitude + (raw.longitude - snapped.longitude) * alpha,
+    );
+  }
+
+  NearestPointOnPolylineResult? _nearestSnapCandidate(
+    LatLng raw,
+    List<LatLng> routeForSnap,
+  ) {
+    final baseIndex = (_lastTrimIndex < 0 ? 0 : _lastTrimIndex).clamp(
+      0,
+      routeForSnap.length - 2,
+    );
+    final start = (baseIndex - 6).clamp(0, routeForSnap.length - 2);
+    final end = (baseIndex + 22).clamp(0, routeForSnap.length - 2);
+
+    NearestPointOnPolylineResult? bestWindow;
+    final windowPoints = routeForSnap.sublist(start, end + 2);
+    final windowNearest = nearestPointOnPolyline(raw, windowPoints);
+    if (windowNearest != null) {
+      bestWindow = NearestPointOnPolylineResult(
+        point: windowNearest.point,
+        segmentIndex: windowNearest.segmentIndex + start,
+        t: windowNearest.t,
+        distanceMeters: windowNearest.distanceMeters,
+      );
+    }
+
+    final nearestGlobal = nearestPointOnPolyline(raw, routeForSnap);
+    if (bestWindow == null) return nearestGlobal;
+    if (nearestGlobal == null) return bestWindow;
+
+    final windowIsCloseEnough =
+        bestWindow.distanceMeters <=
+        MapUiConfig.snapToRouteToleranceMeters + 12.0;
+    final globalIsMuchBetter =
+        nearestGlobal.distanceMeters + 8.0 < bestWindow.distanceMeters;
+    final globalIsForwardEnough = nearestGlobal.segmentIndex + 2 >= baseIndex;
+
+    if (windowIsCloseEnough || !globalIsMuchBetter || !globalIsForwardEnough) {
+      return bestWindow;
+    }
+    return nearestGlobal;
   }
 
   int? _nearestIndexInWindow(

@@ -28,6 +28,7 @@ import 'package:hopper/api/repository/api_consents.dart';
 import 'package:hopper/uitls/netWorkHandling/network_handling_screen.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:hopper/uitls/websocket/shared_web_socket.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../Controller/home_map_controller.dart';
 
@@ -125,6 +126,9 @@ class HomeScreens extends StatefulWidget {
 
 class _HomeScreensState extends State<HomeScreens>
     with AutomaticKeepAliveClientMixin, WidgetsBindingObserver {
+  static const String _customerCompletedCashBookingKey =
+      'customer_completed_cash_booking_id';
+
   @override
   bool get wantKeepAlive => true;
 
@@ -159,6 +163,32 @@ class _HomeScreensState extends State<HomeScreens>
   final ValueNotifier<bool> _showActiveRideCard = ValueNotifier<bool>(false);
 
   final ValueNotifier<double> _sheetHeightN = ValueNotifier<double>(0);
+
+  Future<String?> _getLocallyCompletedCashBookingId() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_customerCompletedCashBookingKey);
+  }
+
+  Future<void> _clearLocallyCompletedCashBookingId() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_customerCompletedCashBookingKey);
+  }
+
+  Future<bool> _shouldSuppressActiveRide(ActiveBookingData ride) async {
+    final storedBookingId = await _getLocallyCompletedCashBookingId();
+
+    if (storedBookingId != null && storedBookingId == ride.bookingId) {
+      return true;
+    }
+
+    if (_isCustomerTerminalRide(ride)) {
+      if (storedBookingId == ride.bookingId) {
+        await _clearLocallyCompletedCashBookingId();
+      }
+      return true;
+    }
+    return false;
+  }
 
   void _onSheetHeightChanged(double h) {
     if (!mounted) return;
@@ -466,21 +496,23 @@ class _HomeScreensState extends State<HomeScreens>
     final result = await _apiDataSource.getActiveBooking();
     if (!mounted) return;
 
-    result.fold(
-      (_) {
+    await result.fold<Future<void>>(
+      (_) async {
         // API fail -> don't disturb main screen
         setState(() {
           _checkingActiveRide = false;
         });
       },
-      (response) {
+      (response) async {
         final data = response.data;
+        final shouldSuppressRide =
+            data != null ? await _shouldSuppressActiveRide(data) : false;
 
         final hasValidActiveRide =
             response.success &&
             response.hasActiveBooking &&
             data != null &&
-            !_isCustomerTerminalRide(data);
+            !shouldSuppressRide;
 
         setState(() {
           _checkingActiveRide = false;
@@ -505,6 +537,10 @@ class _HomeScreensState extends State<HomeScreens>
             _showActiveRideCard.value = false;
           }
         });
+
+        if (!hasValidActiveRide && !shouldSuppressRide) {
+          await _clearLocallyCompletedCashBookingId();
+        }
       },
     );
   }
@@ -513,7 +549,7 @@ class _HomeScreensState extends State<HomeScreens>
     final ride = _activeRide;
     if (ride == null) return;
 
-    if (_isCustomerTerminalRide(ride)) {
+    if (await _shouldSuppressActiveRide(ride)) {
       if (mounted) {
         setState(() {
           _activeRide = null;

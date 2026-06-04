@@ -76,7 +76,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   LatLng? _pendingDriverMarkerPos;
   double? _pendingDriverMarkerBearing;
   DateTime _lastDriverMarkerCommitAt = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _driverMarkerMinInterval = Duration(milliseconds: 90);
+  static const Duration _driverMarkerMinInterval = Duration(milliseconds: 70);
   bool driverStartedRide = false;
   bool destinationReached = false;
   bool _autoFollowEnabled = true;
@@ -178,33 +178,206 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
   DateTime _parseServerTime(dynamic ts) {
     try {
-      if (ts == null) return DateTime.now();
+      if (ts == null) return DateTime.now().toUtc();
       if (ts is int) {
-        // seconds (10-digit) vs milliseconds (13-digit)
         if (ts < 2000000000) {
-          return DateTime.fromMillisecondsSinceEpoch(ts * 1000);
+          return DateTime.fromMillisecondsSinceEpoch(ts * 1000, isUtc: true);
         }
-        return DateTime.fromMillisecondsSinceEpoch(ts);
+        return DateTime.fromMillisecondsSinceEpoch(ts, isUtc: true);
       }
       if (ts is String) {
         final parsed = DateTime.tryParse(ts);
-        if (parsed != null) return parsed.toLocal();
+        if (parsed != null) return parsed.toUtc();
       }
-      return DateTime.now();
+      return DateTime.now().toUtc();
     } catch (_) {
-      return DateTime.now();
+      return DateTime.now().toUtc();
     }
   }
 
-  bool _isFreshTrackingTimestamp(
+  DateTime _normalizeTrackingTimestampUtc(
     DateTime ts, {
-    Duration maxAge = const Duration(seconds: 20),
+    required bool simulated,
     Duration maxFutureSkew = const Duration(seconds: 12),
   }) {
-    final now = DateTime.now();
-    if (ts.isAfter(now.add(maxFutureSkew))) return false;
-    if (now.difference(ts) > maxAge) return false;
+    final nowUtc = DateTime.now().toUtc();
+    if (simulated) {
+      return nowUtc;
+    }
+    if (ts.isAfter(nowUtc.add(maxFutureSkew))) {
+      return nowUtc;
+    }
+    return ts;
+  }
+
+  bool _isSameTrackingPoint(LatLng a, LatLng b, {double epsilonMeters = 0.6}) {
+    return Geolocator.distanceBetween(
+          a.latitude,
+          a.longitude,
+          b.latitude,
+          b.longitude,
+        ) <=
+        epsilonMeters;
+  }
+
+  bool _shouldAcceptTrackingPacket({
+    required DateTime receivedTsUtc,
+    required LatLng position,
+    required bool simulated,
+    required String source,
+  }) {
+    final lastAcceptedTsUtc = _lastAcceptedTrackingTsUtc;
+    final lastAcceptedPos = _lastAcceptedTrackingPos;
+    String decision = 'accepted';
+
+    if (lastAcceptedPos != null) {
+      final samePoint = _isSameTrackingPoint(lastAcceptedPos, position);
+      final tsDiffMs =
+          receivedTsUtc.difference(lastAcceptedTsUtc).inMilliseconds.abs();
+      if (samePoint && tsDiffMs <= 2500) {
+        decision = 'duplicate_same_point';
+        if (kDebugMode) {
+          AppLogger.log.d(
+            'package tracking decision source=$source receivedTsUtc=$receivedTsUtc '
+            'lastAcceptedTsUtc=$lastAcceptedTsUtc staleDecision=$decision markerUpdated=false',
+          );
+        }
+        return false;
+      }
+      if (receivedTsUtc.isBefore(
+        lastAcceptedTsUtc.subtract(const Duration(seconds: 3)),
+      )) {
+        if (simulated && !samePoint) {
+          decision = 'simulator_reordered_accept';
+        } else {
+          decision = simulated ? 'simulator_out_of_order' : 'older_than_last';
+          if (kDebugMode) {
+            AppLogger.log.d(
+              'package tracking decision source=$source receivedTsUtc=$receivedTsUtc '
+              'lastAcceptedTsUtc=$lastAcceptedTsUtc staleDecision=$decision markerUpdated=false',
+            );
+          }
+          return false;
+        }
+      }
+    } else if (!simulated) {
+      final age = DateTime.now().toUtc().difference(receivedTsUtc);
+      if (age > const Duration(minutes: 2)) {
+        decision = 'too_old_initial';
+        if (kDebugMode) {
+          AppLogger.log.d(
+            'package tracking decision source=$source receivedTsUtc=$receivedTsUtc '
+            'lastAcceptedTsUtc=$lastAcceptedTsUtc staleDecision=$decision markerUpdated=false',
+          );
+        }
+        return false;
+      }
+    }
+
+    if (kDebugMode) {
+      AppLogger.log.d(
+        'package tracking decision source=$source receivedTsUtc=$receivedTsUtc '
+        'lastAcceptedTsUtc=$lastAcceptedTsUtc staleDecision=$decision markerUpdated=true',
+      );
+    }
     return true;
+  }
+
+  void _handlePackageTrackingUpdate(dynamic data, {required String source}) {
+    if (!mounted) return;
+
+    final payload = _normalizeSocketPayload(data);
+    if (payload.isEmpty) return;
+
+    final lat = _toDouble(payload['latitude'] ?? payload['lat']);
+    final lng = _toDouble(
+      payload['longitude'] ?? payload['lng'] ?? payload['lon'],
+    );
+    if (lat == null || lng == null) {
+      AppLogger.log.e("Invalid $source payload: $payload");
+      return;
+    }
+    final newDriverLatLng = LatLng(lat, lng);
+    if (!_isValidCoordinate(newDriverLatLng)) return;
+
+    final isSimulated =
+        payload['simulated'] == true ||
+        (payload['source'] ?? '').toString().trim().toLowerCase() ==
+            'ride-simulator';
+    final ts = _normalizeTrackingTimestampUtc(
+      _parseServerTime(
+        payload['timestamp'] ?? payload['ts'] ?? payload['time'],
+      ),
+      simulated: isSimulated,
+    );
+    if (!_shouldAcceptTrackingPacket(
+      receivedTsUtc: ts,
+      position: newDriverLatLng,
+      simulated: isSimulated,
+      source: source,
+    )) {
+      if (kDebugMode) {
+        AppLogger.log.w(
+          'Ignoring stale package $source ts=$ts '
+          'lat=${newDriverLatLng.latitude} lng=${newDriverLatLng.longitude}',
+        );
+      }
+      return;
+    }
+    _lastAcceptedTrackingTsUtc =
+        isSimulated && ts.isBefore(_lastAcceptedTrackingTsUtc)
+            ? _lastAcceptedTrackingTsUtc.add(const Duration(milliseconds: 1))
+            : ts;
+    _lastAcceptedTrackingPos = newDriverLatLng;
+
+    final bearing = _parseBearingDeg(
+      payload['bearing'] ?? payload['heading'] ?? payload['rotation'],
+    );
+    final b0 = bearing ?? _lastBearing;
+
+    final driverPhone = _normalizePhone(
+      (payload['driverPhone'] ?? payload['phone'] ?? payload['mobile'] ?? '')
+          .toString(),
+    );
+    if (driverPhone.isNotEmpty) {
+      CUSTOMERPHONE = driverPhone;
+    }
+
+    if (!_motionReady) {
+      _motion.reset(newDriverLatLng, bearing: b0);
+      _motionReady = true;
+      _currentDriverLatLng = newDriverLatLng;
+      _lastBearing = b0;
+      _maybeUpdatePolyline(newDriverLatLng, force: true);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _fitDriverAndTargetOnce(toDrop: driverStartedRide);
+      });
+    } else {
+      final accepted = _motion.ingest(
+        newDriverLatLng,
+        serverTs: ts,
+        bearing: b0,
+      );
+      if (!accepted &&
+          _currentDriverLatLng != null &&
+          Geolocator.distanceBetween(
+                _currentDriverLatLng!.latitude,
+                _currentDriverLatLng!.longitude,
+                newDriverLatLng.latitude,
+                newDriverLatLng.longitude,
+              ) >
+              1.0) {
+        _motion.reset(newDriverLatLng, bearing: b0);
+        _currentDriverLatLng = newDriverLatLng;
+        _lastBearing = b0;
+      }
+      if (_polylinesNotifier.value.isEmpty) {
+        _maybeUpdatePolyline(newDriverLatLng, force: true);
+      }
+    }
+
+    _checkRouteDeviation(newDriverLatLng);
   }
 
   Map<String, dynamic> _asMap(dynamic v) {
@@ -789,6 +962,11 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   bool _motionReady = false;
   double _lastBearing = 0.0;
   DateTime _lastDriverLocationLogAt = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastAcceptedTrackingTsUtc = DateTime.fromMillisecondsSinceEpoch(
+    0,
+    isUtc: true,
+  );
+  LatLng? _lastAcceptedTrackingPos;
 
   // ---------- polyline throttle ----------
   DateTime _lastPolylineAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -801,14 +979,14 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   DateTime _lastOffRouteCheckAt = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _rerouteMinInterval = Duration(seconds: 20);
   static const Duration _offRouteCheckInterval = Duration(milliseconds: 700);
-  static const double _offRouteThresholdMeters = 50.0;
+  static const double _offRouteThresholdMeters = 34.0;
 
   // ---------- route progress trim ----------
   int _lastTrimSegIndex = -1;
   DateTime _lastTrimAt = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _trimInterval = Duration(milliseconds: 450);
   static const double _trimMaxSnapMeters = 55.0;
-  static const double _routeSnapToleranceMeters = 42.0;
+  static const double _routeSnapToleranceMeters = 20.0;
 
   DateTime _lastBoundsAt = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _boundsInterval = Duration(seconds: 4);
@@ -1087,6 +1265,12 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         _maybeUpdatePolyline(snapped.position);
         _trimActivePolyline(snapped.position);
       },
+      playbackDelay: const Duration(milliseconds: 220),
+      minSeg: const Duration(milliseconds: 320),
+      maxSeg: const Duration(milliseconds: 900),
+      minMoveMeters: 1.5,
+      stationarySpeedThresholdMps: 0.35,
+      stationaryIgnoreUnderMeters: 1.8,
     );
 
     _searchingElapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -1374,8 +1558,15 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
       if (!_isValidCoordinate(newDriverLatLng)) return;
 
-      final ts = _parseServerTime(
-        payload['timestamp'] ?? payload['ts'] ?? payload['time'],
+      final isSimulated =
+          payload['simulated'] == true ||
+          (payload['source'] ?? '').toString().trim().toLowerCase() ==
+              'ride-simulator';
+      final ts = _normalizeTrackingTimestampUtc(
+        _parseServerTime(
+          payload['timestamp'] ?? payload['ts'] ?? payload['time'],
+        ),
+        simulated: isSimulated,
       );
       final bearing = _parseBearingDeg(
         payload['bearing'] ?? payload['heading'] ?? payload['rotation'],
@@ -1392,16 +1583,28 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       // Smooth motion engine (shared with BookRide maps):
       // socket GPS -> DriverMotionEngine.ingest -> onUpdate -> marker via ValueNotifier
       final b0 = bearing ?? _lastBearing;
-      if (!_motionReady) {
-        if (!_isFreshTrackingTimestamp(ts)) {
-          if (kDebugMode) {
-            AppLogger.log.w(
-              'Ignoring stale initial package driver-location ts=$ts '
-              'lat=${newDriverLatLng.latitude} lng=${newDriverLatLng.longitude}',
-            );
-          }
-          return;
+      if (!_shouldAcceptTrackingPacket(
+        receivedTsUtc: ts,
+        position: newDriverLatLng,
+        simulated: isSimulated,
+        source: 'driver-location',
+      )) {
+        if (kDebugMode) {
+          AppLogger.log.w(
+            'Ignoring stale package driver-location ts=$ts '
+            'lat=${newDriverLatLng.latitude} lng=${newDriverLatLng.longitude}',
+          );
         }
+        return;
+      }
+      _lastAcceptedTrackingTsUtc =
+          isSimulated && ts.isBefore(_lastAcceptedTrackingTsUtc)
+              ? _lastAcceptedTrackingTsUtc.add(
+                  const Duration(milliseconds: 1),
+                )
+              : ts;
+      _lastAcceptedTrackingPos = newDriverLatLng;
+      if (!_motionReady) {
         _motion.reset(newDriverLatLng, bearing: b0);
         _motionReady = true;
         _currentDriverLatLng = newDriverLatLng;
@@ -1418,8 +1621,11 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         }
       }
 
-      // Always check deviation after each socket update (reroute trigger).
-      _checkRouteDeviation(newDriverLatLng);
+      // For simulator streams, route deviation checks can cause noisy reroutes
+      // and visible marker shake. Keep reroute logic for real live GPS only.
+      if (!isSimulated) {
+        _checkRouteDeviation(newDriverLatLng);
+      }
 
       // ✅ Animate movement
 
@@ -1656,7 +1862,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       return _SnappedDriverPose(position: raw, bearing: fallbackBearing);
     }
 
-    final nearest = nearestPointOnPolyline(raw, _activeRoutePoints);
+    final nearest = _nearestSnapCandidate(raw);
     if (nearest == null) {
       return _SnappedDriverPose(position: raw, bearing: fallbackBearing);
     }
@@ -1677,13 +1883,133 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     final prev = _activeRoutePoints[prevIdx];
     final next = _activeRoutePoints[nextIdx];
     final routeBearing = bearingBetween(prev, next);
+    final bearingMismatch =
+        rawBearing != null
+            ? shortestAngleDelta(rawBearing, routeBearing).abs()
+            : 0.0;
+    if (rawBearing != null &&
+        bearingMismatch > 85.0 &&
+        nearest.distanceMeters > 4.0) {
+      return _SnappedDriverPose(position: raw, bearing: fallbackBearing);
+    }
+
+    final snappedMoveFromCurrent =
+        _currentDriverLatLng == null
+            ? 0.0
+            : Geolocator.distanceBetween(
+              _currentDriverLatLng!.latitude,
+              _currentDriverLatLng!.longitude,
+              nearest.point.latitude,
+              nearest.point.longitude,
+            );
+    final rawMoveFromCurrent =
+        _currentDriverLatLng == null
+            ? 0.0
+            : Geolocator.distanceBetween(
+              _currentDriverLatLng!.latitude,
+              _currentDriverLatLng!.longitude,
+              raw.latitude,
+              raw.longitude,
+            );
+    if (nearest.distanceMeters > 6.0 &&
+        snappedMoveFromCurrent > rawMoveFromCurrent + 14.0) {
+      return _SnappedDriverPose(position: raw, bearing: fallbackBearing);
+    }
+
     final smooth = smoothBearing(
       currentDeg: fallbackBearing,
       targetDeg: routeBearing,
       alpha: 0.22,
     );
 
-    return _SnappedDriverPose(position: nearest.point, bearing: smooth);
+    final resolved = _resolveDisplayPosition(
+      raw: raw,
+      snapped: nearest.point,
+      maxSnapMeters: maxSnap,
+    );
+
+    return _SnappedDriverPose(position: resolved, bearing: smooth);
+  }
+
+  LatLng _resolveDisplayPosition({
+    required LatLng raw,
+    required LatLng snapped,
+    required double maxSnapMeters,
+  }) {
+    final currentDisplay = _currentDriverLatLng;
+    if (currentDisplay == null) return snapped;
+
+    final rawMove = Geolocator.distanceBetween(
+      currentDisplay.latitude,
+      currentDisplay.longitude,
+      raw.latitude,
+      raw.longitude,
+    );
+    final snappedMove = Geolocator.distanceBetween(
+      currentDisplay.latitude,
+      currentDisplay.longitude,
+      snapped.latitude,
+      snapped.longitude,
+    );
+    final rawToSnap = Geolocator.distanceBetween(
+      raw.latitude,
+      raw.longitude,
+      snapped.latitude,
+      snapped.longitude,
+    );
+
+    final likelySnapFreeze =
+        rawMove >= 2.4 &&
+        snappedMove < 0.9 &&
+        rawToSnap <= maxSnapMeters &&
+        rawToSnap >= 1.2;
+
+    if (!likelySnapFreeze) {
+      return snapped;
+    }
+
+    final alpha = rawToSnap <= 6.0 ? 0.35 : 0.55;
+    return LatLng(
+      snapped.latitude + (raw.latitude - snapped.latitude) * alpha,
+      snapped.longitude + (raw.longitude - snapped.longitude) * alpha,
+    );
+  }
+
+  NearestPointOnPolylineResult? _nearestSnapCandidate(LatLng raw) {
+    if (_activeRoutePoints.length < 2) return null;
+    final baseIndex = (_lastTrimSegIndex < 0 ? 0 : _lastTrimSegIndex).clamp(
+      0,
+      _activeRoutePoints.length - 2,
+    );
+    final start = (baseIndex - 6).clamp(0, _activeRoutePoints.length - 2);
+    final end = (baseIndex + 22).clamp(0, _activeRoutePoints.length - 2);
+
+    final windowPoints = _activeRoutePoints.sublist(start, end + 2);
+    final windowNearest = nearestPointOnPolyline(raw, windowPoints);
+    final bestWindow =
+        windowNearest == null
+            ? null
+            : NearestPointOnPolylineResult(
+              point: windowNearest.point,
+              segmentIndex: windowNearest.segmentIndex + start,
+              t: windowNearest.t,
+              distanceMeters: windowNearest.distanceMeters,
+            );
+
+    final nearestGlobal = nearestPointOnPolyline(raw, _activeRoutePoints);
+    if (bestWindow == null) return nearestGlobal;
+    if (nearestGlobal == null) return bestWindow;
+
+    final windowIsCloseEnough =
+        bestWindow.distanceMeters <= _routeSnapToleranceMeters + 10.0;
+    final globalIsMuchBetter =
+        nearestGlobal.distanceMeters + 8.0 < bestWindow.distanceMeters;
+    final globalIsForwardEnough = nearestGlobal.segmentIndex + 2 >= baseIndex;
+
+    if (windowIsCloseEnough || !globalIsMuchBetter || !globalIsForwardEnough) {
+      return bestWindow;
+    }
+    return nearestGlobal;
   }
 
   bool _routeMatchesCurrentPhase(
@@ -2285,6 +2611,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       socketService.off('booking-update');
       socketService.off('joined-booking');
       socketService.off('driver-location');
+      socketService.off('tracked-driver-location');
+      socketService.off('nearby-driver-update');
       socketService.off('driver-arrived');
       socketService.off('otp-generated');
       socketService.off('ride-started');

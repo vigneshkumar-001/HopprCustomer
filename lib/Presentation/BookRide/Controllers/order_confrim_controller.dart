@@ -245,7 +245,7 @@ class OrderConfirmController extends GetxController
   // Throttle driver marker updates to avoid rebuilding GoogleMap every frame.
   // `_updateDriverMarker` is called on every animation tick (up to ~60fps).
   // Rebuilding the platform view that often causes jank/white-map flashes.
-  static const Duration _driverMarkerMinInterval = Duration(milliseconds: 120);
+  static const Duration _driverMarkerMinInterval = Duration(milliseconds: 70);
   DateTime _lastDriverMarkerAt = DateTime.fromMillisecondsSinceEpoch(0);
   Timer? _driverMarkerFlushTimer;
   LatLng? _pendingDriverMarkerPos;
@@ -285,7 +285,9 @@ class OrderConfirmController extends GetxController
   double _lastBearing = 0.0;
   DateTime _lastAcceptedDriverLocationTs = DateTime.fromMillisecondsSinceEpoch(
     0,
+    isUtc: true,
   );
+  LatLng? _lastAcceptedDriverLocationPos;
 
   // =================================================================
   //                        POLYLINE CONTROL
@@ -326,8 +328,14 @@ class OrderConfirmController extends GetxController
       onFrameSideEffects: (pos) {
         _autoCameraUpdate();
       },
-      // Debounce raw GPS packets (ignore <5m moves).
-      minMoveMeters: 5.0,
+      // Tune closer to the home nearby-driver experience:
+      // lower playback lag + better visibility for slow traffic movement.
+      playbackDelay: const Duration(milliseconds: 220),
+      minSeg: const Duration(milliseconds: 320),
+      maxSeg: const Duration(milliseconds: 900),
+      minMoveMeters: 1.5,
+      stationarySpeedThresholdMps: 0.35,
+      stationaryIgnoreUnderMeters: 1.8,
     );
     _dir = DirectionsHelper(apiKey: ApiConsents.googleMapApiKey);
     _loadMapStyle();
@@ -380,6 +388,14 @@ class OrderConfirmController extends GetxController
     _pulseTimer?.cancel();
     _driverMarkerFlushTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
+    try {
+      socketService.off('joined-booking');
+      socketService.off('driver-location');
+      socketService.off('tracked-driver-location');
+      socketService.off('nearby-driver-update');
+      socketService.off('driver-arrived');
+      socketService.off('otp-generated');
+    } catch (_) {}
     _driverMotion.dispose();
     _clearActiveRoute();
     super.onClose();
@@ -956,102 +972,12 @@ class OrderConfirmController extends GetxController
         _fitDriverAndPickupOnce();
       }
 
-      if (driverId.trim().isNotEmpty) {
-        socketService.emit('track-driver', {'driverId': driverId.trim()});
-      }
     });
 
-    socketService.on('driver-location', (data) {
-      if (isClosed) return;
-
-      final lat = _toDouble(data['latitude'] ?? data['lat']);
-      final lng = _toDouble(data['longitude'] ?? data['lng']);
-      if (lat == null || lng == null) {
-        AppLogger.log.e("Invalid driver-location payload: $data");
-        return;
-      }
-      final rawTs = _parseServerTime(data['timestamp']);
-      if (!_isFreshTrackingTimestamp(rawTs)) {
-        if (kDebugMode) {
-          AppLogger.log.w(
-            'Ignoring stale ride driver-location ts=$rawTs lat=$lat lng=$lng',
-          );
-        }
-        return;
-      }
-      if (rawTs.isBefore(_lastAcceptedDriverLocationTs)) {
-        return;
-      }
-      _lastAcceptedDriverLocationTs = rawTs;
-
-      final newPos = LatLng(lat, lng);
-      driverLocation.value = newPos;
-
-      final srvBearing = _toDouble(data['bearing']);
-      final liveRideType =
-          (data['rideType'] ?? data['vehicleType'] ?? '').toString();
-      if (liveRideType.trim().isNotEmpty) {
-        cartypeFromServer.value = liveRideType;
-      }
-      final latestStatus =
-          (data['latestStatus'] ?? '').toString().toUpperCase();
-      _updateRideMetrics(data);
-      final derivedRideStarted = _isDropPhaseStatus(latestStatus);
-      final derivedRideCompleted = _isCompletedStatus(latestStatus);
-      final effectiveStatus =
-          latestStatus.trim().isNotEmpty
-              ? latestStatus
-              : latestRideStatus.value;
-
-      if (derivedRideStarted && !driverStartedRide.value) {
-        driverStartedRide.value = true;
-        _didFitDriverAndDrop = false;
-        _seedStaticMarkers(forceRecreate: false);
-        _refreshPulseCircles();
-        _updatePolylinesForStatus(
-          effectiveStatus,
-          driverPos: newPos,
-          force: true,
-        );
-      }
-      if (derivedRideCompleted) {
-        if (!driverStartedRide.value) {
-          driverStartedRide.value = true;
-        }
-        destinationReached.value = true;
-        nearDestination.value = true;
-        etaChipText.value = 'Arrived at destination';
-        _seedStaticMarkers(forceRecreate: false);
-        _refreshPulseCircles();
-        _clearActiveRoute();
-      }
-      // first point -> show immediately
-      if (_displayPos == null) {
-        _displayPos = newPos;
-        _emaPos = newPos;
-        _lastBearing = srvBearing ?? 0.0;
-        _driverMotion.reset(newPos, bearing: _lastBearing);
-
-        // Ola like: while waiting, show driver + pickup together
-        _fitDriverAndPickupOnce();
-
-        // polyline driver->pickup once
-        _updatePolylinesForStatus(
-          effectiveStatus,
-          driverPos: newPos,
-          force: true,
-        );
-        return;
-      }
-
-      // enqueue for smooth motion (shared helper)
-      _driverMotion.ingest(newPos, serverTs: rawTs, bearing: srvBearing);
-
-      // Keep polylines in sync with phase + driver motion (throttled/cached).
-      _updatePolylinesForStatus(effectiveStatus, driverPos: newPos);
-
-      // Motion ticks are handled inside DriverMotionEngine.
-    });
+    socketService.on(
+      'driver-location',
+      (data) => _handleDriverTrackingUpdate(data, source: 'driver-location'),
+    );
 
     socketService.on('driver-arrived', (data) {
       if (isClosed) return;
@@ -1140,32 +1066,246 @@ class OrderConfirmController extends GetxController
 
   DateTime _parseServerTime(dynamic ts) {
     try {
-      if (ts == null) return DateTime.now();
+      if (ts == null) return DateTime.now().toUtc();
       if (ts is int) {
         if (ts < 2000000000) {
-          return DateTime.fromMillisecondsSinceEpoch(ts * 1000);
+          return DateTime.fromMillisecondsSinceEpoch(ts * 1000, isUtc: true);
         }
-        return DateTime.fromMillisecondsSinceEpoch(ts);
+        return DateTime.fromMillisecondsSinceEpoch(ts, isUtc: true);
       }
       if (ts is String) {
         final parsed = DateTime.tryParse(ts);
-        if (parsed != null) return parsed.toLocal();
+        if (parsed != null) return parsed.toUtc();
       }
-      return DateTime.now();
+      return DateTime.now().toUtc();
     } catch (_) {
-      return DateTime.now();
+      return DateTime.now().toUtc();
     }
   }
 
-  bool _isFreshTrackingTimestamp(
+  DateTime _normalizeTrackingTimestampUtc(
     DateTime ts, {
-    Duration maxAge = const Duration(seconds: 20),
+    required bool simulated,
     Duration maxFutureSkew = const Duration(seconds: 12),
   }) {
-    final now = DateTime.now();
-    if (ts.isAfter(now.add(maxFutureSkew))) return false;
-    if (now.difference(ts) > maxAge) return false;
+    final nowUtc = DateTime.now().toUtc();
+    if (simulated) {
+      return nowUtc;
+    }
+    if (ts.isAfter(nowUtc.add(maxFutureSkew))) {
+      return nowUtc;
+    }
+    return ts;
+  }
+
+  bool _isSameTrackingPoint(LatLng a, LatLng b, {double epsilonMeters = 0.6}) {
+    return Geolocator.distanceBetween(
+          a.latitude,
+          a.longitude,
+          b.latitude,
+          b.longitude,
+        ) <=
+        epsilonMeters;
+  }
+
+  bool _shouldAcceptTrackingPacket({
+    required DateTime receivedTsUtc,
+    required LatLng position,
+    required bool simulated,
+    required String source,
+  }) {
+    final lastAcceptedTsUtc = _lastAcceptedDriverLocationTs;
+    final lastAcceptedPos = _lastAcceptedDriverLocationPos;
+    String decision = 'accepted';
+
+    if (lastAcceptedPos != null) {
+      final samePoint = _isSameTrackingPoint(lastAcceptedPos, position);
+      final tsDiffMs =
+          receivedTsUtc.difference(lastAcceptedTsUtc).inMilliseconds.abs();
+
+      if (samePoint && tsDiffMs <= 2500) {
+        decision = 'duplicate_same_point';
+        if (kDebugMode) {
+          AppLogger.log.d(
+            'ride tracking decision source=$source receivedTsUtc=$receivedTsUtc '
+            'lastAcceptedTsUtc=$lastAcceptedTsUtc staleDecision=$decision '
+            'markerUpdated=false',
+          );
+        }
+        return false;
+      }
+
+      if (receivedTsUtc.isBefore(
+        lastAcceptedTsUtc.subtract(const Duration(seconds: 3)),
+      )) {
+        if (simulated && !samePoint) {
+          decision = 'simulator_reordered_accept';
+        } else {
+          decision = simulated ? 'simulator_out_of_order' : 'older_than_last';
+          if (kDebugMode) {
+            AppLogger.log.d(
+              'ride tracking decision source=$source receivedTsUtc=$receivedTsUtc '
+              'lastAcceptedTsUtc=$lastAcceptedTsUtc staleDecision=$decision '
+              'markerUpdated=false',
+            );
+          }
+          return false;
+        }
+      }
+    } else if (!simulated) {
+      final age = DateTime.now().toUtc().difference(receivedTsUtc);
+      if (age > const Duration(minutes: 2)) {
+        decision = 'too_old_initial';
+        if (kDebugMode) {
+          AppLogger.log.d(
+            'ride tracking decision source=$source receivedTsUtc=$receivedTsUtc '
+            'lastAcceptedTsUtc=$lastAcceptedTsUtc staleDecision=$decision '
+            'markerUpdated=false',
+          );
+        }
+        return false;
+      }
+    }
+
+    if (kDebugMode) {
+      AppLogger.log.d(
+        'ride tracking decision source=$source receivedTsUtc=$receivedTsUtc '
+        'lastAcceptedTsUtc=$lastAcceptedTsUtc staleDecision=$decision '
+        'markerUpdated=true',
+      );
+    }
     return true;
+  }
+
+  void _handleDriverTrackingUpdate(dynamic data, {required String source}) {
+    if (isClosed) return;
+
+    final payload = _normalizeSocketPayload(data);
+    if (payload.isEmpty) return;
+
+    final lat = _toDouble(payload['latitude'] ?? payload['lat']);
+    final lng = _toDouble(payload['longitude'] ?? payload['lng']);
+    if (lat == null || lng == null) {
+      AppLogger.log.e("Invalid $source payload: $payload");
+      return;
+    }
+
+    final isSimulated =
+        payload['simulated'] == true ||
+        (payload['source'] ?? '').toString().trim().toLowerCase() ==
+            'ride-simulator';
+
+    final rawTs = _normalizeTrackingTimestampUtc(
+      _parseServerTime(
+        payload['timestamp'] ?? payload['ts'] ?? payload['time'],
+      ),
+      simulated: isSimulated,
+    );
+    final newPos = LatLng(lat, lng);
+    if (!_shouldAcceptTrackingPacket(
+      receivedTsUtc: rawTs,
+      position: newPos,
+      simulated: isSimulated,
+      source: source,
+    )) {
+      if (kDebugMode) {
+        AppLogger.log.w(
+          'Ignoring stale ride $source ts=$rawTs lat=$lat lng=$lng',
+        );
+      }
+      return;
+    }
+    _lastAcceptedDriverLocationTs =
+        isSimulated && rawTs.isBefore(_lastAcceptedDriverLocationTs)
+            ? _lastAcceptedDriverLocationTs.add(
+                const Duration(milliseconds: 1),
+              )
+            : rawTs;
+    _lastAcceptedDriverLocationPos = newPos;
+    driverLocation.value = newPos;
+
+    final srvBearing = _toDouble(
+      payload['bearing'] ?? payload['heading'] ?? payload['rotation'],
+    );
+    final liveRideType =
+        (payload['rideType'] ??
+                payload['vehicleType'] ??
+                payload['serviceType'] ??
+                '')
+            .toString();
+    if (liveRideType.trim().isNotEmpty) {
+      cartypeFromServer.value = liveRideType;
+    }
+    final latestStatus =
+        (payload['latestStatus'] ?? payload['status'] ?? '')
+            .toString()
+            .toUpperCase();
+    _updateRideMetrics(payload);
+    final derivedRideStarted = _isDropPhaseStatus(latestStatus);
+    final derivedRideCompleted = _isCompletedStatus(latestStatus);
+    final effectiveStatus =
+        latestStatus.trim().isNotEmpty ? latestStatus : latestRideStatus.value;
+
+    if (derivedRideStarted && !driverStartedRide.value) {
+      driverStartedRide.value = true;
+      _didFitDriverAndDrop = false;
+      _seedStaticMarkers(forceRecreate: false);
+      _refreshPulseCircles();
+      _updatePolylinesForStatus(
+        effectiveStatus,
+        driverPos: newPos,
+        force: true,
+      );
+    }
+    if (derivedRideCompleted) {
+      if (!driverStartedRide.value) {
+        driverStartedRide.value = true;
+      }
+      destinationReached.value = true;
+      nearDestination.value = true;
+      etaChipText.value = 'Arrived at destination';
+      _seedStaticMarkers(forceRecreate: false);
+      _refreshPulseCircles();
+      _clearActiveRoute();
+    }
+
+    if (_displayPos == null) {
+      _displayPos = newPos;
+      _emaPos = newPos;
+      _lastBearing = srvBearing ?? 0.0;
+      _driverMotion.reset(newPos, bearing: _lastBearing);
+      _fitDriverAndPickupOnce();
+      _updatePolylinesForStatus(
+        effectiveStatus,
+        driverPos: newPos,
+        force: true,
+      );
+      return;
+    }
+
+    final accepted = _driverMotion.ingest(
+      newPos,
+      serverTs: rawTs,
+      bearing: srvBearing,
+    );
+
+    if (!accepted &&
+        source != 'driver-location' &&
+        _displayPos != null &&
+        Geolocator.distanceBetween(
+              _displayPos!.latitude,
+              _displayPos!.longitude,
+              newPos.latitude,
+              newPos.longitude,
+            ) >
+            1.0) {
+      _displayPos = newPos;
+      _emaPos = newPos;
+      _lastBearing = srvBearing ?? _lastBearing;
+      _driverMotion.reset(newPos, bearing: _lastBearing);
+    }
+
+    _updatePolylinesForStatus(effectiveStatus, driverPos: newPos);
   }
 
   Map<String, dynamic> _normalizeSocketPayload(dynamic raw) {
@@ -1883,8 +2023,8 @@ class OrderConfirmController extends GetxController
       destination: dest,
       now: now,
       lastRouteFetchAt: _lastRouteFetchAt,
-      minInterval: const Duration(seconds: 30),
-      offRouteThresholdMeters: 100.0,
+      minInterval: const Duration(seconds: 20),
+      offRouteThresholdMeters: 34.0,
     )) {
       return;
     }
