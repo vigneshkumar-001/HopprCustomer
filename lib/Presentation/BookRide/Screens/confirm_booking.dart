@@ -1011,15 +1011,33 @@ class _ConfirmBookingState extends State<ConfirmBooking> {
 
   Future<File?> _captureSelfie() async {
     final ImagePicker picker = ImagePicker();
+
+    // Recover any photo lost to an Android Activity restart while the camera was
+    // open (low-RAM devices). If found, use it instead of reopening the camera.
+    try {
+      final LostDataResponse lost = await picker.retrieveLostData();
+      if (!lost.isEmpty && lost.file != null) {
+        return await _finalizeSelfie(File(lost.file!.path));
+      }
+    } catch (_) {}
+
+    // Capture already down-scaled. A verification selfie does NOT need full
+    // resolution, and a full-res bitmap is what makes low-RAM devices kill the
+    // app (restart to splash) while the camera Activity is in the foreground.
     final XFile? photo = await picker.pickImage(
       source: ImageSource.camera,
       preferredCameraDevice: CameraDevice.front,
-      imageQuality: 100, // keep original here; we'll compress ourselves
+      maxWidth: 1080,
+      maxHeight: 1080,
+      imageQuality: 70,
     );
 
     if (photo == null) return null;
 
-    final original = File(photo.path);
+    return _finalizeSelfie(File(photo.path));
+  }
+
+  Future<File?> _finalizeSelfie(File original) async {
     printImageSize(original, label: "Original Image");
     // Compress it
     final compressed = await compressImage(

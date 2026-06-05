@@ -9,11 +9,15 @@ class DriverPose {
   final LatLng position;
   final DateTime t;
   final double? bearing;
+  final int? packetIntervalMs;
+  final bool hasServerBearing;
 
   DriverPose({
     required this.position,
     DateTime? t,
     this.bearing,
+    this.packetIntervalMs,
+    this.hasServerBearing = false,
   }) : t = t ?? DateTime.now();
 }
 
@@ -36,12 +40,20 @@ class DriverMotionEngine {
     Duration minSeg = const Duration(milliseconds: 450),
     Duration maxSeg = const Duration(milliseconds: 1200),
     Curve ease = Curves.easeInOutCubic,
-    double emaAlphaSlow = 0.12,
-    double emaAlphaFast = 0.30,
-    double bearingEmaAlpha = 0.20,
-    double maxTurnDegPerSec = 220.0,
+    // Position smoothing is intentionally light: the eased segment lerp is
+    // already smooth, and snap-to-route removes cross-track jitter. Heavy EMA
+    // here just makes the marker lag its own heading -> the "crab/slide" look.
+    double emaAlphaSlow = 0.40,
+    double emaAlphaFast = 0.55,
+    // Rotate quickly so the icon faces the travel direction instead of sliding
+    // sideways through turns. (Uber/Ola-like snappy heading.)
+    double bearingEmaAlpha = 0.40,
+    double maxTurnDegPerSec = 540.0,
     Duration maxFutureSkew = const Duration(seconds: 12),
     Duration outOfOrderTolerance = const Duration(milliseconds: 500),
+    bool enableDeadReckoning = true,
+    bool requireBearingForDeadReckoning = false,
+    Duration maxDeadReckonPacketGap = const Duration(seconds: 4),
     // When driver is stopped, GPS jitter can cause the marker to "dance".
     // We detect low implied speed (from timestamps) and ignore small moves.
     double stationarySpeedThresholdMps = 0.6,
@@ -61,6 +73,9 @@ class DriverMotionEngine {
         _maxTurnDegPerSec = maxTurnDegPerSec,
         _maxFutureSkew = maxFutureSkew,
         _outOfOrderTolerance = outOfOrderTolerance,
+        _enableDeadReckoning = enableDeadReckoning,
+        _requireBearingForDeadReckoning = requireBearingForDeadReckoning,
+        _maxDeadReckonPacketGap = maxDeadReckonPacketGap,
         _stationarySpeedThresholdMps = stationarySpeedThresholdMps,
         _stationaryIgnoreUnderMeters = stationaryIgnoreUnderMeters,
         _moveCtrl = AnimationController(vsync: vsync);
@@ -85,6 +100,9 @@ class DriverMotionEngine {
 
   final Duration _maxFutureSkew;
   final Duration _outOfOrderTolerance;
+  final bool _enableDeadReckoning;
+  final bool _requireBearingForDeadReckoning;
+  final Duration _maxDeadReckonPacketGap;
   final double _stationarySpeedThresholdMps;
   final double _stationaryIgnoreUnderMeters;
 
@@ -99,6 +117,8 @@ class DriverMotionEngine {
   static const Duration _deadReckonTick = Duration(milliseconds: 100);
   static const Duration _deadReckonStopAfter = Duration(seconds: 15);
   double _lastSpeedMps = 0.0;
+  int? _lastPacketIntervalMs;
+  bool _lastPacketHadBearing = false;
 
   LatLng? _lastReceivedPos;
   LatLng? _displayPos;
@@ -141,6 +161,7 @@ class DriverMotionEngine {
     DateTime? serverTs,
     double? bearing,
     DateTime? now,
+    bool allowDeadReckoning = true,
   }) {
     final now0 = now ?? DateTime.now();
     DateTime ts = serverTs ?? now0;
@@ -158,6 +179,9 @@ class DriverMotionEngine {
         ts.isBefore(lastPkt.subtract(_outOfOrderTolerance))) {
       return false;
     }
+
+    final packetIntervalMs =
+        lastPkt == null ? null : ts.difference(lastPkt).inMilliseconds;
 
     if (_lastReceivedPos != null) {
       final d = Geolocator.distanceBetween(
@@ -198,7 +222,16 @@ class DriverMotionEngine {
       }
     }
     _lastPacketTs = ts;
+    _lastPacketIntervalMs =
+        packetIntervalMs != null && packetIntervalMs > 0
+            ? packetIntervalMs
+            : _lastPacketIntervalMs;
+    _lastPacketHadBearing = allowDeadReckoning && bearing != null;
     _lastReceivedPos = newPos;
+    if (!allowDeadReckoning) {
+      _lastSpeedMps = 0.0;
+      _lastPacketIntervalMs = _maxDeadReckonPacketGap.inMilliseconds + 1;
+    }
 
     if (_displayPos == null) {
       reset(newPos, bearing: bearing ?? 0.0);
@@ -206,7 +239,15 @@ class DriverMotionEngine {
     }
 
     final shiftedTs = ts.add(_playbackDelay);
-    _poseQueue.add(DriverPose(position: newPos, bearing: bearing, t: shiftedTs));
+    _poseQueue.add(
+      DriverPose(
+        position: newPos,
+        bearing: bearing,
+        t: shiftedTs,
+        packetIntervalMs: packetIntervalMs,
+        hasServerBearing: bearing != null,
+      ),
+    );
     if (_poseQueue.length > _maxQueue) {
       _poseQueue.removeRange(0, _poseQueue.length - _maxQueue);
     }
@@ -235,16 +276,26 @@ class DriverMotionEngine {
       return;
     }
 
-    // Animation duration derived from distance and a conservative min speed.
-    // Required clamp:
-    // durationMs = clamp(distance / max(speedMps, 4.0) * 1000, 650, 1800)
-    // Here we don't know real-time speed reliably from server, so we use the
-    // conservative minimum speed bound (4 m/s) to keep motion smooth and fast.
-    int dur = ((dist / math.max(4.0, 4.0)) * 1000).toInt();
-    dur = dur.clamp(
-      math.max(650, _minSeg.inMilliseconds),
-      math.min(1800, _maxSeg.inMilliseconds),
-    );
+    // Continuous-motion duration (Uber/Ola feel).
+    //
+    // The marker should still be gliding when the next packet arrives — not
+    // race to the target and freeze (stop-and-go), and not fall further behind
+    // every packet (lag). So we animate each segment over roughly the cadence
+    // at which packets actually arrive, instead of deriving it from distance.
+    final int? intervalMs = toPose.packetIntervalMs ?? _lastPacketIntervalMs;
+    int dur;
+    if (intervalMs != null && intervalMs > 0) {
+      // Caught up (no buffered poses): stretch slightly past the interval so we
+      // never run dry before the next packet lands -> continuous glide.
+      // Behind (poses buffered): shrink below the interval to catch up smoothly
+      // instead of accumulating lag.
+      final double factor = _poseQueue.isEmpty ? 1.12 : 0.80;
+      dur = (intervalMs * factor).round();
+    } else {
+      // First segment / unknown cadence: conservative distance-based guess.
+      dur = ((dist / 6.0) * 1000).round();
+    }
+    dur = dur.clamp(_minSeg.inMilliseconds, _maxSeg.inMilliseconds);
     final segDur = Duration(milliseconds: dur);
 
     final targetBearing = toPose.bearing ?? _computeBearing(from, to);
@@ -278,9 +329,15 @@ class DriverMotionEngine {
 
   void _startDeadReckoningIfNeeded() {
     // Only when we have a fix, not currently animating, and no buffered poses.
+    if (!_enableDeadReckoning) return;
     if (_displayPos == null) return;
     if (_isAnimatingSegment) return;
     if (_poseQueue.isNotEmpty) return;
+    if (_requireBearingForDeadReckoning && !_lastPacketHadBearing) return;
+    if (_lastPacketIntervalMs != null &&
+        _lastPacketIntervalMs! > _maxDeadReckonPacketGap.inMilliseconds) {
+      return;
+    }
 
     // If implied speed is too low, driver is likely stopped -> no projection.
     if (_lastSpeedMps < 1.0) return;

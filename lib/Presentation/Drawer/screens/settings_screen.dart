@@ -56,8 +56,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       if (!controller.isEditing.value) return;
 
+      final selectedSource = await _showImageSourcePicker();
+      if (selectedSource == null || !mounted) return;
+
       final picker = ImagePicker();
-      final pickedFile = await picker.pickImage(source: ImageSource.gallery);
+      final pickedFile = await picker.pickImage(source: selectedSource);
 
       if (pickedFile == null) return;
       if (!mounted) return;
@@ -79,6 +82,137 @@ class _SettingsScreenState extends State<SettingsScreen> {
     } catch (e) {
       debugPrint('pickImage error: $e');
     }
+  }
+
+  Future<ImageSource?> _showImageSourcePicker() {
+    return showModalBottomSheet<ImageSource>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Container(
+            margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            padding: const EdgeInsets.fromLTRB(18, 18, 18, 12),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(24),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.08),
+                  blurRadius: 24,
+                  offset: const Offset(0, 8),
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 42,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade300,
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 18),
+                CustomTextFields.textWithStyles700(
+                  'Choose profile photo',
+                  fontSize: 18,
+                  color: AppColors.textColor,
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Open camera now or pick an image from gallery.',
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Colors.grey.shade600,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(height: 18),
+                _buildImageSourceTile(
+                  icon: Icons.photo_camera_outlined,
+                  title: 'Camera',
+                  subtitle: 'Take a new photo',
+                  onTap: () => Navigator.of(sheetContext).pop(ImageSource.camera),
+                ),
+                const SizedBox(height: 12),
+                _buildImageSourceTile(
+                  icon: Icons.photo_library_outlined,
+                  title: 'Gallery',
+                  subtitle: 'Choose from your phone',
+                  onTap:
+                      () => Navigator.of(sheetContext).pop(ImageSource.gallery),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildImageSourceTile({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: const Color(0xFFF7F8FC),
+      borderRadius: BorderRadius.circular(18),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(18),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+          child: Row(
+            children: [
+              Container(
+                height: 46,
+                width: 46,
+                decoration: BoxDecoration(
+                  color: AppColors.containerColor,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(icon, color: AppColors.textColor, size: 24),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    CustomTextFields.textWithStyles600(
+                      title,
+                      fontSize: 15,
+                      color: AppColors.textColor,
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      subtitle,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey.shade600,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(
+                Icons.arrow_forward_ios_rounded,
+                size: 16,
+                color: Colors.black54,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   @override

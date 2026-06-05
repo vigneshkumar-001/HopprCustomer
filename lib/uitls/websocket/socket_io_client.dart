@@ -14,6 +14,17 @@ class SocketService {
   final Map<String, String> _joinedRooms = {};
   final Map<String, Map<String, dynamic>> _bookingRoomPayloads = {};
 
+  // Throttle for noisy connect/reconnect error logs (shared across handlers).
+  DateTime _lastErrLogAt = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _shouldLogErr() {
+    final now = DateTime.now();
+    if (now.difference(_lastErrLogAt) < const Duration(seconds: 30)) {
+      return false;
+    }
+    _lastErrLogAt = now;
+    return true;
+  }
+
   SocketService._internal();
 
   void initSocket(String url) {
@@ -30,8 +41,13 @@ class SocketService {
           .setTransports(['websocket'])
           .enableReconnection()
           .enableAutoConnect()
-          .setReconnectionAttempts(10)
-          .setReconnectionDelay(2000)
+          // Was 10: after 10 'transport close' drops the socket gave up FOREVER,
+          // killing live tracking mid-ride. Keep retrying effectively forever
+          // with a capped exponential backoff so a flaky network self-heals.
+          .setReconnectionAttempts(1 << 30)
+          .setReconnectionDelay(1000)
+          .setReconnectionDelayMax(5000)
+          .setTimeout(20000)
           .build(),
     );
 
@@ -55,11 +71,17 @@ class SocketService {
     });
 
     _socket.onDisconnect((_) => AppLogger.log.e("❌ Disconnected from $url"));
-    _socket.onConnectError((err) => AppLogger.log.e("❗ Connect error: $err"));
-    _socket.onReconnectAttempt(
-      (attempt) => AppLogger.log.w("🔁 Reconnect attempt #$attempt"),
-    );
-    _socket.onError((err) => AppLogger.log.e("❗ General socket error: $err"));
+    // Throttle error logs: while offline the socket retries forever and would
+    // otherwise flood the log with the same DNS/connect error every few seconds.
+    _socket.onConnectError((err) {
+      if (_shouldLogErr()) AppLogger.log.e("❗ Connect error: $err");
+    });
+    _socket.onReconnectAttempt((attempt) {
+      if (_shouldLogErr()) AppLogger.log.w("🔁 Reconnecting… (attempt #$attempt)");
+    });
+    _socket.onError((err) {
+      if (_shouldLogErr()) AppLogger.log.e("❗ General socket error: $err");
+    });
     _socket.onAny(
       (event, data) => AppLogger.log.i("📦 Event: $event, Data: $data"),
     );

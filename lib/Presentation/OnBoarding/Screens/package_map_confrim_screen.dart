@@ -32,6 +32,8 @@ import 'package:hopper/Core/Consents/app_logger.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:get/get.dart';
 import 'package:hopper/uitls/map/route_tracking_math.dart';
+import 'package:hopper/uitls/map/customer/customer_ride_map_view.dart';
+import 'package:hopper/uitls/map/customer/marker_icon_cache.dart' as icon_cache;
 import '../../../api/repository/api_consents.dart';
 import '../../BookRide/Controllers/driver_search_controller.dart';
 
@@ -109,6 +111,12 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   String _estimateStt2 = '';
   String otp = '';
   LatLng? _currentDriverLatLng;
+  // Raw (un-smoothed) driver location fed to CustomerRideMapView, which owns
+  // all marker animation / snap / trim / camera follow. The package screen no
+  // longer animates the marker itself.
+  LatLng? _driverRawLatLng;
+  final GlobalKey<CustomerRideMapViewState> _mapKey =
+      GlobalKey<CustomerRideMapViewState>();
   bool isTripCancelled = false;
   String cancelReason = "";
   String cancelTitle = "";
@@ -201,9 +209,6 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     Duration maxFutureSkew = const Duration(seconds: 12),
   }) {
     final nowUtc = DateTime.now().toUtc();
-    if (simulated) {
-      return nowUtc;
-    }
     if (ts.isAfter(nowUtc.add(maxFutureSkew))) {
       return nowUtc;
     }
@@ -232,9 +237,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
     if (lastAcceptedPos != null) {
       final samePoint = _isSameTrackingPoint(lastAcceptedPos, position);
-      final tsDiffMs =
-          receivedTsUtc.difference(lastAcceptedTsUtc).inMilliseconds.abs();
-      if (samePoint && tsDiffMs <= 2500) {
+      if (samePoint) {
         decision = 'duplicate_same_point';
         if (kDebugMode) {
           AppLogger.log.d(
@@ -244,21 +247,15 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         }
         return false;
       }
-      if (receivedTsUtc.isBefore(
-        lastAcceptedTsUtc.subtract(const Duration(seconds: 3)),
-      )) {
-        if (simulated && !samePoint) {
-          decision = 'simulator_reordered_accept';
-        } else {
-          decision = simulated ? 'simulator_out_of_order' : 'older_than_last';
-          if (kDebugMode) {
-            AppLogger.log.d(
-              'package tracking decision source=$source receivedTsUtc=$receivedTsUtc '
-              'lastAcceptedTsUtc=$lastAcceptedTsUtc staleDecision=$decision markerUpdated=false',
-            );
-          }
-          return false;
+      if (receivedTsUtc.isBefore(lastAcceptedTsUtc)) {
+        decision = 'older_than_last';
+        if (kDebugMode) {
+          AppLogger.log.d(
+            'package tracking decision source=$source receivedTsUtc=$receivedTsUtc '
+            'lastAcceptedTsUtc=$lastAcceptedTsUtc staleDecision=$decision markerUpdated=false',
+          );
         }
+        return false;
       }
     } else if (!simulated) {
       final age = DateTime.now().toUtc().difference(receivedTsUtc);
@@ -324,10 +321,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       }
       return;
     }
-    _lastAcceptedTrackingTsUtc =
-        isSimulated && ts.isBefore(_lastAcceptedTrackingTsUtc)
-            ? _lastAcceptedTrackingTsUtc.add(const Duration(milliseconds: 1))
-            : ts;
+    _lastAcceptedTrackingTsUtc = ts;
     _lastAcceptedTrackingPos = newDriverLatLng;
 
     final bearing = _parseBearingDeg(
@@ -354,30 +348,27 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         _fitDriverAndTargetOnce(toDrop: driverStartedRide);
       });
     } else {
-      final accepted = _motion.ingest(
-        newDriverLatLng,
-        serverTs: ts,
-        bearing: b0,
-      );
-      if (!accepted &&
-          _currentDriverLatLng != null &&
-          Geolocator.distanceBetween(
+      final displayDeltaMeters =
+          _currentDriverLatLng == null
+              ? double.infinity
+              : Geolocator.distanceBetween(
                 _currentDriverLatLng!.latitude,
                 _currentDriverLatLng!.longitude,
                 newDriverLatLng.latitude,
                 newDriverLatLng.longitude,
-              ) >
-              1.0) {
-        _motion.reset(newDriverLatLng, bearing: b0);
-        _currentDriverLatLng = newDriverLatLng;
-        _lastBearing = b0;
-      }
+              );
+      _motion.ingest(
+        newDriverLatLng,
+        serverTs: ts,
+        bearing: b0,
+        allowDeadReckoning: false,
+      );
       if (_polylinesNotifier.value.isEmpty) {
         _maybeUpdatePolyline(newDriverLatLng, force: true);
+      } else if (displayDeltaMeters > 2.5) {
+        _checkRouteDeviation(newDriverLatLng);
       }
     }
-
-    _checkRouteDeviation(newDriverLatLng);
   }
 
   Map<String, dynamic> _asMap(dynamic v) {
@@ -1267,8 +1258,10 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       },
       playbackDelay: const Duration(milliseconds: 220),
       minSeg: const Duration(milliseconds: 320),
-      maxSeg: const Duration(milliseconds: 900),
+      maxSeg: const Duration(milliseconds: 2600),
       minMoveMeters: 1.5,
+      requireBearingForDeadReckoning: true,
+      maxDeadReckonPacketGap: const Duration(seconds: 4),
       stationarySpeedThresholdMps: 0.35,
       stationaryIgnoreUnderMeters: 1.8,
     );
@@ -1282,7 +1275,10 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     _loadCustomMarker();
     initSocket();
     _bootSocket();
-    _startPulseAnimation();
+    // Pulse circles were drawn on the old inline GoogleMap. CustomerRideMapView
+    // owns the map now and doesn't render them, so we skip the pulse timer to
+    // avoid wasted rebuilds.
+    // _startPulseAnimation();
     WidgetsBinding.instance.addPostFrameCallback((_) => _calculateLineHeight());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _seedPickupDropMarkers();
@@ -1474,16 +1470,17 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         _syncPhaseMarkers();
       });
 
-      if (joinedDriverLat != null && joinedDriverLng != null) {
+      final hasLiveDriverStream =
+          _lastAcceptedTrackingPos != null &&
+          _lastAcceptedTrackingTsUtc.isAfter(
+            DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+          );
+      if (joinedDriverLat != null &&
+          joinedDriverLng != null &&
+          !hasLiveDriverStream) {
         final joinedDriverPos = LatLng(joinedDriverLat, joinedDriverLng);
         _currentDriverLatLng = joinedDriverPos;
-        _pendingDriverMarkerPos = joinedDriverPos;
-        _pendingDriverMarkerBearing = _lastBearing;
-        if (!_motionReady) {
-          _motion.reset(joinedDriverPos, bearing: _lastBearing);
-          _motionReady = true;
-        }
-        _commitDriverMarker(force: true);
+        _driverRawLatLng = joinedDriverPos;
         _maybeUpdatePolyline(joinedDriverPos, force: true);
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted) return;
@@ -1497,9 +1494,11 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       // next driver packet is identical (no movement -> no animation).
       final driverPos = _currentDriverLatLng;
       if (driverPos != null) {
-        _pendingDriverMarkerPos = driverPos;
-        _pendingDriverMarkerBearing = _lastBearing;
-        _commitDriverMarker(force: true);
+        if (mounted) {
+          setState(() => _driverRawLatLng = driverPos);
+        } else {
+          _driverRawLatLng = driverPos;
+        }
         _maybeUpdatePolyline(driverPos, force: true);
       }
 
@@ -1597,28 +1596,22 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         }
         return;
       }
-      _lastAcceptedTrackingTsUtc =
-          isSimulated && ts.isBefore(_lastAcceptedTrackingTsUtc)
-              ? _lastAcceptedTrackingTsUtc.add(
-                  const Duration(milliseconds: 1),
-                )
-              : ts;
+      _lastAcceptedTrackingTsUtc = ts;
       _lastAcceptedTrackingPos = newDriverLatLng;
-      if (!_motionReady) {
-        _motion.reset(newDriverLatLng, bearing: b0);
-        _motionReady = true;
-        _currentDriverLatLng = newDriverLatLng;
-        _lastBearing = b0;
-        _maybeUpdatePolyline(newDriverLatLng, force: true);
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted) return;
-          _fitDriverAndTargetOnce(toDrop: driverStartedRide);
-        });
+      // CustomerRideMapView owns marker smoothing/snap/trim/camera. We only
+      // feed it the raw driver location; it animates from there (Ola/Uber feel).
+      final firstFix = _driverRawLatLng == null;
+      _currentDriverLatLng = newDriverLatLng;
+      _lastBearing = b0;
+      if (mounted) {
+        setState(() => _driverRawLatLng = newDriverLatLng);
       } else {
-        _motion.ingest(newDriverLatLng, serverTs: ts, bearing: b0);
-        if (_polylinesNotifier.value.isEmpty) {
-          _maybeUpdatePolyline(newDriverLatLng, force: true);
-        }
+        _driverRawLatLng = newDriverLatLng;
+      }
+      // Fetch the route only when we don't have one yet; the widget trims it
+      // visually as the driver advances, and reroute (below) refreshes it.
+      if (firstFix || _activeRoutePoints.length < 2) {
+        _maybeUpdatePolyline(newDriverLatLng, force: true);
       }
 
       // For simulator streams, route deviation checks can cause noisy reroutes
@@ -1706,7 +1699,16 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     });
 
     socketService.on('ride-started', (data) {
-      final bool status = data['status'] == true;
+      // Robust status parse (bool / number / "true" / "STARTED") so the map
+      // reliably switches from driver->pickup to driver->drop.
+      final dynamic rawStatus = (data is Map) ? data['status'] : data;
+      final String statusStr = (rawStatus ?? '').toString().trim().toLowerCase();
+      final bool status =
+          rawStatus == true ||
+          rawStatus == 1 ||
+          statusStr == 'true' ||
+          statusStr == '1' ||
+          statusStr.contains('start');
       AppLogger.log.i("ride-started: $data");
 
       driverStartedRide = status; // don't wait for setState
@@ -2131,14 +2133,16 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
             }
           });
         }
-        _polylinesNotifier.value = _styledRoutePolylines(
-          points,
-          id: polylineId,
-          isDashed: isDashedStyle,
-        );
-        _activeRoutePoints = points;
-        _lastTrimSegIndex = -1;
-        _maybeFitBounds(points, extraPoints: <LatLng>[origin, destination]);
+        // Hand the route points to CustomerRideMapView; it renders + trims them.
+        if (mounted) {
+          setState(() {
+            _activeRoutePoints = points;
+            _lastTrimSegIndex = -1;
+          });
+        } else {
+          _activeRoutePoints = points;
+          _lastTrimSegIndex = -1;
+        }
         if (kDebugMode) {
           AppLogger.log.i(
             'pkg map polyline set: pts=${points.length} id=$polylineId dashed=$isDashedStyle',
@@ -2150,13 +2154,15 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         if (mounted &&
             _polylinesNotifier.value.isEmpty &&
             !forceKeepOldOnFailure) {
-          _polylinesNotifier.value = _styledRoutePolylines(
-            <LatLng>[origin, destination],
-            id: polylineId,
-            isDashed: isDashedStyle,
-          );
-          _activeRoutePoints = <LatLng>[origin, destination];
-          _lastTrimSegIndex = -1;
+          if (mounted) {
+            setState(() {
+              _activeRoutePoints = <LatLng>[origin, destination];
+              _lastTrimSegIndex = -1;
+            });
+          } else {
+            _activeRoutePoints = <LatLng>[origin, destination];
+            _lastTrimSegIndex = -1;
+          }
         }
         if (kDebugMode) {
           AppLogger.log.e("Directions error: ${data['status']}");
@@ -2611,8 +2617,6 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       socketService.off('booking-update');
       socketService.off('joined-booking');
       socketService.off('driver-location');
-      socketService.off('tracked-driver-location');
-      socketService.off('nearby-driver-update');
       socketService.off('driver-arrived');
       socketService.off('otp-generated');
       socketService.off('ride-started');
@@ -2652,113 +2656,57 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
               SizedBox(
                 height: 550,
                 width: double.infinity,
-                child: ValueListenableBuilder<Set<Marker>>(
-                  valueListenable: _markersNotifier,
-                  builder: (context, markers, _) {
-                    return ValueListenableBuilder<Set<Polyline>>(
-                      valueListenable: _polylinesNotifier,
-                      builder: (context, polylines, __) {
-                        return GoogleMap(
-                          compassEnabled: true,
-                          rotateGesturesEnabled: false,
-                          tiltGesturesEnabled: false,
-                          buildingsEnabled: false,
-                          indoorViewEnabled: false,
-                          minMaxZoomPreference: const MinMaxZoomPreference(
-                            11.0,
-                            17.0,
-                          ),
-                          circles: _circles,
-                          onCameraMove:
-                              (pos) =>
-                                  _currentZoomLevel =
-                                      pos.zoom.clamp(11.0, 17.0).toDouble(),
-                          onCameraMoveStarted: _onUserMapGesture,
-                          onTap: (_) => _onUserMapGesture(),
-                          initialCameraPosition: CameraPosition(
-                            target: initialTarget,
-                            zoom: math.max(
-                              _currentZoomLevel,
-                              _preferredInitialZoom,
-                            ),
-                          ),
-                          padding: const EdgeInsets.only(bottom: 230),
-                          markers: markers,
-                          onMapCreated: (controller) async {
-                            _mapController = controller;
-                            String style = await DefaultAssetBundle.of(
-                              context,
-                            ).loadString('assets/map_style.json');
-                            _mapController?.setMapStyle(style);
-
-                            if (_currentDriverLatLng != null &&
-                                (driverStartedRide
-                                    ? _customerToLatLang != null
-                                    : _customerLatLng != null)) {
-                              WidgetsBinding.instance.addPostFrameCallback((_) {
-                                if (!mounted) return;
-                                _fitDriverAndTargetOnce(
-                                  toDrop: driverStartedRide,
-                                );
-                              });
-                            } else {
-                              final focus = _customerLatLng ?? _currentPosition;
-                              if (focus != null) {
-                                _mapController?.animateCamera(
-                                  CameraUpdate.newCameraPosition(
-                                    CameraPosition(
-                                      target: focus,
-                                      zoom: math.max(
-                                        _currentZoomLevel,
-                                        _preferredInitialZoom,
-                                      ),
-                                      bearing: 0,
-                                      tilt: 0,
-                                    ),
-                                  ),
-                                );
-                              }
-                            }
-                          },
-                          polylines: polylines,
-                          myLocationEnabled: false,
-                          myLocationButtonEnabled: false,
-                          zoomControlsEnabled: false,
-                          gestureRecognizers: {
-                            Factory<OneSequenceGestureRecognizer>(
-                              () => EagerGestureRecognizer(),
-                            ),
-                          },
-                        );
-                      },
-                    );
-                  },
+                child: CustomerRideMapView(
+                  key: _mapKey,
+                  // Package delivery is always a bike.
+                  vehicleType: icon_cache.VehicleType.bike,
+                  driverLocation: _driverRawLatLng,
+                  routePoints: _activeRoutePoints,
+                  pickup: _customerLatLng ?? initialTarget,
+                  drop: _customerToLatLang ?? initialTarget,
+                  mode:
+                      driverStartedRide
+                          ? RideMapMode.toDrop
+                          : RideMapMode.toPickup,
+                  etaText:
+                      _routeSeconds != null
+                          ? _formatDuration(_routeSeconds!)
+                          : '',
+                  distanceText:
+                      _routeMeters != null
+                          ? _formatDistance(_routeMeters!)
+                          : '',
+                  statusText:
+                      destinationReached
+                          ? 'Delivered'
+                          : driverStartedRide
+                          ? 'Delivering your package'
+                          : 'Courier reaching pickup',
+                  // NOTE: intentionally do NOT capture the GoogleMapController
+                  // here. The widget fully owns the camera; leaving the screen's
+                  // legacy `_mapController` null keeps all old camera code inert.
+                  mapPadding: const EdgeInsets.only(bottom: 230),
                 ),
               ),
               Positioned(
                 top: 350,
                 right: 10,
-                child: ValueListenableBuilder<bool>(
-                  valueListenable: _isFollowingNotifier,
-                  builder: (context, isFollowing, _) {
-                    return AnimatedOpacity(
-                      opacity: isFollowing ? 0.0 : 1.0,
-                      duration: const Duration(milliseconds: 250),
-                      child: IgnorePointer(
-                        ignoring: isFollowing,
-                        child: FloatingActionButton(
-                          heroTag: 'pkg_my_location_${widget.bookingId}',
-                          mini: true,
-                          backgroundColor: Colors.white,
-                          onPressed: _onLocationFabTap,
-                          child: const Icon(
-                            Icons.my_location,
-                            color: Colors.black,
-                          ),
-                        ),
-                      ),
-                    );
+                child: FloatingActionButton(
+                  heroTag: 'pkg_my_location_${widget.bookingId}',
+                  mini: true,
+                  backgroundColor: Colors.white,
+                  onPressed: () async {
+                    // Toggle between "follow the courier" and "fit the route",
+                    // matching the car ride screen behaviour.
+                    if (_locationToggleFit) {
+                      _locationToggleFit = false;
+                      await _mapKey.currentState?.fitRoute(padding: 150);
+                    } else {
+                      _locationToggleFit = true;
+                      await _mapKey.currentState?.recenter();
+                    }
                   },
+                  child: const Icon(Icons.my_location, color: Colors.black),
                 ),
               ),
               Positioned(

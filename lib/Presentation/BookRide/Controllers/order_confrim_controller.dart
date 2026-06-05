@@ -154,12 +154,12 @@ class OrderConfirmController extends GetxController
   String? mapStyle;
   // Active ride tracking zoom.
   double currentZoomLevel = 17.0;
-  static const double _minAutoFollowZoom = 17.0;
+  static const double _minAutoFollowZoom = 16.35;
   BuildContext? _screenCtx;
   Timer? _searchTimer;
   final RxBool focusDriverOnNextTap = false.obs;
 
-  static const double _mapTilt = 30.0;
+  static const double _mapTilt = 28.0;
 
   // Auto camera control (Ola style)
   DateTime _lastCameraMoveAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -170,9 +170,12 @@ class OrderConfirmController extends GetxController
   bool _autoFitBoundsEnabled = true;
   bool _didFitDriverAndPickup = false;
   bool _didFitDriverAndDrop = false;
-  static const double _focusDriverZoom = 17.6;
+  static const double _focusDriverZoom = 16.9;
   DateTime _lastAutoFrameAt = DateTime.fromMillisecondsSinceEpoch(0);
   final Duration _autoFrameInterval = const Duration(milliseconds: 1400);
+  DateTime _lastRouteTrimAt = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _routeTrimInterval = Duration(milliseconds: 90);
+  int _lastTrimSegIndex = -1;
 
   // ---------- UI / state ----------
   final RxBool isExpanded = false.obs;
@@ -332,8 +335,10 @@ class OrderConfirmController extends GetxController
       // lower playback lag + better visibility for slow traffic movement.
       playbackDelay: const Duration(milliseconds: 220),
       minSeg: const Duration(milliseconds: 320),
-      maxSeg: const Duration(milliseconds: 900),
+      maxSeg: const Duration(milliseconds: 2600),
       minMoveMeters: 1.5,
+      requireBearingForDeadReckoning: true,
+      maxDeadReckonPacketGap: const Duration(seconds: 4),
       stationarySpeedThresholdMps: 0.35,
       stationaryIgnoreUnderMeters: 1.8,
     );
@@ -391,8 +396,6 @@ class OrderConfirmController extends GetxController
     try {
       socketService.off('joined-booking');
       socketService.off('driver-location');
-      socketService.off('tracked-driver-location');
-      socketService.off('nearby-driver-update');
       socketService.off('driver-arrived');
       socketService.off('otp-generated');
     } catch (_) {}
@@ -905,7 +908,12 @@ class OrderConfirmController extends GetxController
 
       _seedStaticMarkers(forceRecreate: true);
 
-      if (driverLat != null && driverLng != null) {
+      final hasLiveDriverStream =
+          _lastAcceptedDriverLocationPos != null &&
+          _lastAcceptedDriverLocationTs.isAfter(
+            DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+          );
+      if (driverLat != null && driverLng != null && !hasLiveDriverStream) {
         final initialDriverPos = LatLng(driverLat, driverLng);
         driverLocation.value = initialDriverPos;
         _displayPos = initialDriverPos;
@@ -957,7 +965,7 @@ class OrderConfirmController extends GetxController
       // Enforce correct marker visibility even if server status is noisy.
       _seedStaticMarkers(forceRecreate: false);
 
-      if (driverLat != null && driverLng != null) {
+      if (driverLat != null && driverLng != null && !hasLiveDriverStream) {
         final initialDriverPos = LatLng(driverLat, driverLng);
         _updatePolylinesForStatus(
           latestRideStatus.value,
@@ -1006,7 +1014,17 @@ class OrderConfirmController extends GetxController
     socketService.on('ride-started', (data) async {
       if (isClosed) return;
 
-      final bool status = data['status'] == true;
+      // Robust status parse: the server may send a bool, a number, or a string
+      // ("true"/"1"/"STARTED"). A strict `== true` missed those and left the map
+      // stuck on the pickup phase (pickup marker + driver->pickup line).
+      final dynamic rawStatus = (data is Map) ? data['status'] : data;
+      final String statusStr = (rawStatus ?? '').toString().trim().toLowerCase();
+      final bool status =
+          rawStatus == true ||
+          rawStatus == 1 ||
+          statusStr == 'true' ||
+          statusStr == '1' ||
+          statusStr.contains('start');
       driverStartedRide.value = status;
       if (status) {
         driverArrived.value = true;
@@ -1089,9 +1107,6 @@ class OrderConfirmController extends GetxController
     Duration maxFutureSkew = const Duration(seconds: 12),
   }) {
     final nowUtc = DateTime.now().toUtc();
-    if (simulated) {
-      return nowUtc;
-    }
     if (ts.isAfter(nowUtc.add(maxFutureSkew))) {
       return nowUtc;
     }
@@ -1120,10 +1135,7 @@ class OrderConfirmController extends GetxController
 
     if (lastAcceptedPos != null) {
       final samePoint = _isSameTrackingPoint(lastAcceptedPos, position);
-      final tsDiffMs =
-          receivedTsUtc.difference(lastAcceptedTsUtc).inMilliseconds.abs();
-
-      if (samePoint && tsDiffMs <= 2500) {
+      if (samePoint) {
         decision = 'duplicate_same_point';
         if (kDebugMode) {
           AppLogger.log.d(
@@ -1135,22 +1147,16 @@ class OrderConfirmController extends GetxController
         return false;
       }
 
-      if (receivedTsUtc.isBefore(
-        lastAcceptedTsUtc.subtract(const Duration(seconds: 3)),
-      )) {
-        if (simulated && !samePoint) {
-          decision = 'simulator_reordered_accept';
-        } else {
-          decision = simulated ? 'simulator_out_of_order' : 'older_than_last';
-          if (kDebugMode) {
-            AppLogger.log.d(
-              'ride tracking decision source=$source receivedTsUtc=$receivedTsUtc '
-              'lastAcceptedTsUtc=$lastAcceptedTsUtc staleDecision=$decision '
-              'markerUpdated=false',
-            );
-          }
-          return false;
+      if (receivedTsUtc.isBefore(lastAcceptedTsUtc)) {
+        decision = 'older_than_last';
+        if (kDebugMode) {
+          AppLogger.log.d(
+            'ride tracking decision source=$source receivedTsUtc=$receivedTsUtc '
+            'lastAcceptedTsUtc=$lastAcceptedTsUtc staleDecision=$decision '
+            'markerUpdated=false',
+          );
         }
+        return false;
       }
     } else if (!simulated) {
       final age = DateTime.now().toUtc().difference(receivedTsUtc);
@@ -1175,6 +1181,55 @@ class OrderConfirmController extends GetxController
       );
     }
     return true;
+  }
+
+  bool _shouldIgnoreInconsistentSimulatorPacket(
+    Map<String, dynamic> payload,
+    LatLng newPos,
+  ) {
+    final latestStatus =
+        (payload['latestStatus'] ?? payload['status'] ?? '')
+            .toString()
+            .toUpperCase();
+    if (!_isDropPhaseStatus(latestStatus)) return false;
+
+    final incomingDropMeters = _toDouble(payload['dropDistanceInMeters']);
+    final previousDropMeters = dropDistanceMeters.value;
+    final incomingSpeed = _toDouble(payload['speed']) ?? 0.0;
+    final currentDisplay = _displayPos ?? _emaPos ?? driverLocation.value;
+    final activeDestination = customerToLatLng;
+    final travelMoveMeters =
+        currentDisplay == null
+            ? 0.0
+            : Geolocator.distanceBetween(
+              currentDisplay.latitude,
+              currentDisplay.longitude,
+              newPos.latitude,
+              newPos.longitude,
+            );
+    final nearDrop =
+        activeDestination != null &&
+        Geolocator.distanceBetween(
+              newPos.latitude,
+              newPos.longitude,
+              activeDestination.latitude,
+              activeDestination.longitude,
+            ) <=
+            32.0;
+
+    final suspiciousDistanceReset =
+        incomingDropMeters != null &&
+        previousDropMeters > 0 &&
+        incomingDropMeters > previousDropMeters + 220.0 &&
+        travelMoveMeters < 45.0;
+
+    final suspiciousNearDropReset =
+        incomingDropMeters != null &&
+        nearDrop &&
+        incomingDropMeters > 260.0 &&
+        incomingSpeed <= 1.0;
+
+    return suspiciousDistanceReset || suspiciousNearDropReset;
   }
 
   void _handleDriverTrackingUpdate(dynamic data, {required String source}) {
@@ -1202,6 +1257,53 @@ class OrderConfirmController extends GetxController
       simulated: isSimulated,
     );
     final newPos = LatLng(lat, lng);
+    final samePointAsLast =
+        _lastAcceptedDriverLocationPos != null &&
+        _isSameTrackingPoint(_lastAcceptedDriverLocationPos!, newPos);
+    final olderThanLast = rawTs.isBefore(_lastAcceptedDriverLocationTs);
+    if (samePointAsLast && !olderThanLast) {
+      _updateRideMetrics(payload);
+      final liveRideType =
+          (payload['rideType'] ??
+                  payload['vehicleType'] ??
+                  payload['serviceType'] ??
+                  '')
+              .toString();
+      if (liveRideType.trim().isNotEmpty) {
+        cartypeFromServer.value = liveRideType;
+      }
+      final latestStatus =
+          (payload['latestStatus'] ?? payload['status'] ?? '')
+              .toString()
+              .toUpperCase();
+      final derivedRideStarted = _isDropPhaseStatus(latestStatus);
+      final derivedRideCompleted = _isCompletedStatus(latestStatus);
+      final effectiveStatus =
+          latestStatus.trim().isNotEmpty ? latestStatus : latestRideStatus.value;
+      if (derivedRideStarted && !driverStartedRide.value) {
+        driverStartedRide.value = true;
+        _didFitDriverAndDrop = false;
+        _seedStaticMarkers(forceRecreate: false);
+        _refreshPulseCircles();
+        _updatePolylinesForStatus(
+          effectiveStatus,
+          driverPos: newPos,
+          force: true,
+        );
+      }
+      if (derivedRideCompleted) {
+        if (!driverStartedRide.value) {
+          driverStartedRide.value = true;
+        }
+        destinationReached.value = true;
+        nearDestination.value = true;
+        etaChipText.value = 'Arrived at destination';
+        _seedStaticMarkers(forceRecreate: false);
+        _refreshPulseCircles();
+        _clearActiveRoute();
+      }
+      return;
+    }
     if (!_shouldAcceptTrackingPacket(
       receivedTsUtc: rawTs,
       position: newPos,
@@ -1215,12 +1317,18 @@ class OrderConfirmController extends GetxController
       }
       return;
     }
+    if (isSimulated && _shouldIgnoreInconsistentSimulatorPacket(payload, newPos)) {
+      if (kDebugMode) {
+        AppLogger.log.w(
+          'Ignoring inconsistent simulated $source '
+          'lat=$lat lng=$lng dropDistance=${payload['dropDistanceInMeters']} '
+          'speed=${payload['speed']}',
+        );
+      }
+      return;
+    }
     _lastAcceptedDriverLocationTs =
-        isSimulated && rawTs.isBefore(_lastAcceptedDriverLocationTs)
-            ? _lastAcceptedDriverLocationTs.add(
-                const Duration(milliseconds: 1),
-              )
-            : rawTs;
+        rawTs;
     _lastAcceptedDriverLocationPos = newPos;
     driverLocation.value = newPos;
 
@@ -1283,29 +1391,28 @@ class OrderConfirmController extends GetxController
       return;
     }
 
-    final accepted = _driverMotion.ingest(
+    final displayDeltaMeters = Geolocator.distanceBetween(
+      _displayPos!.latitude,
+      _displayPos!.longitude,
+      newPos.latitude,
+      newPos.longitude,
+    );
+
+    _driverMotion.ingest(
       newPos,
       serverTs: rawTs,
       bearing: srvBearing,
+      allowDeadReckoning: false,
     );
 
-    if (!accepted &&
-        source != 'driver-location' &&
-        _displayPos != null &&
-        Geolocator.distanceBetween(
-              _displayPos!.latitude,
-              _displayPos!.longitude,
-              newPos.latitude,
-              newPos.longitude,
-            ) >
-            1.0) {
-      _displayPos = newPos;
-      _emaPos = newPos;
-      _lastBearing = srvBearing ?? _lastBearing;
-      _driverMotion.reset(newPos, bearing: _lastBearing);
+    final shouldRefreshRoute =
+        activeRoutePoints.isEmpty ||
+        derivedRideStarted ||
+        derivedRideCompleted ||
+        displayDeltaMeters > 2.5;
+    if (shouldRefreshRoute) {
+      _updatePolylinesForStatus(effectiveStatus, driverPos: newPos);
     }
-
-    _updatePolylinesForStatus(effectiveStatus, driverPos: newPos);
   }
 
   Map<String, dynamic> _normalizeSocketPayload(dynamic raw) {
@@ -1626,6 +1733,7 @@ class OrderConfirmController extends GetxController
     markers.add(newMarker);
     markers.refresh();
 
+    _trimActiveRouteVisual(position);
     _refreshPulseCircles();
   }
 
@@ -1655,12 +1763,12 @@ class OrderConfirmController extends GetxController
 
     // 1) Pre-ride: follow driver with pickup awareness, without fit-bounds jitter.
     if (!driverStartedRide.value && customerLatLng != null) {
-      final mid = LatLng(
-        (_emaPos!.latitude + customerLatLng!.latitude) / 2,
-        (_emaPos!.longitude + customerLatLng!.longitude) / 2,
+      final mid = _cameraFollowTarget(
+        driverPos: _emaPos!,
+        anchorPos: customerLatLng!,
       );
       // Keep zoom stable so roads + vehicle icon remain clear (avoid zooming out).
-      final z = lockedZoom.clamp(_minAutoFollowZoom, 17.0);
+      final z = lockedZoom.clamp(_minAutoFollowZoom, 16.75);
       try {
         mapController!.animateCamera(
           CameraUpdate.newCameraPosition(
@@ -1678,12 +1786,16 @@ class OrderConfirmController extends GetxController
 
     // 2) Ride started: smoothly follow live driver.
     if (driverStartedRide.value) {
-      final z = lockedZoom.clamp(_minAutoFollowZoom, 17.0);
+      final z = lockedZoom.clamp(_minAutoFollowZoom, 16.75);
+      final target = _cameraFollowTarget(
+        driverPos: _emaPos!,
+        anchorPos: customerToLatLng,
+      );
       try {
         mapController!.animateCamera(
           CameraUpdate.newCameraPosition(
             CameraPosition(
-              target: _emaPos!,
+              target: target,
               zoom: z,
               bearing: _lastBearing,
               tilt: _mapTilt,
@@ -1695,12 +1807,13 @@ class OrderConfirmController extends GetxController
     }
 
     // 3) fallback: follow driver with a safe zoom clamp
-    final z = lockedZoom.clamp(_minAutoFollowZoom, 17.0);
+    final z = lockedZoom.clamp(_minAutoFollowZoom, 16.75);
+    final target = _cameraFollowTarget(driverPos: _emaPos!);
     try {
       mapController!.animateCamera(
         CameraUpdate.newCameraPosition(
           CameraPosition(
-            target: _emaPos!,
+            target: target,
             zoom: z,
             bearing: _lastBearing,
             tilt: _mapTilt,
@@ -2023,8 +2136,11 @@ class OrderConfirmController extends GetxController
       destination: dest,
       now: now,
       lastRouteFetchAt: _lastRouteFetchAt,
-      minInterval: const Duration(seconds: 20),
-      offRouteThresholdMeters: 34.0,
+      minInterval:
+          driverStartedRide.value
+              ? const Duration(seconds: 10)
+              : const Duration(seconds: 16),
+      offRouteThresholdMeters: driverStartedRide.value ? 24.0 : 30.0,
     )) {
       return;
     }
@@ -2079,11 +2195,65 @@ class OrderConfirmController extends GetxController
     }
   }
 
+  String _currentPolylineId() {
+    return driverStartedRide.value ? 'driver_to_drop' : 'driver_to_pickup';
+  }
+
+  // Intentionally a no-op now.
+  //
+  // Visual route trimming is owned by CustomerRideMapView, which trims a DISPLAY
+  // copy of the route without mutating `activeRoutePoints`. Trimming the source
+  // list here every ~90ms rewrote the route the widget receives, forcing it to
+  // re-sync and snap the marker on every frame -> the car appeared to "jump" and
+  // the line flashed "partial". Keeping the full fetched route lets the widget
+  // trim it smoothly. `activeRoutePoints` now changes only on a real reroute.
+  // ignore: avoid_unused_constructor_parameters
+  void _trimActiveRouteVisual(LatLng driverPos) {}
+
+  LatLng _cameraFollowTarget({
+    required LatLng driverPos,
+    LatLng? anchorPos,
+  }) {
+    final bearing = _lastBearing;
+    double backtrackMeters = driverStartedRide.value ? 55.0 : 36.0;
+
+    if (anchorPos != null) {
+      final gap = Geolocator.distanceBetween(
+        driverPos.latitude,
+        driverPos.longitude,
+        anchorPos.latitude,
+        anchorPos.longitude,
+      );
+      if (gap < 120.0) {
+        backtrackMeters = 18.0;
+      } else if (gap < 260.0) {
+        backtrackMeters = 28.0;
+      }
+    }
+
+    final headingRad = (bearing + 180.0) * math.pi / 180.0;
+    const metersPerDegreeLat = 111320.0;
+    final metersPerDegreeLng =
+        metersPerDegreeLat * math.cos(driverPos.latitude * math.pi / 180.0);
+
+    final latOffset = (math.cos(headingRad) * backtrackMeters) / metersPerDegreeLat;
+    final lngOffset =
+        metersPerDegreeLng.abs() < 1
+            ? 0.0
+            : (math.sin(headingRad) * backtrackMeters) / metersPerDegreeLng;
+
+    return LatLng(
+      driverPos.latitude + latOffset,
+      driverPos.longitude + lngOffset,
+    );
+  }
+
   void _clearActiveRoute({bool clearVisuals = true, bool clearKey = true}) {
     if (clearVisuals) {
       activeRoutePoints.clear();
       polylines.clear();
     }
+    _lastTrimSegIndex = -1;
     if (clearKey) _lastRouteKey = '';
     _lastRouteFetchAt = DateTime.fromMillisecondsSinceEpoch(0);
     // Keep the last signature when visuals are kept, so the new route will only
@@ -2136,8 +2306,13 @@ class OrderConfirmController extends GetxController
         final sig = _routeSig(cached);
         if (sig != _activeRouteSig) {
           _activeRouteSig = sig;
+          _lastTrimSegIndex = -1;
           activeRoutePoints.assignAll(cached);
           polylines.assignAll(MapUiDefaults.routePolylines(cached, id: polyId));
+          final livePos = _displayPos ?? _emaPos ?? driverLocation.value;
+          if (livePos != null) {
+            _trimActiveRouteVisual(livePos);
+          }
         }
         return;
       }
@@ -2164,8 +2339,13 @@ class OrderConfirmController extends GetxController
       final sig = _routeSig(pts);
       if (sig != _activeRouteSig) {
         _activeRouteSig = sig;
+        _lastTrimSegIndex = -1;
         activeRoutePoints.assignAll(pts);
         polylines.assignAll(MapUiDefaults.routePolylines(pts, id: polyId));
+        final livePos = _displayPos ?? _emaPos ?? driverLocation.value;
+        if (livePos != null) {
+          _trimActiveRouteVisual(livePos);
+        }
         if (kDebugMode) {
           AppLogger.log.i('🧭 route applied: ${pts.length} pts ($polyId)');
         }
@@ -2179,6 +2359,10 @@ class OrderConfirmController extends GetxController
         _activeRouteSig = _routeSig(pts);
         activeRoutePoints.assignAll(pts);
         polylines.assignAll(MapUiDefaults.routePolylines(pts, id: polyId));
+        final livePos = _displayPos ?? _emaPos ?? driverLocation.value;
+        if (livePos != null) {
+          _trimActiveRouteVisual(livePos);
+        }
       }
     } finally {
       _routeInFlightKey = null;

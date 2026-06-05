@@ -1,10 +1,11 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show rootBundle;
+import 'package:flutter/services.dart' show rootBundle, HapticFeedback;
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
@@ -61,7 +62,7 @@ class CustomerRideMapView extends StatefulWidget {
 }
 
 class CustomerRideMapViewState extends State<CustomerRideMapView>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   GoogleMapController? _mapController;
   String? _mapStyle;
 
@@ -81,6 +82,25 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   Set<Polyline> _polylines = const <Polyline>{};
   Set<Marker> _markers = const <Marker>{};
 
+  // --- animated map flourishes: progressive route draw, flowing comet line,
+  // distance-aware radar pulse, and arrival celebration. All driven by a single
+  // low-rate fx ticker so they stay cheap and never fight the motion engine. ---
+  Set<Circle> _circles = const <Circle>{};
+  Timer? _fxTimer;
+  late final AnimationController _routeDrawCtrl;
+  late final AnimationController _arrivalCtrl;
+  late final AnimationController _completeCtrl; // ride-complete confetti
+  double _flowPhase = 0.0;
+  double _pulsePhase = 0.0;
+  RideMapMode? _drawnForMode;
+  // Camera is fit-to-bounds only the first time a valid route arrives per phase.
+  // (The controller re-trims the route constantly, which must NOT keep refitting
+  // the camera — that caused the map/car to "jump" every few seconds.)
+  RideMapMode? _fittedForMode;
+  bool _celebratedPickup = false;
+  bool _celebratedDrop = false;
+  LatLng? _arrivalCenter;
+
   DateTime _lastCameraAt = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _pauseFollowUntil = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastFitAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -96,7 +116,36 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   static const Duration _markerMinInterval = Duration(milliseconds: 70);
 
   DateTime _lastPolylineTrimAt = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _polyTrimInterval = Duration(milliseconds: 180);
+  // Trim the travelled part of the route quickly so it tracks the marker
+  // instead of lagging a few seconds behind.
+  static const Duration _polyTrimInterval = Duration(milliseconds: 60);
+
+  /// Adaptive follow zoom — better than a fixed zoom: wide when the driver is
+  /// far from the active target and tightening automatically as they approach,
+  /// like a polished Ola/Uber tracking view. North-up + flat, so these read
+  /// comfortably (not "over-zoomed").
+  double _adaptiveFollowZoom(LatLng vehiclePos, {bool recenter = false}) {
+    final target =
+        widget.mode == RideMapMode.toDrop ? widget.drop : widget.pickup;
+    final gap = haversineDistanceMeters(vehiclePos, target);
+    double z;
+    if (gap > 2000) {
+      z = 14.6; // far away: show plenty of road
+    } else if (gap > 1200) {
+      z = 15.0;
+    } else if (gap > 600) {
+      z = 15.6;
+    } else if (gap > 300) {
+      z = 16.2;
+    } else if (gap > 140) {
+      z = 16.7;
+    } else {
+      z = 17.0; // about to arrive: tight so the user sees the exact spot
+    }
+    // Recenter is an explicit "focus" tap -> nudge slightly tighter.
+    if (recenter) z += 0.3;
+    return z.clamp(MapUiConfig.minZoom, MapUiConfig.maxZoom);
+  }
 
   double _bearingWithVehicleIconOffset(double bearing) {
     final offset =
@@ -109,6 +158,20 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   @override
   void initState() {
     super.initState();
+
+    _routeDrawCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 750),
+    );
+    _arrivalCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1100),
+    );
+    _completeCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 2400),
+    );
+    _fxTimer = Timer.periodic(const Duration(milliseconds: 70), _onFxTick);
 
     _motion = DriverMotionEngine(
       vsync: this,
@@ -128,11 +191,14 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
         );
         _maybeTrimRoute(snapped.position);
         _maybeFollowCamera(snapped.position);
+        _maybeCelebrateArrival(snapped.position);
       },
       playbackDelay: const Duration(milliseconds: 220),
       minSeg: const Duration(milliseconds: 320),
-      maxSeg: const Duration(milliseconds: 900),
+      maxSeg: const Duration(milliseconds: 2600),
       minMoveMeters: 1.5,
+      requireBearingForDeadReckoning: true,
+      maxDeadReckonPacketGap: const Duration(seconds: 4),
       stationarySpeedThresholdMps: 0.35,
       stationaryIgnoreUnderMeters: 1.8,
     );
@@ -155,6 +221,10 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   @override
   void dispose() {
     _markerFlushTimer?.cancel();
+    _fxTimer?.cancel();
+    _routeDrawCtrl.dispose();
+    _arrivalCtrl.dispose();
+    _completeCtrl.dispose();
     _motion.dispose();
     super.dispose();
   }
@@ -171,18 +241,27 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     // signature instead of relying on list identity.
     if (_computeRouteSig(widget.routePoints) != _routeSig) {
       _syncRoute(force: true);
-      _requestFitBounds(reason: 'route_changed');
+      // Fit the camera ONLY the first time a valid route arrives for this phase.
+      // The controller re-trims the route as the driver advances (signature
+      // changes constantly); refitting on every trim made the map/car jump and
+      // the route flash "partial". Subsequent trims keep the follow-camera.
+      if (_fittedForMode != widget.mode &&
+          _routeMatchesCurrentMode(widget.routePoints)) {
+        _fittedForMode = widget.mode;
+        _requestFitBounds(reason: 'route_first_for_mode', force: true);
+      }
     }
 
     if (oldWidget.pickup != widget.pickup || oldWidget.drop != widget.drop) {
       _syncMarkers(force: true);
-      _requestFitBounds(reason: 'pickup_drop_changed');
+      _requestFitBounds(reason: 'pickup_drop_changed', force: true);
     }
     if (oldWidget.mode != widget.mode) {
       _syncRoute(force: true);
       _syncMarkers(force: true);
       _rebuildPolylines();
-      _requestFitBounds(reason: 'mode_changed');
+      // New phase: allow exactly one fresh fit once its valid route arrives.
+      _fittedForMode = null;
     }
 
     if (widget.driverLocation != null &&
@@ -200,9 +279,19 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     }
   }
 
+  bool _isNightNow() {
+    final h = DateTime.now().hour;
+    return h >= 19 || h < 6; // 7pm–6am -> dark theme
+  }
+
   Future<void> _loadMapStyle() async {
     try {
-      _mapStyle = await rootBundle.loadString('assets/map_style.json');
+      // Auto day/night: clean light style by day, clean dark style at night.
+      final asset =
+          _isNightNow()
+              ? 'assets/map_style/map_style_dark.json'
+              : 'assets/map_style.json';
+      _mapStyle = await rootBundle.loadString(asset);
       if (_mapController != null) {
         await _mapController!.setMapStyle(_mapStyle);
       }
@@ -252,6 +341,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       _vehicleBearing = snapped.bearing;
       _maybeTrimRoute(snapped.position, force: true);
     }
+    _maybeStartRouteDraw();
     _rebuildPolylines();
   }
 
@@ -263,26 +353,29 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     return endDistance <= 90.0;
   }
 
-  void _requestFitBounds({required String reason}) {
+  void _requestFitBounds({required String reason, bool force = false}) {
     // Fit bounds only when it matters; never on every driver update.
     // Also don't fight the user: pause after user gestures.
     final now = DateTime.now();
-    if (now.isBefore(_pauseFollowUntil)) return;
-    if (now.difference(_lastFitAt) < const Duration(milliseconds: 900)) return;
+    if (!force && now.isBefore(_pauseFollowUntil)) return;
+    if (!force &&
+        now.difference(_lastFitAt) < const Duration(milliseconds: 900)) {
+      return;
+    }
 
     final key =
         '${widget.mode}|route:$_routeSig|p:${widget.pickup.latitude.toStringAsFixed(5)},${widget.pickup.longitude.toStringAsFixed(5)}|d:${widget.drop.latitude.toStringAsFixed(5)},${widget.drop.longitude.toStringAsFixed(5)}';
-    if (key == _lastFitKey) return;
+    if (!force && key == _lastFitKey) return;
 
     _lastFitKey = key;
     _pendingFit = true;
-    _maybeFitBounds();
+    _maybeFitBounds(force: force);
   }
 
-  Future<void> _maybeFitBounds() async {
+  Future<void> _maybeFitBounds({bool force = false}) async {
     if (!_pendingFit) return;
     if (_mapController == null) return;
-    if (DateTime.now().isBefore(_pauseFollowUntil)) return;
+    if (!force && DateTime.now().isBefore(_pauseFollowUntil)) return;
 
     final activeTarget =
         widget.mode == RideMapMode.toDrop ? widget.drop : widget.pickup;
@@ -367,51 +460,312 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   }
 
   void _rebuildPolylines() {
-    final set = <Polyline>{};
-
-    // Two-phase polyline system (Uber/Ola-like).
-    // Phase 1: driver -> pickup (grey dashed).
-    // Phase 2: pickup -> drop (blue solid), and we trim as driver advances
-    // by updating `_remainingRoute`.
-    if (widget.mode == RideMapMode.toPickup) {
-      final pts = _remainingRoute.length >= 2 ? _remainingRoute : _fullRoute;
-      if (pts.length >= 2) {
-        set.add(
-          Polyline(
-            polylineId: const PolylineId('active_route'),
-            points: pts,
-            color: Colors.grey.shade600,
-            width: 4,
-            zIndex: 1,
-            startCap: Cap.roundCap,
-            endCap: Cap.roundCap,
-            jointType: JointType.round,
-            patterns: <PatternItem>[PatternItem.dash(20), PatternItem.gap(10)],
-          ),
-        );
-      }
-    } else if (widget.mode == RideMapMode.toDrop) {
-      final remaining =
-          _remainingRoute.length >= 2 ? _remainingRoute : _fullRoute;
-      if (remaining.length >= 2) {
-        set.add(
-          Polyline(
-            polylineId: const PolylineId('active_route'),
-            points: remaining,
-            color: const Color(0xFF000000),
-            width: 5,
-            zIndex: 1,
-            startCap: Cap.roundCap,
-            endCap: Cap.roundCap,
-            jointType: JointType.round,
-          ),
-        );
-      }
-    }
-
-    _polylines = set;
+    _polylines = _composePolylineSet();
     _syncMarkers(force: false);
     if (mounted) setState(() {});
+  }
+
+  // ---------------------------------------------------------------------------
+  // Animated map flourishes
+  // ---------------------------------------------------------------------------
+
+  /// Route polylines with two flourishes:
+  ///  - progressive "draw-in" reveal when a new route appears, and
+  ///  - a soft white "energy" comet that flows toward the destination.
+  Set<Polyline> _composePolylineSet() {
+    final set = <Polyline>{};
+    final isPickup = widget.mode == RideMapMode.toPickup;
+    final isDrop = widget.mode == RideMapMode.toDrop;
+    if (!isPickup && !isDrop) return set;
+
+    final active = _remainingRoute.length >= 2 ? _remainingRoute : _fullRoute;
+    if (active.length < 2) return set;
+
+    final drawT = Curves.easeOut.transform(_routeDrawCtrl.value);
+    final revealing = drawT < 1.0;
+    final drawn = revealing ? _revealPrefix(active, drawT) : active;
+    if (drawn.length < 2) return set;
+
+    set.add(
+      Polyline(
+        polylineId: const PolylineId('active_route'),
+        points: drawn,
+        color: isPickup ? Colors.grey.shade600 : const Color(0xFF111111),
+        width: isPickup ? 4 : 5,
+        zIndex: 1,
+        startCap: Cap.roundCap,
+        endCap: Cap.roundCap,
+        jointType: JointType.round,
+        patterns:
+            isPickup
+                ? <PatternItem>[PatternItem.dash(20), PatternItem.gap(10)]
+                : const <PatternItem>[],
+      ),
+    );
+
+    // Flowing comet — a brand-blue "energy" pulse with a fading tail that runs
+    // toward the destination. Only after the draw-in finishes and the line is
+    // long enough to look intentional (never on a tiny stub near arrival).
+    if (!revealing && drawn.length >= 6) {
+      set.addAll(_flowCometPolylines(drawn));
+    }
+    return set;
+  }
+
+  /// Distance-aware radar pulse at the active target + one-shot arrival ripple.
+  Set<Circle> _composeCircleSet() {
+    final set = <Circle>{};
+    final target =
+        widget.mode == RideMapMode.toDrop
+            ? widget.drop
+            : widget.mode == RideMapMode.toPickup
+            ? widget.pickup
+            : null;
+
+    if (target != null && !_arrivedForCurrentMode()) {
+      final t = (math.sin(_pulsePhase) + 1) / 2; // 0..1
+      set.add(
+        Circle(
+          circleId: const CircleId('target_pulse'),
+          center: target,
+          radius: 18.0 + 42.0 * t,
+          fillColor: Colors.black.withValues(alpha: 0.08 * (1 - t)),
+          strokeColor: Colors.black.withValues(alpha: 0.30 * (1 - t)),
+          strokeWidth: 2,
+          zIndex: 0,
+        ),
+      );
+    }
+
+    if (_arrivalCtrl.isAnimating && _arrivalCenter != null) {
+      final v = _arrivalCtrl.value;
+      final op = (1 - v) * 0.45;
+      set.add(
+        Circle(
+          circleId: const CircleId('arrival_ripple'),
+          center: _arrivalCenter!,
+          radius: 16.0 + 95.0 * v,
+          fillColor: Colors.green.withValues(alpha: op * 0.45),
+          strokeColor: Colors.green.withValues(alpha: op),
+          strokeWidth: 3,
+          zIndex: 1,
+        ),
+      );
+    }
+    return set;
+  }
+
+  void _onFxTick(Timer _) {
+    if (!mounted) return;
+    if (widget.mode == RideMapMode.idle) return;
+
+    _flowPhase = (_flowPhase + 0.045) % 1.0;
+
+    // Pulse speeds up as the driver nears the active target ("getting closer").
+    double step = 0.16;
+    final v = _vehiclePos;
+    final target =
+        widget.mode == RideMapMode.toDrop ? widget.drop : widget.pickup;
+    if (v != null) {
+      final gap = haversineDistanceMeters(v, target);
+      if (gap < 80) {
+        step = 0.42;
+      } else if (gap < 200) {
+        step = 0.30;
+      } else if (gap < 500) {
+        step = 0.22;
+      }
+    }
+    _pulsePhase += step;
+
+    _polylines = _composePolylineSet();
+    _circles = _composeCircleSet();
+    if (mounted) setState(() {});
+  }
+
+  void _maybeStartRouteDraw() {
+    if (_fullRoute.length < 2) return;
+    if (_drawnForMode == widget.mode) return;
+    _drawnForMode = widget.mode;
+    _routeDrawCtrl
+      ..reset()
+      ..forward();
+  }
+
+  bool _arrivedForCurrentMode() =>
+      widget.mode == RideMapMode.toDrop
+          ? _celebratedDrop
+          : widget.mode == RideMapMode.toPickup
+          ? _celebratedPickup
+          : false;
+
+  void _maybeCelebrateArrival(LatLng pos) {
+    final target =
+        widget.mode == RideMapMode.toDrop
+            ? widget.drop
+            : widget.mode == RideMapMode.toPickup
+            ? widget.pickup
+            : null;
+    if (target == null) return;
+    if (haversineDistanceMeters(pos, target) > 28.0) return;
+    final isDropArrival = widget.mode == RideMapMode.toDrop;
+    if (isDropArrival) {
+      if (_celebratedDrop) return;
+      _celebratedDrop = true;
+    } else {
+      if (_celebratedPickup) return;
+      _celebratedPickup = true;
+    }
+    _arrivalCenter = target;
+    try {
+      HapticFeedback.mediumImpact();
+    } catch (_) {}
+    _arrivalCtrl
+      ..reset()
+      ..forward();
+
+    // Reaching the destination = trip complete -> celebrate (confetti + banner).
+    if (isDropArrival) {
+      try {
+        HapticFeedback.heavyImpact();
+      } catch (_) {}
+      _completeCtrl
+        ..reset()
+        ..forward();
+    }
+  }
+
+  double _polylineLength(List<LatLng> pts) {
+    double total = 0;
+    for (int i = 0; i < pts.length - 1; i++) {
+      total += haversineDistanceMeters(pts[i], pts[i + 1]);
+    }
+    return total;
+  }
+
+  /// Returns the prefix of [pts] covering fraction [t] of its total length,
+  /// with an interpolated tip so the reveal is smooth (not snapping per-vertex).
+  List<LatLng> _revealPrefix(List<LatLng> pts, double t) {
+    if (t >= 1.0) return pts;
+    if (t <= 0.0 || pts.length < 2) return const <LatLng>[];
+    final total = _polylineLength(pts);
+    if (total <= 0) return pts;
+    final targetLen = total * t;
+    final out = <LatLng>[pts.first];
+    double acc = 0;
+    for (int i = 0; i < pts.length - 1; i++) {
+      final segLen = haversineDistanceMeters(pts[i], pts[i + 1]);
+      if (acc + segLen >= targetLen) {
+        final f = segLen <= 0 ? 0.0 : (targetLen - acc) / segLen;
+        out.add(
+          LatLng(
+            pts[i].latitude + (pts[i + 1].latitude - pts[i].latitude) * f,
+            pts[i].longitude + (pts[i + 1].longitude - pts[i].longitude) * f,
+          ),
+        );
+        return out;
+      }
+      out.add(pts[i + 1]);
+      acc += segLen;
+    }
+    return out;
+  }
+
+  /// A premium "comet" that flows toward the destination: several graduated
+  /// sub-segments in the app's brand blue, fading from a faint tail to a bright,
+  /// slightly thicker head — so it reads as light travelling along the route,
+  /// not a flat blob. Unique, on-brand, and subtle.
+  List<Polyline> _flowCometPolylines(List<LatLng> route) {
+    final total = _polylineLength(route);
+    if (total < 120) return const <Polyline>[];
+
+    final windowLen = (total * 0.18).clamp(60.0, 260.0);
+    final head = total * _flowPhase;
+    const segments = 6;
+    const brand = Color(0xff357AE9); // Hoppr accent blue
+
+    final out = <Polyline>[];
+    for (int i = 0; i < segments; i++) {
+      final fromLen = head - windowLen * (segments - i) / segments;
+      final toLen = head - windowLen * (segments - i - 1) / segments;
+      final pts = _subPolylineByLength(
+        route,
+        fromLen.clamp(0.0, total),
+        toLen.clamp(0.0, total),
+      );
+      if (pts.length < 2) continue;
+      final headness = (i + 1) / segments; // 0 (tail) .. 1 (head)
+      out.add(
+        Polyline(
+          polylineId: PolylineId('flow_$i'),
+          points: pts,
+          color: brand.withValues(alpha: 0.10 + 0.80 * headness),
+          width: (3 + 4 * headness).round(),
+          zIndex: 2 + i,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          jointType: JointType.round,
+        ),
+      );
+    }
+
+    // Bright blue head core (no white) so the comet reads as a smooth, fully
+    // blue glowing pulse — a clean bright-blue centre over the faded blue tail.
+    final coreFrom = head - windowLen * 0.30;
+    final corePts = _subPolylineByLength(
+      route,
+      coreFrom.clamp(0.0, total),
+      head.clamp(0.0, total),
+    );
+    if (corePts.length >= 2) {
+      out.add(
+        Polyline(
+          polylineId: const PolylineId('flow_core'),
+          points: corePts,
+          color: const Color(0xff6FB0FF), // bright blue head
+          width: 3,
+          zIndex: 2 + segments + 1,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          jointType: JointType.round,
+        ),
+      );
+    }
+    return out;
+  }
+
+  List<LatLng> _subPolylineByLength(
+    List<LatLng> pts,
+    double fromLen,
+    double toLen,
+  ) {
+    if (toLen <= fromLen) return const <LatLng>[];
+    final out = <LatLng>[];
+    double acc = 0;
+    for (int i = 0; i < pts.length - 1; i++) {
+      final a = pts[i];
+      final b = pts[i + 1];
+      final segLen = haversineDistanceMeters(a, b);
+      final segStart = acc;
+      final segEnd = acc + segLen;
+      if (segLen > 0 && segEnd >= fromLen && segStart <= toLen) {
+        final f0 = ((fromLen - segStart) / segLen).clamp(0.0, 1.0);
+        final f1 = ((toLen - segStart) / segLen).clamp(0.0, 1.0);
+        final p0 = LatLng(
+          a.latitude + (b.latitude - a.latitude) * f0,
+          a.longitude + (b.longitude - a.longitude) * f0,
+        );
+        final p1 = LatLng(
+          a.latitude + (b.latitude - a.latitude) * f1,
+          a.longitude + (b.longitude - a.longitude) * f1,
+        );
+        if (out.isEmpty) out.add(p0);
+        out.add(p1);
+      }
+      acc = segEnd;
+      if (segStart > toLen) break;
+    }
+    return out;
   }
 
   void _syncMarkers({required bool force}) {
@@ -585,10 +939,12 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       return _SnappedPose(position: raw, bearing: fallbackBearing);
     }
 
+    // Snap the heading toward the route tangent quickly so the vehicle points
+    // where it is actually travelling (prevents the "sliding sideways" look).
     final smooth = smoothBearing(
       currentDeg: fallbackBearing,
       targetDeg: routeBearing,
-      alpha: 0.22,
+      alpha: 0.5,
     );
 
     final resolved = _resolveDisplayPosition(
@@ -767,25 +1123,24 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
 
     final z =
         widget.mode != RideMapMode.idle
-            ? 17.0
+            ? _adaptiveFollowZoom(vehiclePos)
             : CameraUtils.clampZoom(
               _currentZoom,
               min: MapUiConfig.followMinZoom,
               max: MapUiConfig.maxZoom,
             );
 
-    final isActiveRide = widget.mode != RideMapMode.idle;
-
+    // Center the driver. The bottom-sheet padding already lifts the effective
+    // centre above the sheet, so north-up + centred reads clean (no weird
+    // "driver stuck at the top" that the heading offset caused in north-up).
     final target = vehiclePos;
     try {
       _mapController!.animateCamera(
         CameraUpdate.newCameraPosition(
-          CameraPosition(
-            target: target,
-            zoom: z,
-            bearing: isActiveRide ? _vehicleBearing : 0,
-            tilt: isActiveRide ? 30.0 : 0,
-          ),
+          // North-up: keep the map steady and let only the vehicle icon rotate
+          // (clean Uber/Ola customer-tracking feel; avoids the disorienting
+          // map spin that made turns look like the car was sliding).
+          CameraPosition(target: target, zoom: z, bearing: 0, tilt: 0),
         ),
       );
     } catch (_) {}
@@ -798,21 +1153,18 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     // Ensure recenter always feels like a "focus" action (not stuck zoomed out).
     final z =
         widget.mode != RideMapMode.idle
-            ? 17.0
+            ? _adaptiveFollowZoom(pos, recenter: true)
             : CameraUtils.clampZoom(
               _currentZoom,
               min: MapUiConfig.followMinZoom,
               max: MapUiConfig.maxZoom,
             );
+    final target = pos; // centered (see _maybeFollowCamera)
     try {
       await _mapController!.animateCamera(
         CameraUpdate.newCameraPosition(
-          CameraPosition(
-            target: pos,
-            zoom: z,
-            bearing: widget.mode != RideMapMode.idle ? _vehicleBearing : 0,
-            tilt: widget.mode != RideMapMode.idle ? 30.0 : 0,
-          ),
+          // North-up (see _maybeFollowCamera).
+          CameraPosition(target: target, zoom: z, bearing: 0, tilt: 0),
         ),
       );
     } catch (_) {}
@@ -866,6 +1218,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
             ),
             markers: _markers,
             polylines: _polylines,
+            circles: _circles,
             onMapCreated: (controller) async {
               _mapController = controller;
               if (_mapStyle != null) {
@@ -903,9 +1256,117 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
             iconOnlyCollapsed: true,
           ),
         ),
+
+        // Ride-complete celebration: confetti burst + "Trip done" banner.
+        // Only repaints while the controller animates (cheap, isolated).
+        Positioned.fill(
+          child: IgnorePointer(
+            child: AnimatedBuilder(
+              animation: _completeCtrl,
+              builder: (context, _) {
+                final v = _completeCtrl.value;
+                if (v <= 0.0 || v >= 1.0) return const SizedBox.shrink();
+                final appear = Curves.easeOutBack.transform(
+                  (v / 0.28).clamp(0.0, 1.0),
+                );
+                final fade = v > 0.82 ? (1 - (v - 0.82) / 0.18) : 1.0;
+                return Stack(
+                  children: [
+                    Positioned.fill(
+                      child: CustomPaint(
+                        painter: _ConfettiPainter(progress: v),
+                      ),
+                    ),
+                    Center(
+                      child: Opacity(
+                        opacity: fade.clamp(0.0, 1.0),
+                        child: Transform.scale(
+                          scale: 0.85 + 0.15 * appear,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 18,
+                              vertical: 12,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withValues(alpha: 0.86),
+                              borderRadius: BorderRadius.circular(28),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: 0.25),
+                                  blurRadius: 18,
+                                  offset: const Offset(0, 8),
+                                ),
+                              ],
+                            ),
+                            child: const Text(
+                              'Trip done 🎉',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
       ],
     );
   }
+}
+
+/// Lightweight, asset-free confetti for the ride-complete moment. Particles are
+/// generated deterministically (no RNG) so it stays cheap and replay-stable.
+class _ConfettiPainter extends CustomPainter {
+  final double progress;
+  _ConfettiPainter({required this.progress});
+
+  static const List<Color> _colors = <Color>[
+    Color(0xff357AE9), // brand blue
+    Color(0xff3AC267), // green
+    Color(0xffE79700), // amber
+    Color(0xffFF6B6B), // coral
+    Color(0xff5700D0), // purple
+  ];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final origin = Offset(size.width / 2, size.height * 0.30);
+    const n = 46;
+    final t = progress;
+    final fade = (1.0 - t).clamp(0.0, 1.0);
+    for (int i = 0; i < n; i++) {
+      final ang = (i / n) * 2 * math.pi + (i % 5) * 0.21;
+      final speed = 70.0 + (i % 7) * 30.0;
+      final dx = math.cos(ang) * speed * t;
+      final dy = math.sin(ang) * speed * t + 260.0 * t * t; // gravity fall
+      final pos = origin + Offset(dx, dy);
+      final paint =
+          Paint()..color = _colors[i % _colors.length].withValues(alpha: fade);
+      final w = 6.0 + (i % 3) * 2.0;
+      canvas.save();
+      canvas.translate(pos.dx, pos.dy);
+      canvas.rotate(ang + t * 7.0);
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromCenter(center: Offset.zero, width: w, height: w * 0.5),
+          const Radius.circular(1),
+        ),
+        paint,
+      );
+      canvas.restore();
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _ConfettiPainter old) =>
+      old.progress != progress;
 }
 
 class _SnappedPose {

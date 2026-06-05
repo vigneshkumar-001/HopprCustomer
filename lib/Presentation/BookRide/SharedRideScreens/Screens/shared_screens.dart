@@ -1081,7 +1081,12 @@ class _SharedScreensState extends State<SharedScreens>
 
       // driver location if sent in joined-booking
       final driverLoc = payload['driverLocation'];
-      if (driverLoc is Map) {
+      final hasLiveDriverStream =
+          _lastAcceptedDriverLocationPos != null &&
+          _lastAcceptedDriverLocationTsUtc.isAfter(
+            DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+          );
+      if (driverLoc is Map && !hasLiveDriverStream) {
         final dLat = (driverLoc['latitude'] as num?)?.toDouble();
         final dLng = (driverLoc['longitude'] as num?)?.toDouble();
         if (dLat != null && dLng != null) {
@@ -1300,12 +1305,7 @@ class _SharedScreensState extends State<SharedScreens>
         }
         return;
       }
-      _lastAcceptedDriverLocationTsUtc =
-          isSimulated && ts.isBefore(_lastAcceptedDriverLocationTsUtc)
-              ? _lastAcceptedDriverLocationTsUtc.add(
-                  const Duration(milliseconds: 1),
-                )
-              : ts;
+      _lastAcceptedDriverLocationTsUtc = ts;
       _lastAcceptedDriverLocationPos = newPos;
       final now0 = DateTime.now().toUtc();
       // If server clock is skewed too far into the future, treat it as "now"
@@ -1384,9 +1384,6 @@ class _SharedScreensState extends State<SharedScreens>
     Duration maxFutureSkew = const Duration(seconds: 12),
   }) {
     final nowUtc = DateTime.now().toUtc();
-    if (simulated) {
-      return nowUtc;
-    }
     if (ts.isAfter(nowUtc.add(maxFutureSkew))) {
       return nowUtc;
     }
@@ -1414,9 +1411,7 @@ class _SharedScreensState extends State<SharedScreens>
 
     if (lastAcceptedPos != null) {
       final samePoint = _isSameTrackingPoint(lastAcceptedPos, position);
-      final tsDiffMs =
-          receivedTsUtc.difference(lastAcceptedTsUtc).inMilliseconds.abs();
-      if (samePoint && tsDiffMs <= 2500) {
+      if (samePoint) {
         decision = 'duplicate_same_point';
         if (kDebugMode) {
           AppLogger.log.d(
@@ -1426,21 +1421,15 @@ class _SharedScreensState extends State<SharedScreens>
         }
         return false;
       }
-      if (receivedTsUtc.isBefore(
-        lastAcceptedTsUtc.subtract(const Duration(seconds: 3)),
-      )) {
-        if (simulated && !samePoint) {
-          decision = 'simulator_reordered_accept';
-        } else {
-          decision = simulated ? 'simulator_out_of_order' : 'older_than_last';
-          if (kDebugMode) {
-            AppLogger.log.d(
-              'shared tracking decision receivedTsUtc=$receivedTsUtc '
-              'lastAcceptedTsUtc=$lastAcceptedTsUtc staleDecision=$decision markerUpdated=false',
-            );
-          }
-          return false;
+      if (receivedTsUtc.isBefore(lastAcceptedTsUtc)) {
+        decision = 'older_than_last';
+        if (kDebugMode) {
+          AppLogger.log.d(
+            'shared tracking decision receivedTsUtc=$receivedTsUtc '
+            'lastAcceptedTsUtc=$lastAcceptedTsUtc staleDecision=$decision markerUpdated=false',
+          );
         }
+        return false;
       }
     } else if (!simulated) {
       final age = DateTime.now().toUtc().difference(receivedTsUtc);

@@ -12,10 +12,11 @@ class MapUiConfig {
 
   // Camera
   // Active ride screens: never allow zoom <14 or >18.
-  static const double initialZoom = 17.0;
+  // initialZoom kept a touch wider so the first frame doesn't look over-zoomed.
+  static const double initialZoom = 16.0;
   static const double minZoom = 14.0;
   static const double maxZoom = 18.0;
-  static const double followMinZoom = 17.0;
+  static const double followMinZoom = 15.5;
   static const Duration cameraFollowInterval = Duration(milliseconds: 900);
 
   // Marker sizing (logical px / dp)

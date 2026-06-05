@@ -24,6 +24,7 @@
         android:label="Hoppr"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
+        android:largeHeap="true"
         android:theme="@style/Theme.Hopper">
 
         <meta-data

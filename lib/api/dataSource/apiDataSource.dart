@@ -486,10 +486,21 @@ class ApiDataSource extends BaseApiDataSource {
       }
 
       String url = ApiConsents.userImageUpload;
+      // Send an explicit image content-type. Without it the multipart part was
+      // uploaded as `application/octet-stream`, which the server's image filter
+      // rejected and face-detection could not read.
+      final lowerPath = imageFile.path.toLowerCase();
+      final imageSubtype =
+          lowerPath.endsWith('.png')
+              ? 'png'
+              : lowerPath.endsWith('.webp')
+              ? 'webp'
+              : 'jpeg';
       FormData formData = FormData.fromMap({
         'image': await MultipartFile.fromFile(
           imageFile.path,
           filename: imageFile.path.split('/').last,
+          contentType: DioMediaType('image', imageSubtype),
         ),
       });
 

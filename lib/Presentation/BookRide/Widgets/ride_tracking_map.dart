@@ -116,8 +116,10 @@ class RideTrackingMapState extends State<RideTrackingMap>
       },
       playbackDelay: const Duration(milliseconds: 220),
       minSeg: const Duration(milliseconds: 320),
-      maxSeg: const Duration(milliseconds: 900),
+      maxSeg: const Duration(milliseconds: 2600),
       minMoveMeters: 1.5,
+      requireBearingForDeadReckoning: true,
+      maxDeadReckonPacketGap: const Duration(seconds: 4),
       stationarySpeedThresholdMps: 0.35,
       stationaryIgnoreUnderMeters: 1.8,
     );
