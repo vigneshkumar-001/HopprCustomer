@@ -1036,8 +1036,14 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
 
   Future<void> fetchPopularPlaces(LatLng location) async {
     final apiKey = ApiConsents.googleMapApiKey;
+    // Rank by prominence within a reasonable radius -> genuinely "nearby +
+    // popular" destinations (malls, transit hubs, landmarks, hospitals…),
+    // not just the closest bus stop. We then categorise, drop noise, dedupe
+    // and keep a diverse set of 4.
     final url =
-        'https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${location.latitude},${location.longitude}&rankby=distance&type=bus_station&key=$apiKey';
+        'https://maps.googleapis.com/maps/api/place/nearbysearch/json'
+        '?location=${location.latitude},${location.longitude}'
+        '&rankby=prominence&radius=12000&type=point_of_interest&key=$apiKey';
 
     try {
       final response = await http.get(Uri.parse(url));
@@ -1045,20 +1051,95 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
 
       if (data['status'] == 'OK') {
         final results = (data['results'] as List);
-        final list =
-            results.take(2).map((place) {
-              final displayName = "${place['name']}, ${place['vicinity']}";
-              return PopularPlace(
-                name: displayName,
-                address: place['vicinity'],
+        final seenName = <String>{};
+        final seenCategory = <String>{};
+        final list = <PopularPlace>[];
+
+        // First pass: prefer category variety (one per category) so the
+        // 4 shown feel diverse and useful.
+        for (final pass in [true, false]) {
+          for (final place in results) {
+            if (list.length >= 4) break;
+            final types =
+                (place['types'] as List?)?.cast<String>() ?? const <String>[];
+            final category = _popularCategoryFromTypes(types);
+            if (category == null) continue; // noise -> skip
+            final name = (place['name'] ?? '').toString().trim();
+            if (name.isEmpty) continue;
+            final nameKey = name.toLowerCase();
+            if (seenName.contains(nameKey)) continue;
+            // Pass 1 enforces one-per-category for variety; pass 2 fills up.
+            if (pass && seenCategory.contains(category)) continue;
+
+            seenName.add(nameKey);
+            seenCategory.add(category);
+            list.add(
+              PopularPlace(
+                name: name,
+                address: (place['vicinity'] ?? '').toString(),
                 lat: place['geometry']['location']['lat'],
                 lng: place['geometry']['location']['lng'],
-              );
-            }).toList();
+                category: category,
+              ),
+            );
+          }
+          if (list.length >= 4) break;
+        }
 
         popularPlaces.assignAll(list);
       }
     } catch (_) {}
+  }
+
+  /// Maps Google place `types` to one of our category keys. Returns null for
+  /// low-value noise (ATMs, parking, fuel…) so it's filtered out.
+  String? _popularCategoryFromTypes(List<String> types) {
+    const noise = {
+      'atm',
+      'parking',
+      'gas_station',
+      'bus_stop',
+      'convenience_store',
+      'car_repair',
+      'car_dealer',
+      'storage',
+      'moving_company',
+      'finance',
+      'accounting',
+      'laundry',
+      'real_estate_agency',
+    };
+    if (types.any(noise.contains)) return null;
+
+    bool has(String t) => types.contains(t);
+    if (has('airport')) return 'airport';
+    if (has('train_station') ||
+        has('subway_station') ||
+        has('light_rail_station')) {
+      return 'train';
+    }
+    if (has('bus_station') || has('transit_station')) return 'bus';
+    if (has('shopping_mall') || has('department_store')) return 'mall';
+    if (has('hospital') || has('pharmacy') || has('doctor')) return 'hospital';
+    if (has('university') || has('school')) return 'school';
+    if (has('stadium')) return 'stadium';
+    if (has('park')) return 'park';
+    if (has('lodging')) return 'hotel';
+    if (has('tourist_attraction') ||
+        has('museum') ||
+        has('art_gallery') ||
+        has('zoo')) {
+      return 'attraction';
+    }
+    if (has('restaurant') || has('cafe')) return 'food';
+    if (has('place_of_worship') ||
+        has('church') ||
+        has('mosque') ||
+        has('hindu_temple')) {
+      return 'worship';
+    }
+    if (has('point_of_interest') || has('establishment')) return 'place';
+    return null;
   }
 
   Future<void> _loadDriverIcons() async {

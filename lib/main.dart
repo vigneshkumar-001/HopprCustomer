@@ -6,7 +6,9 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_stripe/flutter_stripe.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:hopper/api/repository/api_consents.dart';
 import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Core/Firebase/firebase_service.dart';
 import 'package:hopper/Core/Utility/app_toasts.dart';
@@ -30,6 +32,11 @@ Future<void> main() async {
 
   await initController();
 
+  // Load the cached backend Maps key (gMapKey) so Maps HTTP calls use it
+  // immediately, before app-settings refreshes it. Falls back to the static
+  // key inside ApiConsents if none is cached yet.
+  await _loadCachedMapsKey();
+
   Stripe.publishableKey =
       'pk_test_51RTgU2Qhzmr6TYhsKMWtfICaQ72crva7xVWCA0hPeV1qdH9CInnl9WwJLNcxIIUWKDhCeipRLztD82DTnBXKx05700iEGBQWjw';
   await Stripe.instance.applySettings();
@@ -43,6 +50,15 @@ Future<void> main() async {
 
   runApp(const MyApp());
   unawaited(_bootstrapBackgroundServices());
+}
+
+Future<void> _loadCachedMapsKey() async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    ApiConsents.setDynamicMapsKey(prefs.getString('gMapKey'));
+  } catch (e) {
+    AppLogger.log.w('Cached gMapKey load failed: $e');
+  }
 }
 
 Future<void> _bootstrapBackgroundServices() async {

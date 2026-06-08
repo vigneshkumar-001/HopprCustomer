@@ -5,6 +5,8 @@ import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Core/Utility/app_loader.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:hopper/Presentation/Drawer/controller/ride_history_controller.dart';
+import 'package:hopper/Presentation/Drawer/screens/ride_details_screen.dart';
+import 'package:hopper/Presentation/Drawer/utils/ride_history_format.dart';
 import 'package:get/get.dart';
 
 class RideAndPackageHistoryScreen extends StatefulWidget {
@@ -34,7 +36,7 @@ class _RideAndPackageHistoryScreenState
     );
     controller.getRideHistory(isFirstLoad: true);
     controller.scrollController.addListener(_paginationListener);
-  }
+  }
   @override
   void dispose() {
     controller.scrollController.removeListener(_paginationListener);
@@ -92,165 +94,177 @@ class _RideAndPackageHistoryScreenState
             }
 
             final ride = data[index];
+            final driverName =
+                '${ride.driver?.firstName ?? ''} ${ride.driver?.lastName ?? ''}'
+                    .trim();
+            final statusLabel = prettyStatus(ride.status);
+            final isCancelled =
+                statusLabel.toLowerCase().contains('cancel') ||
+                statusLabel.toLowerCase().contains('fail');
+            final statusClr =
+                isCancelled
+                    ? const Color(0xFFF04438) // refined red
+                    : const Color(0xFF12B76A); // fresh emerald
+            final statusIcon =
+                isCancelled ? Icons.close_rounded : Icons.check_rounded;
+            final subtitle =
+                [
+                  if (driverName.isNotEmpty) driverName,
+                  if (formatRideDateShort(ride.createdAt).isNotEmpty)
+                    formatRideDateShort(ride.createdAt),
+                ].join('  •  ');
 
-            return Container(
-              margin: const EdgeInsets.symmetric(horizontal: 15, vertical: 8),
-              padding: const EdgeInsets.all(15),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                border: Border.all(color: AppColors.rideShareContainerColor),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  /// Title + Status
-                  Row(
-                    children: [
-                      Text(
-                        ride.driver?.carType?.toUpperCase() ?? '',
-                        style: const TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w700,
-                        ),
+            return TweenAnimationBuilder<double>(
+              key: ValueKey(ride.id ?? ride.bookingId ?? index),
+              tween: Tween(begin: 0, end: 1),
+              duration: Duration(milliseconds: 260 + (index % 8) * 55),
+              curve: Curves.easeOutCubic,
+              builder: (context, t, child) {
+                return Opacity(
+                  opacity: t.clamp(0.0, 1.0),
+                  child: Transform.translate(
+                    offset: Offset(0, (1 - t) * 16),
+                    child: child,
+                  ),
+                );
+              },
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(14, index == 0 ? 14 : 6, 14, 6),
+                child: Container(
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(color: Colors.black.withOpacity(0.05)),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.05),
+                        blurRadius: 14,
+                        offset: const Offset(0, 6),
                       ),
-                      const Spacer(),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 4,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Color(
-                            int.parse("0xFF${ride.ridehistoryColor}"),
-                          ).withOpacity(0.15),
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: Text(
-                          ride.status == 'SUCCESS'
-                              ? "Completed"
-                              : ride.status.toString(),
-                          style: TextStyle(
-                            color: Color(
-                              int.parse("0xFF${ride.ridehistoryColor}"),
+                    ],
+                  ),
+                  child: Material(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(18),
+                    clipBehavior: Clip.antiAlias,
+                    child: InkWell(
+                      onTap: () {
+                        Get.to(
+                          () => RideDetailsScreen(ride: ride),
+                          transition: Transition.rightToLeft,
+                          duration: const Duration(milliseconds: 300),
+                        );
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.all(14),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            // Vehicle photo in a soft tinted thumbnail
+                            Container(
+                              width: 70,
+                              height: 60,
+                              alignment: Alignment.center,
+                              padding: const EdgeInsets.all(6),
+                              decoration: BoxDecoration(
+                                color: AppColors.containerColor1,
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                              child: Image.asset(
+                                vehicleAssetForType(ride.driver?.carType),
+                                fit: BoxFit.contain,
+                              ),
                             ),
-                            fontWeight: FontWeight.w600,
-                            fontSize: 12,
-                          ),
+                            const SizedBox(width: 13),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  // Drop location + amount
+                                  Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Expanded(
+                                        child: Text(
+                                          ride.dropAddress ?? '',
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            fontSize: 15,
+                                            fontWeight: FontWeight.w700,
+                                            height: 1.2,
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      CustomTextFields.textWithImage(
+                                        text: (ride.amount ?? '').toString(),
+                                        fontSize: 14.5,
+                                        imageColors: AppColors.commonBlack,
+                                        colors: AppColors.commonBlack,
+                                        fontWeight: FontWeight.w800,
+                                        imageSize: 15,
+                                        imagePath: AppImages.nBlackCurrency,
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 5),
+                                  // Driver name • date
+                                  if (subtitle.isNotEmpty)
+                                    Text(
+                                      subtitle,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: AppColors.textColor,
+                                      ),
+                                    ),
+                                  const SizedBox(height: 9),
+                                  // Status — filled check badge + bold text
+                                  Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Container(
+                                        width: 17,
+                                        height: 17,
+                                        alignment: Alignment.center,
+                                        decoration: BoxDecoration(
+                                          color: statusClr,
+                                          shape: BoxShape.circle,
+                                        ),
+                                        child: Icon(
+                                          statusIcon,
+                                          size: 11,
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 6),
+                                      Text(
+                                        statusLabel,
+                                        style: TextStyle(
+                                          color: statusClr,
+                                          fontWeight: FontWeight.w700,
+                                          fontSize: 12.5,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 2),
+                            Icon(
+                              Icons.chevron_right,
+                              color: Colors.grey.shade400,
+                              size: 22,
+                            ),
+                          ],
                         ),
                       ),
-                    ],
+                    ),
                   ),
-
-                  const SizedBox(height: 8),
-
-                  Row(
-                    children: [
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(40),
-                        child: Image.network(
-                          ride.driver?.profilePic ?? '',
-                          height: 35,
-                          width: 35,
-                          fit: BoxFit.cover,
-                          errorBuilder:
-                              (_, __, ___) =>
-                                  const Icon(Icons.person, size: 35),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        ride.driver?.firstName ?? "",
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w600,
-                          fontSize: 14,
-                        ),
-                      ),
-                    ],
-                  ),
-
-                  const SizedBox(height: 10),
-
-                  /// Pickup & Drop
-                  Stack(
-                    children: [
-                      Column(
-                        children: [
-                          Row(
-                            children: [
-                              const Icon(
-                                Icons.circle,
-                                size: 12,
-                                color: Colors.green,
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  ride.pickupAddress ?? '',
-                                  style: const TextStyle(fontSize: 13),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          Row(
-                            children: [
-                              const Icon(
-                                Icons.circle,
-                                size: 12,
-                                color: Colors.orange,
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  ride.dropAddress ?? '',
-                                  style: const TextStyle(fontSize: 13),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                      const Positioned(
-                        top: 15,
-                        left: 6,
-                        child: DottedLine(
-                          dashColor: Colors.grey,
-                          lineLength: 50,
-                          direction: Axis.vertical,
-                        ),
-                      ),
-                    ],
-                  ),
-
-                  const SizedBox(height: 12),
-
-                  /// Rating & Price
-                  Row(
-                    children: [
-                      const Icon(Icons.star, color: Colors.orange, size: 20),
-                      const SizedBox(width: 4),
-                      Text(ride.starRating?.toString() ?? "0"),
-                      const Spacer(),
-                      CustomTextFields.textWithImage(
-                        text: ride.amount?.toString() ?? "",
-                        fontSize: 16,
-                        imageColors: AppColors.changeButtonColor,
-                        colors: AppColors.changeButtonColor,
-                        fontWeight: FontWeight.w600,
-                        imageSize: 20,
-                        imagePath: AppImages.nBlackCurrency,
-                      ),
-                      // Text(
-                      //   ride.amount?.toString() ?? "",
-                      //   style: const TextStyle(
-                      //     fontSize: 16,
-                      //     fontWeight: FontWeight.w700,
-                      //   ),
-                      // ),
-                    ],
-                  ),
-                ],
+                ),
               ),
             );
           },
@@ -521,73 +535,58 @@ class _RideAndPackageHistoryScreenState
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: const Color(0xFFF7F8FA),
       body: SafeArea(
         child: Column(
           children: [
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 20),
-              child: Row(
-                children: [
-                  GestureDetector(
-                    onTap: () => Navigator.pop(context),
-                    child: Image.asset(
-                      AppImages.backImage,
-                      height: 19,
-                      width: 19,
-                    ),
-                  ),
-                  const Spacer(),
-                  CustomTextFields.textWithStyles700('History', fontSize: 20),
-                  const Spacer(),
-                ],
-              ),
-            ),
+            // White header + tab zone (cards below sit on a light grey bg).
             Container(
-              width: double.infinity,
-              decoration: BoxDecoration(
-                border: Border(
-                  bottom: BorderSide(
-                    color: AppColors.adminChatContainerColor,
-                    width: 2.5,
-                  ),
-                ),
-              ),
-              child: Row(
+              color: Colors.white,
+              child: Column(
                 children: [
-                  Expanded(
-                    child: TabBar(
-                      controller: _tabController,
-                      tabs: const [Tab(text: 'Rides'), Tab(text: 'Package')],
-                      labelColor: Colors.black,
-                      unselectedLabelColor: Colors.black,
-                      indicator: const UnderlineTabIndicator(
-                        borderSide: BorderSide(color: Colors.black, width: 3),
-                        insets: EdgeInsets.symmetric(horizontal: 0),
-                      ),
-                      labelStyle: TextStyle(
-                        color: AppColors.drawerT,
-                        fontWeight: FontWeight.w500,
-                        fontSize: 15,
-                      ),
-                      unselectedLabelStyle: TextStyle(
-                        color: AppColors.drawerT,
-                        fontWeight: FontWeight.w500,
-                      ),
-                      dividerColor: Colors.transparent,
-                    ),
-                  ),
-                  Expanded(
-                    child: GestureDetector(
-                      onTap: () {},
-                      child: const Padding(
-                        padding: EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 10,
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(6, 8, 16, 4),
+                    child: Row(
+                      children: [
+                        IconButton(
+                          onPressed: () => Navigator.pop(context),
+                          icon: const Icon(
+                            Icons.arrow_back,
+                            color: Colors.black,
+                          ),
                         ),
-                        child: Text(' '),
-                      ),
+                        const SizedBox(width: 2),
+                        const Text(
+                          'History',
+                          style: TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
+                  TabBar(
+                    controller: _tabController,
+                    isScrollable: true,
+                    tabAlignment: TabAlignment.start,
+                    labelColor: Colors.black,
+                    unselectedLabelColor: Colors.grey,
+                    indicatorColor: Colors.black,
+                    indicatorWeight: 3,
+                    indicatorSize: TabBarIndicatorSize.label,
+                    labelStyle: const TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 15,
+                    ),
+                    unselectedLabelStyle: const TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 15,
+                    ),
+                    dividerColor: Colors.transparent,
+                    tabs: const [Tab(text: 'Rides'), Tab(text: 'Package')],
+                  ),
+                  Container(height: 1, color: AppColors.containerColor1),
                 ],
               ),
             ),

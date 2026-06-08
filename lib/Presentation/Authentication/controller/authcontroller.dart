@@ -6,6 +6,7 @@ import 'package:hopper/Core/Consents/app_logger.dart';
 import 'package:country_picker/country_picker.dart';
 import 'package:hopper/Presentation/Authentication/screens/otp_screens.dart';
 import 'package:hopper/api/dataSource/apiDataSource.dart';
+import 'package:hopper/api/repository/api_consents.dart';
 
 var getMobileNumber = '';
 var countryCodes = '';
@@ -133,6 +134,8 @@ class AuthController extends GetxController {
           final prefs = await SharedPreferences.getInstance();
           await prefs.setString('sosNumber', response.sosNumber ?? '');
           await prefs.setString('gMapKey', response.gMapKey ?? '');
+          // Use the backend key immediately for all Maps HTTP calls.
+          ApiConsents.setDynamicMapsKey(response.gMapKey);
           AppLogger.log.i(response.toJson());
         },
       );

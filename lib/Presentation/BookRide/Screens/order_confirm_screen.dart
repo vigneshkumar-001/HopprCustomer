@@ -280,6 +280,98 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
     } catch (_) {}
   }
 
+  /// Full-screen, pinch-zoomable preview for the driver / car photos so the
+  /// rider can verify their actual driver and vehicle before boarding.
+  void _showImagePreview(String url, {String? caption}) {
+    if (url.trim().isEmpty) return;
+    showDialog(
+      context: context,
+      barrierColor: Colors.black.withOpacity(0.92),
+      builder: (ctx) {
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: InteractiveViewer(
+                minScale: 0.8,
+                maxScale: 4.5,
+                child: Center(
+                  child: Image.network(
+                    url,
+                    fit: BoxFit.contain,
+                    loadingBuilder: (c, child, progress) =>
+                        progress == null
+                            ? child
+                            : const Center(
+                              child: CircularProgressIndicator(
+                                color: Colors.white,
+                              ),
+                            ),
+                    errorBuilder: (_, __, ___) => const Icon(
+                      Icons.broken_image_rounded,
+                      color: Colors.white54,
+                      size: 64,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            if (caption != null && caption.trim().isNotEmpty)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 44,
+                child: Center(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 9,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.14),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.verified_rounded,
+                          color: Colors.white,
+                          size: 16,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          caption,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            Positioned(
+              top: 46,
+              right: 16,
+              child: GestureDetector(
+                onTap: () => Navigator.of(ctx).pop(),
+                child: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.16),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.close_rounded, color: Colors.white),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -568,24 +660,55 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                   const SizedBox(height: 6),
                   Row(
                     children: [
-                      Container(
-                        height: 36,
-                        width: 36,
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(50),
-                          color: AppColors.containerColor1,
+                      GestureDetector(
+                        onTap:
+                            () => _showImagePreview(
+                              c.profilePic.value,
+                              caption: c.driverName.value,
+                            ),
+                        child: Stack(
+                          clipBehavior: Clip.none,
+                          children: [
+                            Container(
+                              height: 36,
+                              width: 36,
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(50),
+                                color: AppColors.containerColor1,
+                              ),
+                              clipBehavior: Clip.antiAlias,
+                              child:
+                                  c.profilePic.value.isNotEmpty
+                                      ? Image.network(
+                                        c.profilePic.value,
+                                        fit: BoxFit.cover,
+                                        errorBuilder:
+                                            (_, __, ___) => const Icon(
+                                              Icons.person,
+                                              size: 20,
+                                            ),
+                                      )
+                                      : const Icon(Icons.person, size: 20),
+                            ),
+                            if (c.profilePic.value.isNotEmpty)
+                              Positioned(
+                                right: -2,
+                                bottom: -2,
+                                child: Container(
+                                  padding: const EdgeInsets.all(2),
+                                  decoration: const BoxDecoration(
+                                    color: Colors.white,
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: const Icon(
+                                    Icons.zoom_in_rounded,
+                                    size: 11,
+                                    color: Colors.black87,
+                                  ),
+                                ),
+                              ),
+                          ],
                         ),
-                        clipBehavior: Clip.antiAlias,
-                        child:
-                            c.profilePic.value.isNotEmpty
-                                ? Image.network(
-                                  c.profilePic.value,
-                                  fit: BoxFit.cover,
-                                  errorBuilder:
-                                      (_, __, ___) =>
-                                          const Icon(Icons.person, size: 20),
-                                )
-                                : const Icon(Icons.person, size: 20),
                       ),
                       const SizedBox(width: 10),
                       CustomTextFields.textWithStylesSmall(
@@ -604,14 +727,64 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
               ),
               const Spacer(),
               c.carExteriorPhotos.value.isNotEmpty
-                  ? ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: Image.network(
-                      c.carExteriorPhotos.value,
-                      height: 80,
-                      width: 100,
-                      fit: BoxFit.fill,
-                      errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                  ? GestureDetector(
+                    onTap:
+                        () => _showImagePreview(
+                          c.carExteriorPhotos.value,
+                          caption:
+                              'Your car · ${c.plateNumber.value}'.trim(),
+                        ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: Stack(
+                        children: [
+                          Image.network(
+                            c.carExteriorPhotos.value,
+                            height: 80,
+                            width: 100,
+                            fit: BoxFit.fill,
+                            errorBuilder:
+                                (_, __, ___) => const SizedBox.shrink(),
+                          ),
+                          Positioned(
+                            left: 0,
+                            right: 0,
+                            bottom: 0,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(vertical: 3),
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  begin: Alignment.topCenter,
+                                  end: Alignment.bottomCenter,
+                                  colors: [
+                                    Colors.transparent,
+                                    Colors.black.withOpacity(0.6),
+                                  ],
+                                ),
+                              ),
+                              child: const Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    Icons.zoom_in_rounded,
+                                    color: Colors.white,
+                                    size: 13,
+                                  ),
+                                  SizedBox(width: 3),
+                                  Text(
+                                    'Verify',
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   )
                   : const SizedBox.shrink(),

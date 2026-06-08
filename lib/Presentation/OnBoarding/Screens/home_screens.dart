@@ -32,6 +32,73 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../Controller/home_map_controller.dart';
 
+/// Icon for a quick-destination category (see [_popularCategoryFromTypes] and
+/// the 'recent' pseudo-category).
+IconData _quickDestIcon(String category) {
+  switch (category) {
+    case 'airport':
+      return Icons.flight_takeoff_rounded;
+    case 'train':
+      return Icons.train_rounded;
+    case 'bus':
+      return Icons.directions_bus_rounded;
+    case 'mall':
+      return Icons.local_mall_rounded;
+    case 'hospital':
+      return Icons.local_hospital_rounded;
+    case 'school':
+      return Icons.school_rounded;
+    case 'stadium':
+      return Icons.stadium_rounded;
+    case 'park':
+      return Icons.park_rounded;
+    case 'hotel':
+      return Icons.hotel_rounded;
+    case 'attraction':
+      return Icons.attractions_rounded;
+    case 'food':
+      return Icons.restaurant_rounded;
+    case 'worship':
+      return Icons.place_rounded;
+    case 'recent':
+      return Icons.history_rounded;
+    default:
+      return Icons.location_on_rounded;
+  }
+}
+
+/// Accent colour for a quick-destination category (used as a soft icon tint).
+Color _quickDestColor(String category) {
+  switch (category) {
+    case 'airport':
+      return const Color(0xFF2563EB);
+    case 'train':
+      return const Color(0xFF7C3AED);
+    case 'bus':
+      return const Color(0xFF0891B2);
+    case 'mall':
+      return const Color(0xFFDB2777);
+    case 'hospital':
+      return const Color(0xFFDC2626);
+    case 'school':
+      return const Color(0xFFD97706);
+    case 'stadium':
+      return const Color(0xFF059669);
+    case 'park':
+      return const Color(0xFF16A34A);
+    case 'hotel':
+      return const Color(0xFF9333EA);
+    case 'attraction':
+      return const Color(0xFFEA580C);
+    case 'food':
+      return const Color(0xFFE11D48);
+    case 'recent':
+      return const Color(0xFF475569);
+    default:
+      return const Color(0xFF334155);
+  }
+}
+
 class _HomeHeroBanner {
   final String id;
   final String title;
@@ -118,14 +185,21 @@ AddressModel _activeBookingToAddress({
 }
 
 class HomeScreens extends StatefulWidget {
-  const HomeScreens({super.key});
+  /// Bumped by the bottom nav each time the Home tab is (re)selected. The Home
+  /// is kept alive (map never reloads), so we use this to replay the entrance
+  /// transition when the user lands back on Home.
+  final int activeTick;
+  const HomeScreens({super.key, this.activeTick = 0});
 
   @override
   State<HomeScreens> createState() => _HomeScreensState();
 }
 
 class _HomeScreensState extends State<HomeScreens>
-    with AutomaticKeepAliveClientMixin, WidgetsBindingObserver {
+    with
+        AutomaticKeepAliveClientMixin,
+        WidgetsBindingObserver,
+        SingleTickerProviderStateMixin {
   static const String _customerCompletedCashBookingKey =
       'customer_completed_cash_booking_id';
 
@@ -141,6 +215,10 @@ class _HomeScreensState extends State<HomeScreens>
   bool _busy = false;
 
   bool _initialPinAligned = false;
+  // First valid map position. Once set we NEVER fall back to the loading
+  // spinner, so the GoogleMap is created once and not destroyed/recreated
+  // (that re-creation was the "map keeps reloading" you saw).
+  LatLng? _firstMapPos;
   final GlobalKey _mapKey = GlobalKey();
   final GlobalKey _pinKey = GlobalKey();
   static const double _pinTipVisualAdjustPx = 0;
@@ -163,6 +241,13 @@ class _HomeScreensState extends State<HomeScreens>
   final ValueNotifier<bool> _showActiveRideCard = ValueNotifier<bool>(false);
 
   final ValueNotifier<double> _sheetHeightN = ValueNotifier<double>(0);
+
+  // Smooth one-time entrance when the home screen first appears (top bar drops
+  // in, bottom sheet rises, everything fades up) for a premium open.
+  late final AnimationController _entranceCtrl;
+  late final Animation<double> _entranceFade;
+  late final Animation<Offset> _topEntrance;
+  late final Animation<Offset> _sheetEntrance;
 
   Future<String?> _getLocallyCompletedCashBookingId() async {
     final prefs = await SharedPreferences.getInstance();
@@ -266,6 +351,36 @@ class _HomeScreensState extends State<HomeScreens>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
 
+    _entranceCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 850),
+    );
+    _entranceFade = CurvedAnimation(
+      parent: _entranceCtrl,
+      curve: const Interval(0.0, 0.75, curve: Curves.easeOut),
+    );
+    _topEntrance = Tween<Offset>(
+      begin: const Offset(0, -0.35),
+      end: Offset.zero,
+    ).animate(
+      CurvedAnimation(
+        parent: _entranceCtrl,
+        curve: const Interval(0.0, 0.65, curve: Curves.easeOutCubic),
+      ),
+    );
+    _sheetEntrance = Tween<Offset>(
+      begin: const Offset(0, 0.22),
+      end: Offset.zero,
+    ).animate(
+      CurvedAnimation(
+        parent: _entranceCtrl,
+        curve: const Interval(0.2, 1.0, curve: Curves.easeOutCubic),
+      ),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _entranceCtrl.forward();
+    });
+
     // Align pin + blue dot as soon as location permission becomes available.
     _gateReadyWorker = ever<bool>(mapC.gate.isReady, (ready) {
       if (!ready) return;
@@ -342,8 +457,19 @@ class _HomeScreensState extends State<HomeScreens>
   }
 
   @override
+  void didUpdateWidget(covariant HomeScreens oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Home tab re-selected (kept alive in the IndexedStack) -> replay the
+    // entrance transition. The map is NOT touched, so it never reloads.
+    if (widget.activeTick != oldWidget.activeTick) {
+      _entranceCtrl.forward(from: 0);
+    }
+  }
+
+  @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _entranceCtrl.dispose();
     _gateReadyWorker?.dispose();
     _showActiveRideCard.dispose();
     _sheetHeightN.dispose();
@@ -480,6 +606,8 @@ class _HomeScreensState extends State<HomeScreens>
             'lng': _pickupPos!.longitude,
           },
         ),
+        transition: Transition.rightToLeft,
+        duration: const Duration(milliseconds: 300),
       );
     } finally {
       _busy = false;
@@ -874,18 +1002,21 @@ class _HomeScreensState extends State<HomeScreens>
               child: Obx(() {
                 // Ensure map rebuilds when nearby-driver markers update.
                 mapC.markersRevision.value;
-                final pos = mapC.currentPosition;
+                final pos = mapC.currentPosition ?? _firstMapPos;
                 if (pos == null) {
                   return const Center(
                     child: CircularProgressIndicator(strokeWidth: 2),
                   );
                 }
+                // Remember the first fix; the map is created once from it and
+                // never torn down even if currentPosition momentarily clears.
+                _firstMapPos ??= pos;
 
                 return SizedBox(
                   key: _mapKey,
                   child: GoogleMap(
                     initialCameraPosition: CameraPosition(
-                      target: pos,
+                      target: _firstMapPos!,
                       // Nearby drivers on pickup screen.
                       zoom: 15.5,
                     ),
@@ -945,57 +1076,93 @@ class _HomeScreensState extends State<HomeScreens>
               top: topPad + 10,
               left: 16,
               right: 16,
-              child: InkWell(
-                onTap: _openBookRideSearch,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 10,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.95),
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: Colors.black.withOpacity(0.06)),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.08),
-                        blurRadius: 10,
-                        offset: const Offset(0, 6),
-                      ),
-                    ],
-                  ),
+              child: SlideTransition(
+                position: _topEntrance,
+                child: FadeTransition(
+                  opacity: _entranceFade,
                   child: Row(
                     children: [
-                      InkWell(
+                      // LEFT: circular menu button (opens the drawer)
+                      GestureDetector(
                         onTap: () {
                           Navigator.push(
                             context,
                             MaterialPageRoute(builder: (_) => DrawerScreen()),
                           );
                         },
-                        child: const Padding(
-                          padding: EdgeInsets.all(5.0),
-                          child: Icon(Icons.menu, size: 20),
+                        child: Container(
+                          height: 48,
+                          width: 48,
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            shape: BoxShape.circle,
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.10),
+                                blurRadius: 10,
+                                offset: const Offset(0, 4),
+                              ),
+                            ],
+                          ),
+                          child: const Icon(
+                            Icons.menu,
+                            size: 22,
+                            color: Colors.black87,
+                          ),
                         ),
                       ),
-                      Padding(
-                        padding: const EdgeInsets.all(10),
-                        child: Image.asset(
-                          AppImages.dart,
-                          height: 10,
-                          width: 10,
-                          color: AppColors.walletCurrencyColor,
-                        ),
-                      ),
+                      const SizedBox(width: 10),
+                      // MIDDLE: current-location search box with a heart
                       Expanded(
-                        child: Obx(
-                          () => Text(
-                            mapC.address.value,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
+                        child: GestureDetector(
+                          onTap: _openBookRideSearch,
+                          child: Container(
+                            height: 48,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 14,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(16),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(0.10),
+                                  blurRadius: 10,
+                                  offset: const Offset(0, 4),
+                                ),
+                              ],
+                            ),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  Icons.my_location,
+                                  size: 18,
+                                  color: AppColors.walletCurrencyColor,
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Obx(
+                                    () => Text(
+                                      mapC.address.value.isEmpty
+                                          ? 'Current Location'
+                                          : mapC.address.value,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                const Icon(
+                                  Icons.favorite_border,
+                                  size: 20,
+                                  color: Color(0xFFE53935),
+                                ),
+                              ],
                             ),
                           ),
                         ),
@@ -1054,12 +1221,18 @@ class _HomeScreensState extends State<HomeScreens>
             ),
 
             Positioned.fill(
-              child: _HomeBottomSheet(
-                mapC: mapC,
-                onBookRideTap: _openBookRideSearch,
-                onHeightChanged: _onSheetHeightChanged,
-                banners: _homeHeroBanners,
-                bannersLoading: _loadingHomeHeroBanners,
+              child: SlideTransition(
+                position: _sheetEntrance,
+                child: FadeTransition(
+                  opacity: _entranceFade,
+                  child: _HomeBottomSheet(
+                    mapC: mapC,
+                    onBookRideTap: _openBookRideSearch,
+                    onHeightChanged: _onSheetHeightChanged,
+                    banners: _homeHeroBanners,
+                    bannersLoading: _loadingHomeHeroBanners,
+                  ),
+                ),
               ),
             ),
 
@@ -1144,7 +1317,8 @@ class _HomeBottomSheet extends StatelessWidget {
         minChildSize: 0.30,
         maxChildSize: 0.86,
         snap: true,
-        snapSizes: const [0.30, 0.42, 0.86],
+        snapAnimationDuration: const Duration(milliseconds: 280),
+        snapSizes: const [0.30, 0.47, 0.68, 0.86],
         builder: (context, scrollController) {
           return Material(
             color: Colors.white,
@@ -1159,20 +1333,22 @@ class _HomeBottomSheet extends StatelessWidget {
               top: false,
               child: ListView(
                 controller: scrollController,
-                physics: const BouncingScrollPhysics(),
+                physics: const BouncingScrollPhysics(
+                  parent: AlwaysScrollableScrollPhysics(),
+                ),
                 padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
                 children: [
                   Center(
                     child: Container(
-                      width: 46,
-                      height: 4,
+                      width: 40,
+                      height: 5,
                       decoration: BoxDecoration(
-                        color: Colors.black.withOpacity(0.12),
+                        color: Colors.black.withOpacity(0.14),
                         borderRadius: BorderRadius.circular(99),
                       ),
                     ),
                   ),
-                  const SizedBox(height: 14),
+                  const SizedBox(height: 16),
 
                   Row(
                     children: [
@@ -1212,14 +1388,17 @@ class _HomeBottomSheet extends StatelessWidget {
 
                   const SizedBox(height: 20),
                   Card(
-                    elevation: 2,
+                    elevation: 3,
+                    shadowColor: Colors.black.withOpacity(0.10),
                     shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(15),
+                      borderRadius: BorderRadius.circular(20),
                     ),
                     child: Container(
                       decoration: BoxDecoration(
-                        border: Border.all(color: AppColors.containerColor),
-                        borderRadius: BorderRadius.circular(15),
+                        border: Border.all(
+                          color: AppColors.commonBlack.withOpacity(0.04),
+                        ),
+                        borderRadius: BorderRadius.circular(20),
                         color: AppColors.commonWhite,
                       ),
                       child: Padding(
@@ -1229,143 +1408,215 @@ class _HomeBottomSheet extends StatelessWidget {
                         ),
                         child: Column(
                           children: [
-                            CustomTextFields.plainTextField(
-                              autofocus: false,
-                              onTap: () async {
-                                if (mapC.currentPosition == null) {
-                                  await mapC.initLocation();
-                                  if (mapC.currentPosition == null) return;
-                                }
+                            Material(
+                              color: Colors.transparent,
+                              child: InkWell(
+                                  borderRadius: BorderRadius.circular(16),
+                                  onTap: () async {
+                                    if (mapC.currentPosition == null) {
+                                      await mapC.initLocation();
+                                      if (mapC.currentPosition == null) return;
+                                    }
 
-                                final pickupAddress = await mapC
-                                    .getAddressFromLatLng(
-                                      mapC.currentPosition!,
+                                    final pickupAddress = await mapC
+                                        .getAddressFromLatLng(
+                                          mapC.currentPosition!,
+                                        );
+
+                                    final pickupData = {
+                                      'description': pickupAddress,
+                                      'lat': mapC.currentPosition!.latitude,
+                                      'lng': mapC.currentPosition!.longitude,
+                                    };
+
+                                    Get.to(
+                                      () => BookRideSearchScreen(
+                                        isPickup: false,
+                                        pickupData: pickupData,
+                                      ),
+                                      transition: Transition.rightToLeft,
+                                      duration: const Duration(
+                                        milliseconds: 300,
+                                      ),
                                     );
-
-                                final pickupData = {
-                                  'description': pickupAddress,
-                                  'lat': mapC.currentPosition!.latitude,
-                                  'lng': mapC.currentPosition!.longitude,
-                                };
-
-                                Get.to(
-                                  () => BookRideSearchScreen(
-                                    isPickup: false,
-                                    pickupData: pickupData,
+                                  },
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                      vertical: 11,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      gradient: const LinearGradient(
+                                        begin: Alignment.topLeft,
+                                        end: Alignment.bottomRight,
+                                        colors: [
+                                          Color(0xFFF7F9FC),
+                                          Color(0xFFEDF3FD),
+                                        ],
+                                      ),
+                                      borderRadius: BorderRadius.circular(16),
+                                      border: Border.all(
+                                        color: const Color(
+                                          0xFF2563EB,
+                                        ).withOpacity(0.10),
+                                      ),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Container(
+                                          height: 40,
+                                          width: 40,
+                                          alignment: Alignment.center,
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFF2563EB),
+                                            borderRadius: BorderRadius.circular(
+                                              12,
+                                            ),
+                                            boxShadow: [
+                                              BoxShadow(
+                                                color: const Color(
+                                                  0xFF2563EB,
+                                                ).withOpacity(0.30),
+                                                blurRadius: 10,
+                                                offset: const Offset(0, 4),
+                                              ),
+                                            ],
+                                          ),
+                                          child: const Icon(
+                                            Icons.search_rounded,
+                                            color: Colors.white,
+                                            size: 22,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              const Text(
+                                                'Where to?',
+                                                style: TextStyle(
+                                                  fontSize: 15,
+                                                  fontWeight: FontWeight.w700,
+                                                  color: AppColors.commonBlack,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 2),
+                                              Text(
+                                                'Search destination',
+                                                style: TextStyle(
+                                                  fontSize: 12,
+                                                  color: AppColors.textColor,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        Container(
+                                          padding: const EdgeInsets.all(6),
+                                          decoration: BoxDecoration(
+                                            color: Colors.white,
+                                            shape: BoxShape.circle,
+                                            boxShadow: [
+                                              BoxShadow(
+                                                color: Colors.black.withOpacity(
+                                                  0.06,
+                                                ),
+                                                blurRadius: 6,
+                                                offset: const Offset(0, 2),
+                                              ),
+                                            ],
+                                          ),
+                                          child: const Icon(
+                                            Icons.arrow_forward_rounded,
+                                            size: 16,
+                                            color: Color(0xFF2563EB),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
                                   ),
-                                );
-                              },
-                              title: 'Search Destination',
-                            ),
-                            const SizedBox(height: 5),
+                                ),
+                              ),
+                            const SizedBox(height: 8),
 
                             Obx(() {
                               final recents = mapC.recentLocations;
                               final popular = mapC.popularPlaces;
 
-                              if (recents.length >= 2) {
-                                final list = recents.take(2).toList();
+                              // Professional combined list: most-recent first
+                              // (max 2) then nearby popular destinations,
+                              // deduped, capped at 4.
+                              final items = <Map<String, dynamic>>[];
+                              final seen = <String>{};
 
-                                return Column(
-                                  children: List.generate(list.length, (index) {
-                                    final recent = list[index];
+                              void add({
+                                required String title,
+                                required double lat,
+                                required double lng,
+                                required String category,
+                              }) {
+                                if (items.length >= 4) return;
+                                final key = title.trim().toLowerCase();
+                                if (key.isEmpty || seen.contains(key)) return;
+                                seen.add(key);
+                                items.add({
+                                  'title': title,
+                                  'lat': lat,
+                                  'lng': lng,
+                                  'category': category,
+                                });
+                              }
 
-                                    return Column(
-                                      children: [
-                                        InkWell(
-                                          onTap: () async {
-                                            if (mapC.currentPosition == null) {
-                                              await mapC.initLocation();
-                                              if (mapC.currentPosition ==
-                                                  null) {
-                                                return;
-                                              }
-                                            }
-
-                                            final pickupAddress = await mapC
-                                                .getAddressFromLatLng(
-                                                  mapC.currentPosition!,
-                                                );
-
-                                            Get.to(
-                                              () => BookMapScreen(
-                                                pickupData: {
-                                                  'name': pickupAddress,
-                                                  'lat':
-                                                      mapC
-                                                          .currentPosition
-                                                          ?.latitude,
-                                                  'lng':
-                                                      mapC
-                                                          .currentPosition
-                                                          ?.longitude,
-                                                },
-                                                destinationData: {
-                                                  'lat': recent.lat,
-                                                  'lng': recent.lng,
-                                                },
-                                                pickupAddress: pickupAddress,
-                                                destinationAddress:
-                                                    recent.description,
-                                              ),
-                                            );
-                                          },
-                                          child: Padding(
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 10,
-                                              vertical: 10,
-                                            ),
-                                            child: Row(
-                                              children: [
-                                                Image.asset(
-                                                  AppImages.recentHistory,
-                                                  height: 20,
-                                                  width: 20,
-                                                ),
-                                                const SizedBox(width: 10),
-                                                Expanded(
-                                                  child:
-                                                      CustomTextFields.textWithStylesSmall(
-                                                        recent.description,
-                                                        maxLines: 1,
-                                                        textAlign:
-                                                            TextAlign.left,
-                                                        colors:
-                                                            AppColors
-                                                                .commonBlack,
-                                                        fontWeight:
-                                                            FontWeight.w500,
-                                                      ),
-                                                ),
-                                                const Icon(
-                                                  Icons.keyboard_arrow_right,
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                        ),
-                                        if (index != list.length - 1)
-                                          Divider(
-                                            indent: 10,
-                                            endIndent: 15,
-                                            color: AppColors.commonBlack
-                                                .withOpacity(0.1),
-                                          ),
-                                      ],
-                                    );
-                                  }),
+                              for (final r in recents.take(2)) {
+                                add(
+                                  title: r.description,
+                                  lat: r.lat,
+                                  lng: r.lng,
+                                  category: 'recent',
+                                );
+                              }
+                              for (final p in popular) {
+                                add(
+                                  title: p.name,
+                                  lat: p.lat,
+                                  lng: p.lng,
+                                  category: p.category,
                                 );
                               }
 
-                              return Column(
-                                children: List.generate(popular.length, (
-                                  index,
-                                ) {
-                                  final place = popular[index];
+                              if (items.isEmpty) {
+                                return const SizedBox.shrink();
+                              }
 
-                                  return Column(
+                              return Column(
+                                children: List.generate(items.length, (index) {
+                                  final it = items[index];
+                                  final category = it['category'] as String;
+                                  final accent = _quickDestColor(category);
+
+                                  return TweenAnimationBuilder<double>(
+                                    key: ValueKey(it['title']),
+                                    tween: Tween(begin: 0, end: 1),
+                                    duration: Duration(
+                                      milliseconds: 280 + index * 80,
+                                    ),
+                                    curve: Curves.easeOutCubic,
+                                    builder: (context, t, child) {
+                                      return Opacity(
+                                        opacity: t.clamp(0.0, 1.0),
+                                        child: Transform.translate(
+                                          offset: Offset(0, (1 - t) * 12),
+                                          child: child,
+                                        ),
+                                      );
+                                    },
+                                    child: Column(
                                     children: [
                                       InkWell(
+                                        borderRadius: BorderRadius.circular(14),
                                         onTap: () async {
                                           if (mapC.currentPosition == null) {
                                             await mapC.initLocation();
@@ -1393,51 +1644,83 @@ class _HomeBottomSheet extends StatelessWidget {
                                                         ?.longitude,
                                               },
                                               destinationData: {
-                                                'name': place.name,
-                                                'lat': place.lat,
-                                                'lng': place.lng,
+                                                'name': it['title'],
+                                                'lat': it['lat'],
+                                                'lng': it['lng'],
                                               },
                                               pickupAddress: pickupAddress,
-                                              destinationAddress: place.name,
+                                              destinationAddress:
+                                                  it['title'] as String,
                                             ),
                                           );
                                         },
                                         child: Padding(
                                           padding: const EdgeInsets.symmetric(
-                                            horizontal: 10,
-                                            vertical: 10,
+                                            horizontal: 8,
+                                            vertical: 9,
                                           ),
                                           child: Row(
                                             children: [
-                                              const Icon(Icons.location_on),
-                                              const SizedBox(width: 10),
+                                              Container(
+                                                height: 42,
+                                                width: 42,
+                                                alignment: Alignment.center,
+                                                decoration: BoxDecoration(
+                                                  gradient: LinearGradient(
+                                                    begin: Alignment.topLeft,
+                                                    end: Alignment.bottomRight,
+                                                    colors: [
+                                                      accent.withOpacity(0.18),
+                                                      accent.withOpacity(0.06),
+                                                    ],
+                                                  ),
+                                                  borderRadius:
+                                                      BorderRadius.circular(13),
+                                                  border: Border.all(
+                                                    color: accent.withOpacity(
+                                                      0.20,
+                                                    ),
+                                                  ),
+                                                ),
+                                                child: Icon(
+                                                  _quickDestIcon(category),
+                                                  size: 21,
+                                                  color: accent,
+                                                ),
+                                              ),
+                                              const SizedBox(width: 12),
                                               Expanded(
                                                 child:
                                                     CustomTextFields.textWithStylesSmall(
-                                                      place.name,
+                                                      it['title'] as String,
                                                       maxLines: 1,
                                                       textAlign: TextAlign.left,
                                                       colors:
                                                           AppColors.commonBlack,
                                                       fontWeight:
-                                                          FontWeight.w500,
+                                                          FontWeight.w600,
                                                     ),
                                               ),
-                                              const Icon(
-                                                Icons.keyboard_arrow_right,
+                                              Icon(
+                                                Icons.arrow_outward_rounded,
+                                                size: 18,
+                                                color: AppColors.commonBlack
+                                                    .withOpacity(0.35),
                                               ),
                                             ],
                                           ),
                                         ),
                                       ),
-                                      if (index != popular.length - 1)
+                                      if (index != items.length - 1)
                                         Divider(
-                                          indent: 10,
-                                          endIndent: 15,
+                                          height: 1,
+                                          indent: 58,
+                                          endIndent: 8,
                                           color: AppColors.commonBlack
-                                              .withOpacity(0.1),
+                                              .withOpacity(0.06),
                                         ),
                                     ],
+                                    ),
                                   );
                                 }),
                               );

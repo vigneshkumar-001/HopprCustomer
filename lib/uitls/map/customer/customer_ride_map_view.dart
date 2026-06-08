@@ -196,11 +196,13 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       playbackDelay: const Duration(milliseconds: 220),
       minSeg: const Duration(milliseconds: 320),
       maxSeg: const Duration(milliseconds: 2600),
-      minMoveMeters: 1.5,
+      // Lower gates so slow / stop-and-go traffic still moves the car instead of
+      // freezing. Snap-to-route + the marker throttle still suppress jitter.
+      minMoveMeters: 0.8,
       requireBearingForDeadReckoning: true,
       maxDeadReckonPacketGap: const Duration(seconds: 4),
       stationarySpeedThresholdMps: 0.35,
-      stationaryIgnoreUnderMeters: 1.8,
+      stationaryIgnoreUnderMeters: 1.0,
     );
 
     _loadMapStyle();
@@ -347,10 +349,20 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
 
   bool _routeMatchesCurrentMode(List<LatLng> pts) {
     if (pts.length < 2) return true;
-    final expectedDestination =
+    final expected =
         widget.mode == RideMapMode.toDrop ? widget.drop : widget.pickup;
-    final endDistance = haversineDistanceMeters(pts.last, expectedDestination);
-    return endDistance <= 90.0;
+    final other =
+        widget.mode == RideMapMode.toDrop ? widget.pickup : widget.drop;
+    final toExpected = haversineDistanceMeters(pts.last, expected);
+    // Generous absolute tolerance: road-snapping near residential drops (e.g. a
+    // colony) can leave the route endpoint 100m+ from the exact pin. The old 90m
+    // gate rejected those, so the drop polyline never rendered. Accept if it
+    // clearly ends at the expected target...
+    if (toExpected <= 220.0) return true;
+    // ...or, as a fallback, if the endpoint is nearer the expected target than
+    // the other anchor (rejects a stale opposite-phase route).
+    final toOther = haversineDistanceMeters(pts.last, other);
+    return toExpected < toOther;
   }
 
   void _requestFitBounds({required String reason, bool force = false}) {
@@ -682,7 +694,8 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     final windowLen = (total * 0.18).clamp(60.0, 260.0);
     final head = total * _flowPhase;
     const segments = 6;
-    const brand = Color(0xff357AE9); // Hoppr accent blue
+    // Mild white glow over the black route (no blue).
+    const brand = Color(0xFFFFFFFF);
 
     final out = <Polyline>[];
     for (int i = 0; i < segments; i++) {
@@ -699,7 +712,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
         Polyline(
           polylineId: PolylineId('flow_$i'),
           points: pts,
-          color: brand.withValues(alpha: 0.10 + 0.80 * headness),
+          color: brand.withValues(alpha: 0.05 + 0.45 * headness),
           width: (3 + 4 * headness).round(),
           zIndex: 2 + i,
           startCap: Cap.roundCap,
@@ -709,8 +722,8 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       );
     }
 
-    // Bright blue head core (no white) so the comet reads as a smooth, fully
-    // blue glowing pulse — a clean bright-blue centre over the faded blue tail.
+    // Soft white head core so the comet reads as a gentle glowing light moving
+    // along the black route (mild, not harsh).
     final coreFrom = head - windowLen * 0.30;
     final corePts = _subPolylineByLength(
       route,
@@ -722,7 +735,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
         Polyline(
           polylineId: const PolylineId('flow_core'),
           points: corePts,
-          color: const Color(0xff6FB0FF), // bright blue head
+          color: Colors.white.withValues(alpha: 0.55), // mild white head
           width: 3,
           zIndex: 2 + segments + 1,
           startCap: Cap.roundCap,
@@ -822,8 +835,8 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     if (last != null) {
       final d = haversineDistanceMeters(last, pos);
       final bearingDelta = shortestAngleDelta(_vehicleBearing, bearing).abs();
-      // Keep slow movement smooth: allow sub-2m updates (traffic/crawling).
-      if (d < 0.8 && bearingDelta < 6.0) {
+      // Keep slow / crawling movement visible: only skip true micro-jitter.
+      if (d < 0.4 && bearingDelta < 5.0) {
         return;
       }
     }

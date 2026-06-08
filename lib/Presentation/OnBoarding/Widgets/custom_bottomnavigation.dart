@@ -24,6 +24,13 @@ class CommonBottomNavigation extends StatefulWidget {
 
 class CommonBottomNavigationState extends State<CommonBottomNavigation> {
   int _selectedIndex = 0;
+  // Tabs opened at least once. They are kept alive inside an IndexedStack so
+  // switching tabs never recreates the home screen -> the map is built ONCE and
+  // never reloads. Tabs are built lazily (only after first visit).
+  final Set<int> _visitedTabs = <int>{};
+  // Bumped each time the Home tab is selected, so Home replays its entrance
+  // transition (without being recreated / reloading the map).
+  int _homeActiveTick = 0;
 
   /// Instance-scoped showcase keys (fixes duplicate GlobalKey crash)
   late final ShowcaseKeys showcaseKeys;
@@ -60,6 +67,7 @@ class CommonBottomNavigationState extends State<CommonBottomNavigation> {
     super.initState();
     showcaseKeys = ShowcaseKeys(); // <-- NEW: create per-instance keys
     _selectedIndex = widget.initialIndex;
+    _visitedTabs.add(_selectedIndex);
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
@@ -114,7 +122,7 @@ class CommonBottomNavigationState extends State<CommonBottomNavigation> {
   Widget _getScreen(int index) {
     switch (index) {
       case 0:
-        return HomeScreens();
+        return HomeScreens(activeTick: _homeActiveTick);
       case 1:
         return BookRideSearchScreen(flag: 'bottomBar');
       case 2:
@@ -133,6 +141,8 @@ class CommonBottomNavigationState extends State<CommonBottomNavigation> {
   void _onItemTapped(int index) {
     setState(() {
       _selectedIndex = index;
+      _visitedTabs.add(index);
+      if (index == 0) _homeActiveTick++;
     });
   }
 
@@ -148,7 +158,17 @@ class CommonBottomNavigationState extends State<CommonBottomNavigation> {
           backgroundColor: Colors.white,
           body: Stack(
             children: [
-              _getScreen(_selectedIndex),
+              // Keep every visited tab alive so the home map is built once and
+              // never reloads when switching tabs. Tabs are built lazily.
+              IndexedStack(
+                index: _selectedIndex,
+                children: List<Widget>.generate(5, (i) {
+                  if (!_visitedTabs.contains(i)) {
+                    return const SizedBox.shrink();
+                  }
+                  return _getScreen(i);
+                }),
+              ),
               if (_bootOverlayVisible)
                 Positioned.fill(
                   child: AbsorbPointer(

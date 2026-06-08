@@ -2023,7 +2023,10 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       points.last,
       expectedDestination,
     );
-    return endDistance <= 90.0;
+    // Generous tolerance: road-snapping near residential drops can leave the
+    // endpoint 100m+ from the exact pin. 90m was too tight and dropped the
+    // drop-phase polyline.
+    return endDistance <= 220.0;
   }
 
   List<LatLng> _decodeStepsPolyline(dynamic legs) {

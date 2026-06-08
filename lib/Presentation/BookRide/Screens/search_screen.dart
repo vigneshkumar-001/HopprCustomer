@@ -47,6 +47,34 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
   /// recent locations (encoded as String)
   List<String> _recentLocations = [];
 
+  /// Quick "favourite" nearby destinations shown when the field is empty.
+  static const List<Map<String, dynamic>> _quickDestinations = [
+    {
+      'icon': Icons.flight_takeoff_rounded,
+      'label': 'Airport',
+      'query': 'Airport',
+      'color': Color(0xFF2563EB),
+    },
+    {
+      'icon': Icons.train_rounded,
+      'label': 'Railway Station',
+      'query': 'Railway Station',
+      'color': Color(0xFF7C3AED),
+    },
+    {
+      'icon': Icons.directions_bus_rounded,
+      'label': 'Bus Stand',
+      'query': 'Bus Stand',
+      'color': Color(0xFF0891B2),
+    },
+    {
+      'icon': Icons.local_mall_rounded,
+      'label': 'Mall',
+      'query': 'Shopping Mall',
+      'color': Color(0xFFDB2777),
+    },
+  ];
+
   /// selected values
   Map<String, dynamic>? _pickup;
   Map<String, dynamic>? _destination;
@@ -77,11 +105,7 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
       _destination = widget.destinationData;
     }
 
-    // autofocus after first frame
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      (_isStartFieldFocused ? _pickupFocus : _destinationFocus).requestFocus();
-    });
-
+    // Keyboard is NOT auto-opened — the user taps a field to open it.
     _loadRecentLocations();
   }
 
@@ -308,6 +332,86 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
     setState(() => _recentLocations = recentStrings);
   }
 
+  /// Premium, equal-sized quick-destination card (2-per-row grid). Staggers
+  /// in (fade + rise) by [index] when the screen opens.
+  Widget _buildQuickDestinationCard(int index, Map<String, dynamic> q) {
+    final color = q['color'] as Color;
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0, end: 1),
+      duration: Duration(milliseconds: 320 + index * 90),
+      curve: Curves.easeOutCubic,
+      builder: (context, t, child) {
+        return Opacity(
+          opacity: t.clamp(0.0, 1.0),
+          child: Transform.translate(
+            offset: Offset(0, (1 - t) * 14),
+            child: child,
+          ),
+        );
+      },
+      child: InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: () {
+        final query = q['query'] as String;
+        _destController.text = query;
+        setState(() => _isStartFieldFocused = false);
+        _destinationFocus.requestFocus();
+        _onQueryChanged(query);
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Colors.black.withOpacity(0.05)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.04),
+              blurRadius: 8,
+              offset: const Offset(0, 3),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            Container(
+              height: 34,
+              width: 34,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [
+                    color.withOpacity(0.16),
+                    color.withOpacity(0.06),
+                  ],
+                ),
+                borderRadius: BorderRadius.circular(11),
+                border: Border.all(color: color.withOpacity(0.18)),
+              ),
+              child: Icon(q['icon'] as IconData, size: 17, color: color),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                q['label'] as String,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.black87,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final resultsToShow =
@@ -339,10 +443,23 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 20),
+                    const SizedBox(height: 14),
 
-                    // SEARCH CARD
-                    Container(
+                    // SEARCH CARD (fades + drops in when the screen opens)
+                    TweenAnimationBuilder<double>(
+                      tween: Tween(begin: 0, end: 1),
+                      duration: const Duration(milliseconds: 380),
+                      curve: Curves.easeOutCubic,
+                      builder: (context, t, child) {
+                        return Opacity(
+                          opacity: t.clamp(0.0, 1.0),
+                          child: Transform.translate(
+                            offset: Offset(0, (1 - t) * -10),
+                            child: child,
+                          ),
+                        );
+                      },
+                      child: Container(
                       decoration: BoxDecoration(
                         color: Colors.white,
                         borderRadius: BorderRadius.circular(12),
@@ -376,7 +493,16 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
                                           },
                                         )
                                         : null,
-                                hintStyle: const TextStyle(fontSize: 11),
+                                Style: const TextStyle(
+                                  fontSize: 13.5,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppColors.commonBlack,
+                                ),
+                                hintStyle: const TextStyle(
+                                  fontSize: 12.5,
+                                  fontWeight: FontWeight.w500,
+                                  color: AppColors.textColor,
+                                ),
                                 imgHeight: 15,
                                 focusNode: _pickupFocus,
                                 controller: _startController,
@@ -405,7 +531,16 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
                                     () => setState(
                                       () => _isStartFieldFocused = false,
                                     ),
-                                hintStyle: const TextStyle(fontSize: 11),
+                                Style: const TextStyle(
+                                  fontSize: 13.5,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppColors.commonBlack,
+                                ),
+                                hintStyle: const TextStyle(
+                                  fontSize: 12.5,
+                                  fontWeight: FontWeight.w500,
+                                  color: AppColors.textColor,
+                                ),
                                 imgHeight: 16,
                                 containerColor: AppColors.commonWhite,
                                 leadingImage: AppImages.rectangleDest,
@@ -454,6 +589,7 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
                         ],
                       ),
                     ),
+                    ),
 
                     const SizedBox(height: 10),
                   ],
@@ -463,18 +599,88 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
 
             // RESULTS / RECENTS
             Expanded(
-              child:
-                  resultsToShow.isEmpty && _recentLocations.isNotEmpty
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 280),
+                switchInCurve: Curves.easeOutCubic,
+                // Top-align the switched content (the default centers it,
+                // which left a big empty gap above the quick destinations).
+                layoutBuilder: (currentChild, previousChildren) {
+                  return Stack(
+                    alignment: Alignment.topCenter,
+                    children: <Widget>[
+                      ...previousChildren,
+                      if (currentChild != null) currentChild,
+                    ],
+                  );
+                },
+                transitionBuilder:
+                    (child, animation) => FadeTransition(
+                      opacity: animation,
+                      child: SlideTransition(
+                        position: Tween<Offset>(
+                          begin: const Offset(0, 0.05),
+                          end: Offset.zero,
+                        ).animate(animation),
+                        child: child,
+                      ),
+                    ),
+                child:
+                    resultsToShow.isEmpty
                       ? Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 15),
                         child: SingleChildScrollView(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Text(
-                                'Recent locations',
-                                style: TextStyle(color: Colors.grey),
+                              Row(
+                                children: [
+                                  const Text(
+                                    'Quick destinations',
+                                    style: TextStyle(
+                                      color: Colors.black87,
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Icon(
+                                    Icons.bolt_rounded,
+                                    size: 16,
+                                    color: Colors.amber.shade700,
+                                  ),
+                                ],
                               ),
+                              const SizedBox(height: 12),
+                              GridView.count(
+                                shrinkWrap: true,
+                                physics:
+                                    const NeverScrollableScrollPhysics(),
+                                crossAxisCount: 2,
+                                mainAxisSpacing: 10,
+                                crossAxisSpacing: 10,
+                                childAspectRatio: 3.1,
+                                children: [
+                                  for (
+                                    int i = 0;
+                                    i < _quickDestinations.length;
+                                    i++
+                                  )
+                                    _buildQuickDestinationCard(
+                                      i,
+                                      _quickDestinations[i],
+                                    ),
+                                ],
+                              ),
+                              const SizedBox(height: 18),
+                              if (_recentLocations.isNotEmpty)
+                                const Text(
+                                  'Recent locations',
+                                  style: TextStyle(
+                                    color: Colors.black87,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
                               ..._recentLocations.map((locString) {
                                 try {
                                   final locMap = jsonDecode(locString);
@@ -576,6 +782,7 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
                         },
                       )
                       : const SizedBox.shrink(),
+              ),
             ),
 
             AppButtons.button(

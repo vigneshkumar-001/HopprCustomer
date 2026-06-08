@@ -10,8 +10,31 @@ class ApiConsents {
   // static String baseUrl1 = 'https://4wsg7ghz-3000.inc1.devtunnels.ms';
   // static String baseUrl2 = 'https://q29l3cr9-4000.inc1.devtunnels.ms';
 
-  static const String googleMapApiKey =
+  // Hardcoded fallback — used only until the backend `gMapKey` is loaded.
+  static const String _staticGoogleMapApiKey =
       'AIzaSyBjUSlWYV4spl2CeZ3ym32HqGROHwEACxk';
+
+  // Dynamic Maps key from the backend (`gMapKey`), cached in memory.
+  static String? _dynamicMapsKey;
+
+  /// Key for ALL Google Maps HTTP calls (autocomplete, directions, geocoding,
+  /// places) — works on iOS and Android. Uses the backend gMapKey when set,
+  /// else the static fallback, so the key can be rotated server-side without an
+  /// app update. (The native map-display key stays in the platform config.)
+  static String get googleMapApiKey {
+    final k = _dynamicMapsKey;
+    return (k != null && k.trim().isNotEmpty)
+        ? k.trim()
+        : _staticGoogleMapApiKey;
+  }
+
+  /// Cache the backend gMapKey (call when app-settings / login returns it, and
+  /// once at startup from storage).
+  static void setDynamicMapsKey(String? key) {
+    if (key != null && key.trim().isNotEmpty) {
+      _dynamicMapsKey = key.trim();
+    }
+  }
 
   static final String createBooking = '$baseUrl/api/customer/create-booking';
   static final String fcmToken = '$baseUrl/api/customer/update-fcm-token';
