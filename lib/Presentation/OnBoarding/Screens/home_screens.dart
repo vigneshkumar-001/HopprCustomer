@@ -26,7 +26,9 @@ import 'package:hopper/api/dataSource/apiDataSource.dart';
 import 'package:hopper/api/repository/request.dart';
 import 'package:hopper/api/repository/api_consents.dart';
 import 'package:hopper/uitls/netWorkHandling/network_handling_screen.dart';
+import 'dart:async';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:hopper/Presentation/Safety/safety_setup_screen.dart';
 import 'package:hopper/uitls/websocket/shared_web_socket.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -219,6 +221,9 @@ class _HomeScreensState extends State<HomeScreens>
   // spinner, so the GoogleMap is created once and not destroyed/recreated
   // (that re-creation was the "map keeps reloading" you saw).
   LatLng? _firstMapPos;
+  // True once the GoogleMap is created and given a beat to draw tiles; drives
+  // the smooth fade-out of the premium "locating you" placeholder.
+  bool _mapReady = false;
   final GlobalKey _mapKey = GlobalKey();
   final GlobalKey _pinKey = GlobalKey();
   static const double _pinTipVisualAdjustPx = 0;
@@ -350,6 +355,17 @@ class _HomeScreensState extends State<HomeScreens>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+
+    // The HomeMapController is permanent, so whenever Home is re-created (after a
+    // ride / payment / courier flow that rebuilds the bottom nav) it ALREADY
+    // knows the user's location. Seed the map from it and skip the "locating"
+    // placeholder so the map appears instantly at the known spot — Uber/Ola
+    // style — instead of showing a fresh "Finding your location" load each time.
+    final cachedPos = mapC.currentPosition;
+    if (cachedPos != null) {
+      _firstMapPos = cachedPos;
+      _mapReady = true;
+    }
 
     _entranceCtrl = AnimationController(
       vsync: this,
@@ -1003,18 +1019,17 @@ class _HomeScreensState extends State<HomeScreens>
                 // Ensure map rebuilds when nearby-driver markers update.
                 mapC.markersRevision.value;
                 final pos = mapC.currentPosition ?? _firstMapPos;
-                if (pos == null) {
-                  return const Center(
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  );
-                }
                 // Remember the first fix; the map is created once from it and
                 // never torn down even if currentPosition momentarily clears.
                 _firstMapPos ??= pos;
 
-                return SizedBox(
-                  key: _mapKey,
-                  child: GoogleMap(
+                return Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    if (_firstMapPos != null)
+                      SizedBox(
+                        key: _mapKey,
+                        child: GoogleMap(
                     initialCameraPosition: CameraPosition(
                       target: _firstMapPos!,
                       // Nearby drivers on pickup screen.
@@ -1033,6 +1048,13 @@ class _HomeScreensState extends State<HomeScreens>
                       });
                       _onSheetHeightChanged(_sheetHeightN.value);
                       _tryAlignCurrentLocationUnderPinOnce();
+                      // Fade the "locating you" placeholder out once the map is
+                      // created and tiles have a beat to paint — smooth reveal.
+                      Future.delayed(const Duration(milliseconds: 650), () {
+                        if (mounted && !_mapReady) {
+                          setState(() => _mapReady = true);
+                        }
+                      });
                     },
                     onTap: (_) {},
                     onCameraMove: mapC.onCameraMove,
@@ -1064,6 +1086,19 @@ class _HomeScreensState extends State<HomeScreens>
                       ),
                     },
                   ),
+                      ),
+                    // Premium "locating you" placeholder over the map; fades out
+                    // smoothly once the map is ready (no spinner, no flash).
+                    IgnorePointer(
+                      ignoring: _mapReady,
+                      child: AnimatedOpacity(
+                        opacity: _mapReady ? 0.0 : 1.0,
+                        duration: const Duration(milliseconds: 550),
+                        curve: Curves.easeOut,
+                        child: const _HomeLoadingView(),
+                      ),
+                    ),
+                  ],
                 );
               }),
             ),
@@ -1302,6 +1337,48 @@ class _HomeBottomSheet extends StatelessWidget {
     required this.banners,
     required this.bannersLoading,
   });
+
+  // Smooth, crash-safe banner deep-linking. Only known-built flows navigate;
+  // everything else (referral / wallet / safety / coupon / url / unknown) is a
+  // soft "coming soon" so a missing screen can never crash the app. `none` and
+  // empty links are non-actionable.
+  void _handleBannerTap(BuildContext context, _HomeHeroBanner b) {
+    final link = b.ctaLink.trim().toLowerCase();
+    if (link.isEmpty || link == 'none') return;
+
+    switch (link) {
+      case 'book_ride':
+        HapticFeedback.mediumImpact();
+        onBookRideTap();
+        return;
+      case 'send_parcel':
+      case 'courier':
+        HapticFeedback.mediumImpact();
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => const CommonBottomNavigation(initialIndex: 3),
+          ),
+        );
+        return;
+      case 'safety':
+        HapticFeedback.mediumImpact();
+        Get.to(() => const SafetySetupScreen());
+        return;
+      default:
+        Get.snackbar(
+          'Coming soon',
+          'This will be available shortly.',
+          snackPosition: SnackPosition.BOTTOM,
+          margin: const EdgeInsets.all(16),
+          borderRadius: 14,
+          backgroundColor: Colors.black.withOpacity(0.85),
+          colorText: Colors.white,
+          duration: const Duration(seconds: 2),
+        );
+        return;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1547,8 +1624,8 @@ class _HomeBottomSheet extends StatelessWidget {
                               final popular = mapC.popularPlaces;
 
                               // Professional combined list: most-recent first
-                              // (max 2) then nearby popular destinations,
-                              // deduped, capped at 4.
+                              // then nearby popular destinations, deduped,
+                              // capped at 2.
                               final items = <Map<String, dynamic>>[];
                               final seen = <String>{};
 
@@ -1558,7 +1635,7 @@ class _HomeBottomSheet extends StatelessWidget {
                                 required double lng,
                                 required String category,
                               }) {
-                                if (items.length >= 4) return;
+                                if (items.length >= 2) return;
                                 final key = title.trim().toLowerCase();
                                 if (key.isEmpty || seen.contains(key)) return;
                                 seen.add(key);
@@ -1736,34 +1813,11 @@ class _HomeBottomSheet extends StatelessWidget {
                       ),
                     ),
                   ),
-
+  const SizedBox(height: 20),
                   if (banners.isNotEmpty) ...[
-                    SizedBox(
-                      height: 120,
-                      child: PageView.builder(
-                        controller: PageController(viewportFraction: 0.97),
-                        itemCount: banners.length,
-                        itemBuilder: (context, index) {
-                          final b = banners[index];
-                          return Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 0),
-                            child: ClipRRect(
-                              borderRadius: BorderRadius.circular(16),
-                              child: CachedNetworkImage(
-                                imageUrl: b.imageUrl,
-                                fit: BoxFit.contain,
-                                placeholder:
-                                    (context, url) => Container(
-                                      color: const Color(0xFFF2F4F7),
-                                    ),
-                                errorWidget:
-                                    (context, url, error) =>
-                                        const SizedBox.shrink(),
-                              ),
-                            ),
-                          );
-                        },
-                      ),
+                    _HomeBannerCarousel(
+                      banners: banners,
+                      onBannerTap: (b) => _handleBannerTap(context, b),
                     ),
                   ],
 
@@ -1912,3 +1966,325 @@ class _PulsePainter extends CustomPainter {
 }
 
 // (Removed old commented duplicate HomeScreens code to avoid confusion.)
+
+/// Premium "locating you" placeholder shown over the map until it is ready.
+/// Replaces the old bare CircularProgressIndicator with a real-time GPS-style
+/// radar pulse + a skeleton bottom sheet, so the first open feels light and
+/// polished (Uber / Ola style) instead of a heavy white-screen spinner.
+class _HomeLoadingView extends StatefulWidget {
+  const _HomeLoadingView();
+
+  @override
+  State<_HomeLoadingView> createState() => _HomeLoadingViewState();
+}
+
+class _HomeLoadingViewState extends State<_HomeLoadingView>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c;
+
+  static const Color _brand = Color(0xFF2563EB);
+  static const Color _mapTone = Color(0xFFF1F4F9);
+  static const Color _skeleton = Color(0xFFE9ECF2);
+  static const Color _skeletonHi = Color(0xFFF7F9FC);
+
+  @override
+  void initState() {
+    super.initState();
+    _c = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1700),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: _mapTone,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          // GPS-style radar pulse + pin, centred in the map area.
+          Align(
+            alignment: const Alignment(0, -0.18),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  height: 132,
+                  width: 132,
+                  child: AnimatedBuilder(
+                    animation: _c,
+                    builder: (_, __) {
+                      return Stack(
+                        alignment: Alignment.center,
+                        children: [
+                          _ring(_c.value),
+                          _ring((_c.value + 0.5) % 1.0),
+                          Container(
+                            height: 52,
+                            width: 52,
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              shape: BoxShape.circle,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: _brand.withOpacity(0.28),
+                                  blurRadius: 18,
+                                  offset: const Offset(0, 7),
+                                ),
+                              ],
+                            ),
+                            child: const Icon(
+                              Icons.location_on_rounded,
+                              color: _brand,
+                              size: 28,
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 20),
+                Text(
+                  'Finding your location…',
+                  style: TextStyle(
+                    color: Colors.grey.shade700,
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.2,
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // Skeleton of the real bottom sheet so the reveal feels continuous.
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(18, 12, 18, 30),
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+                boxShadow: [
+                  BoxShadow(
+                    color: Color(0x14000000),
+                    blurRadius: 22,
+                    offset: Offset(0, -4),
+                  ),
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    height: 4,
+                    width: 42,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE2E5EC),
+                      borderRadius: BorderRadius.circular(99),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  Row(
+                    children: [
+                      Expanded(child: _bar(height: 66, radius: 16)),
+                      const SizedBox(width: 12),
+                      Expanded(child: _bar(height: 66, radius: 16)),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  _bar(height: 54, radius: 14),
+                  const SizedBox(height: 12),
+                  _bar(height: 54, radius: 14, widthFactor: 0.7),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // One expanding + fading radar ring; [t] is 0..1 progress.
+  Widget _ring(double t) {
+    final size = 44 + t * 86;
+    return Opacity(
+      opacity: ((1 - t) * 0.55).clamp(0.0, 1.0),
+      child: Container(
+        height: size,
+        width: size,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(color: _brand.withOpacity(0.55), width: 2),
+        ),
+      ),
+    );
+  }
+
+  // A shimmering skeleton bar that sweeps a soft highlight left-to-right.
+  Widget _bar({
+    required double height,
+    double radius = 12,
+    double widthFactor = 1.0,
+  }) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: FractionallySizedBox(
+        widthFactor: widthFactor,
+        child: AnimatedBuilder(
+          animation: _c,
+          builder: (_, __) {
+            final v = _c.value;
+            return Container(
+              height: height,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(radius),
+                gradient: LinearGradient(
+                  begin: Alignment.centerLeft,
+                  end: Alignment.centerRight,
+                  colors: const [_skeleton, _skeletonHi, _skeleton],
+                  stops: [
+                    (v - 0.3).clamp(0.0, 1.0),
+                    v.clamp(0.0, 1.0),
+                    (v + 0.3).clamp(0.0, 1.0),
+                  ],
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+/// Home promo banner: a larger rounded image card carousel with page dots below
+/// and an app tagline beneath them (server-driven images). Auto-advances.
+class _HomeBannerCarousel extends StatefulWidget {
+  final List<_HomeHeroBanner> banners;
+  final ValueChanged<_HomeHeroBanner> onBannerTap;
+  const _HomeBannerCarousel({
+    required this.banners,
+    required this.onBannerTap,
+  });
+
+  @override
+  State<_HomeBannerCarousel> createState() => _HomeBannerCarouselState();
+}
+
+class _HomeBannerCarouselState extends State<_HomeBannerCarousel> {
+  static const Color _ink = Color(0xFF161A2E);
+
+  final PageController _pc = PageController();
+  int _index = 0;
+  Timer? _auto;
+
+  @override
+  void initState() {
+    super.initState();
+    _startAuto();
+  }
+
+  void _startAuto() {
+    _auto?.cancel();
+    if (widget.banners.length < 2) return;
+    _auto = Timer.periodic(const Duration(seconds: 4), (_) {
+      if (!mounted || !_pc.hasClients) return;
+      final next = (_index + 1) % widget.banners.length;
+      _pc.animateToPage(
+        next,
+        duration: const Duration(milliseconds: 450),
+        curve: Curves.easeOutCubic,
+      );
+    });
+  }
+
+  @override
+  void dispose() {
+    _auto?.cancel();
+    _pc.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final banners = widget.banners;
+    return Column(
+      children: [
+        // Larger banner image card.
+        SizedBox(
+          height: 160,
+          child: PageView.builder(
+            controller: _pc,
+            itemCount: banners.length,
+            onPageChanged: (i) => setState(() => _index = i),
+            itemBuilder: (context, index) {
+              final b = banners[index];
+              return GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => widget.onBannerTap(b),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(18),
+                  child: CachedNetworkImage(
+                    imageUrl: b.imageUrl,
+                    fit: BoxFit.cover,
+                    width: double.infinity,
+                    placeholder: (context, url) =>
+                        Container(color: const Color(0xFFF2F4F7)),
+                    errorWidget: (context, url, error) =>
+                        Container(color: const Color(0xFFF2F4F7)),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+
+        // Page dots (only when there's more than one banner).
+        if (banners.length > 1) ...[
+          const SizedBox(height: 12),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: List.generate(banners.length, (i) {
+              final active = i == _index;
+              return AnimatedContainer(
+                duration: const Duration(milliseconds: 260),
+                curve: Curves.easeOutCubic,
+                margin: const EdgeInsets.symmetric(horizontal: 3),
+                height: 7,
+                width: active ? 20 : 7,
+                decoration: BoxDecoration(
+                  color: active ? _ink : const Color(0xFFD3D7DF),
+                  borderRadius: BorderRadius.circular(99),
+                ),
+              );
+            }),
+          ),
+        ],
+
+        // App tagline beneath the dots.
+        const SizedBox(height: 14),
+        Text(
+          'Book and move, anywhere in the city',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            fontSize: 17,
+            fontWeight: FontWeight.w700,
+            height: 2.3,
+            color: Colors.grey.shade500,
+          ),
+        ),
+        const SizedBox(height: 6),
+      ],
+    );
+  }
+}

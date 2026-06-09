@@ -29,6 +29,11 @@ dependencies:
   pin_code_fields: any
   smart_auth: ^3.2.0
   google_maps_flutter: any
+  # Direct refs so we can pre-warm the Android Maps renderer in main() for a
+  # faster, smoother first map load (resolves to the same versions already
+  # pulled in transitively by google_maps_flutter).
+  google_maps_flutter_android: any
+  google_maps_flutter_platform_interface: any
   geolocator: any
   permission_handler: any
   google_place: any
@@ -41,6 +46,9 @@ dependencies:
   url_launcher: any
   flutter_stripe: any
   share_plus: any
+  # Ride receipt -> printable PDF (HTML to PDF) + native share/save.
+  printing: any
+  pdf: any
   flutter_inappwebview: ^6.1.5
   flutter_polyline_points: any
   cached_network_image: any

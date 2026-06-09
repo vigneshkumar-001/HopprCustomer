@@ -47,6 +47,10 @@ class ApiConsents {
   static final String paymentBooking = '$baseUrl/api/customer/paymentBooking';
   static final String activeBooking = '$baseUrl/api/customer/active-booking';
 
+  /// Universal ride receipt (works for COD / Wallet / Paystack / Flutterwave).
+  static String rideReceipt(String bookingId) =>
+      '$baseUrl/api/customer/ride-receipt/$bookingId';
+
   static final String chatHistory = '$baseUrl/api/customer/chat-history';
   static final String rideHistory = '$baseUrl/api/customer/ride-history';
   static final String getCustomerDetails =

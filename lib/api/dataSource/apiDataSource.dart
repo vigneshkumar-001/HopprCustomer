@@ -19,6 +19,7 @@ import 'package:hopper/Presentation/OnBoarding/models/chat_history_response.dart
 import 'package:hopper/Presentation/OnBoarding/models/confrom_package_response.dart';
 import 'package:hopper/Presentation/OnBoarding/models/coupen_response.dart';
 import 'package:hopper/Presentation/OnBoarding/models/package_details_response.dart';
+import 'package:hopper/Presentation/OnBoarding/models/ride_receipt_response.dart';
 import 'package:hopper/Presentation/CustomerSupport/models/customer_support_models.dart';
 import 'package:hopper/Presentation/wallet/model/get_wallet_balance_response.dart';
 import 'package:hopper/Presentation/wallet/model/transaction_response.dart';
@@ -1120,6 +1121,48 @@ class ApiDataSource extends BaseApiDataSource {
     } catch (e) {
       AppLogger.log.e(e);
       return Left(ServerFailure('Something went wrong'));
+    }
+  }
+
+  /// Universal ride receipt — works for COD / Wallet / Paystack / Flutterwave.
+  /// Returns the backend-built receipt (data + html + text) so the amounts shown
+  /// exactly match what was charged. On any failure the caller shows a soft
+  /// "Receipt not available yet" message — it never throws.
+  Future<Either<Failure, RideReceiptResponse>> getRideReceipt({
+    required String bookingId,
+  }) async {
+    try {
+      final id = bookingId.trim();
+      if (id.isEmpty) {
+        return Left(ServerFailure('Booking id missing'));
+      }
+      final url = ApiConsents.rideReceipt(id);
+      AppLogger.log.i(url);
+
+      final response = await Request.sendGetRequest(url, {}, 'GET', true);
+
+      if (response != null && response.statusCode == 200) {
+        final data = response.data;
+        if (data is Map<String, dynamic>) {
+          final rawSuccess = data['success'];
+          final success =
+              rawSuccess == true || rawSuccess?.toString() == 'true';
+          if (success) {
+            return Right(RideReceiptResponse.fromJson(data));
+          }
+          return Left(
+            ServerFailure(
+              data['message']?.toString() ?? 'Receipt not available yet',
+            ),
+          );
+        }
+        return Left(ServerFailure('Receipt not available yet'));
+      } else {
+        return Left(ServerFailure('Receipt not available yet'));
+      }
+    } catch (e) {
+      AppLogger.log.e(e);
+      return Left(ServerFailure('Receipt not available yet'));
     }
   }
 

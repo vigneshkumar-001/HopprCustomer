@@ -499,8 +499,20 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     final isDrop = widget.mode == RideMapMode.toDrop;
     if (!isPickup && !isDrop) return set;
 
-    final active = _remainingRoute.length >= 2 ? _remainingRoute : _fullRoute;
-    if (active.length < 2) return set;
+    final baseActive = _remainingRoute.length >= 2 ? _remainingRoute : _fullRoute;
+    if (baseActive.length < 2) return set;
+
+    // Anchor the route to the live car so the polyline always visually emanates
+    // from the vehicle (Uber/Ola feel). Bridge only a SMALL gap so an off-route
+    // / simulator divergence never draws a long line cutting across the map.
+    List<LatLng> active = baseActive;
+    final car = _vehiclePos;
+    if (car != null) {
+      final gap = haversineDistanceMeters(car, baseActive.first);
+      if (gap > 1.0 && gap <= 80.0) {
+        active = <LatLng>[car, ...baseActive];
+      }
+    }
 
     final drawT = Curves.easeOut.transform(_routeDrawCtrl.value);
     final revealing = drawT < 1.0;

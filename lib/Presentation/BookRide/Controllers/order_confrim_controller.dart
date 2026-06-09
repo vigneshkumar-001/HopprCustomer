@@ -354,6 +354,16 @@ class OrderConfirmController extends GetxController
     _seedStaticMarkers(forceRecreate: true);
     _startPulseAnimation();
     _setupSocketListeners();
+    // ALWAYS join the booking room so the customer receives live driver-location
+    // broadcasts — the backend joins the room by bookingId alone, no driverId
+    // needed. Previously this was gated on `resumeDriverId`, so on a fresh ride
+    // (driver just accepted, resumeDriverId empty) the socket never joined the
+    // room: the car showed from the initial snapshot but never moved, because no
+    // live `driver-location` packets arrived. Stored in the socket's room map so
+    // it auto-rejoins on every reconnect too.
+    if (bookingId.trim().isNotEmpty) {
+      socketService.joinBookingRoom(bookingId: bookingId);
+    }
     if ((resumeDriverId ?? '').trim().isNotEmpty) {
       socketService.joinBooking(
         bookingId: bookingId,
@@ -1256,6 +1266,30 @@ class OrderConfirmController extends GetxController
     return suspiciousDistanceReset || suspiciousNearDropReset;
   }
 
+  /// True when a real (non-simulated) fix is a tiny backward GPS jitter: a
+  /// sub-6m step that increases the distance to the active destination. We hold
+  /// the marker instead of stepping it backward. Forward motion and any move
+  /// >= 6m are never blocked.
+  bool _isBackwardMicroJitter(Map<String, dynamic> payload, LatLng newPos) {
+    final last = _lastAcceptedDriverLocationPos;
+    if (last == null) return false;
+
+    final move = Geolocator.distanceBetween(
+      last.latitude,
+      last.longitude,
+      newPos.latitude,
+      newPos.longitude,
+    );
+    if (move >= 6.0) return false; // real movement -> always accept
+
+    if (driverStartedRide.value) {
+      final incoming = _toDouble(payload['dropDistanceInMeters']);
+      return incoming != null && incoming > dropDistanceMeters.value + 2.0;
+    }
+    final incoming = _toDouble(payload['pickupDistanceInMeters']);
+    return incoming != null && incoming > pickupDistanceMeters.value + 2.0;
+  }
+
   void _handleDriverTrackingUpdate(dynamic data, {required String source}) {
     if (isClosed) return;
 
@@ -1349,6 +1383,13 @@ class OrderConfirmController extends GetxController
           'speed=${payload['speed']}',
         );
       }
+      return;
+    }
+    // Backend-team recommendation: reject tiny backward GPS micro-jitter — a
+    // sub-6m step that moves AWAY from the active destination. Holding the
+    // marker on these stops the "car steps backward" flicker. A real forward
+    // fix (>=6m, or moving toward the destination) is always accepted.
+    if (!isSimulated && _isBackwardMicroJitter(payload, newPos)) {
       return;
     }
     _lastAcceptedDriverLocationTs =
