@@ -12,6 +12,7 @@ import 'package:hopper/Presentation/Authentication/screens/otp_processing_screen
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:pin_code_fields/pin_code_fields.dart';
 import 'package:get/get.dart';
+import 'package:smart_auth/smart_auth.dart';
 
 class OtpScreens extends StatefulWidget {
   final String? countyCode;
@@ -86,11 +87,35 @@ class _OtpScreensState extends State<OtpScreens> {
     super.initState();
 
     _startTimer();
+    // Auto-read the incoming OTP SMS, fill the boxes, and continue.
+    _listenForOtp();
+  }
+
+  Future<void> _listenForOtp() async {
+    try {
+      final res = await SmartAuth.instance.getSmsWithUserConsentApi();
+      if (!mounted || !res.hasData) return;
+      final code =
+          (res.requireData.code ?? '').replaceAll(RegExp(r'[^0-9]'), '');
+      if (code.length < 4) return;
+
+      otp.text = code.substring(0, 4);
+      if (mounted) setState(() => otpError = null);
+
+      // Small pause so the filled boxes are visible, then auto-verify.
+      await Future.delayed(const Duration(milliseconds: 350));
+      if (mounted) _startOtpVerification();
+    } catch (_) {
+      // Auto-read unavailable / cancelled — user can type manually.
+    }
   }
 
   @override
   void dispose() {
     _timer.cancel();
+    try {
+      SmartAuth.instance.removeUserConsentApiListener();
+    } catch (_) {}
     otp.dispose();
     super.dispose();
   }

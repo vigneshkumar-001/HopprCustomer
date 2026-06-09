@@ -989,7 +989,29 @@ class OrderConfirmController extends GetxController
 
     socketService.on('driver-arrived', (data) {
       if (isClosed) return;
-      if (data != null && data['status'] == true) {
+      // Robust parse (matches the `ride-started` fix): the server may send
+      // `status` as a bool / number / string, and the presence of `arrivedAt`
+      // or an "arrived" message is itself a definitive arrival signal. The old
+      // strict `data['status'] == true` silently missed those, so the arrival
+      // UI never appeared even though the event arrived.
+      bool arrived = false;
+      if (data is Map) {
+        final raw = data['status'];
+        final s = (raw ?? '').toString().trim().toLowerCase();
+        final msg = (data['message'] ?? '').toString().toLowerCase();
+        arrived =
+            raw == true ||
+            raw == 1 ||
+            s == 'true' ||
+            s == '1' ||
+            s.contains('arriv') ||
+            data['arrivedAt'] != null ||
+            msg.contains('arriv');
+      } else {
+        final s = (data ?? '').toString().trim().toLowerCase();
+        arrived = s == 'true' || s == '1' || s.contains('arriv');
+      }
+      if (arrived) {
         driverArrived.value = true;
         etaChipText.value = 'Driver arrived';
       }
@@ -1035,9 +1057,11 @@ class OrderConfirmController extends GetxController
       _seedStaticMarkers(forceRecreate: false);
       _refreshPulseCircles();
 
-      // redraw pickup->drop immediately (once)
+      // redraw driver->drop immediately (once). Fall back to the last known
+      // driver location so the drop route still fetches even if the motion
+      // engine hasn't produced a smoothed position yet.
       if (status && customerToLatLng != null) {
-        final polyOrigin = _emaPos ?? _displayPos;
+        final polyOrigin = _emaPos ?? _displayPos ?? driverLocation.value;
         if (polyOrigin != null) {
           _maybeRerouteFromDriver(polyOrigin, force: true);
         }
@@ -1487,6 +1511,13 @@ class OrderConfirmController extends GetxController
     if (!driverStartedRide.value) {
       final mins = pickupDurationMin.value;
       final meters = pickupDistanceMeters.value;
+      // App-side arrival check (fires first; the `driver-arrived` socket event
+      // is the fallback). When the live pickup distance shows the driver is
+      // essentially at the pickup, mark arrived. `meters > 0` excludes the
+      // no-data default so we never flip arrived prematurely.
+      if (!driverArrived.value && meters > 0 && meters <= 30) {
+        driverArrived.value = true;
+      }
       final isArriving = driverArrived.value || meters <= 120 || mins <= 1;
       etaMinutes.value = mins;
       etaChipText.value =
@@ -2160,39 +2191,27 @@ class OrderConfirmController extends GetxController
     LatLng? driverPos,
     bool force = false,
   }) {
+    if (driverPos == null) return;
     final s = orderStatus.trim().toLowerCase();
 
-    // Phase 2 (ride in progress)
-    if (s == 'picked_up' ||
-        s == 'on_trip' ||
-        s == 'in_progress' ||
-        s == 'started' ||
-        s == 'ride_started' ||
-        s == 'trip_started') {
-      if (driverPos != null) {
-        _maybeRerouteFromDriver(driverPos, force: force);
-      }
-      return;
-    }
-
-    // Completed / cancelled
-    if (s == 'completed' || s == 'cancelled' || s == 'canceled') {
+    // Completed / cancelled -> clear the route.
+    if (destinationReached.value ||
+        isTripCancelled.value ||
+        s == 'completed' ||
+        s == 'cancelled' ||
+        s == 'canceled') {
       _clearActiveRoute(clearVisuals: true, clearKey: true);
       return;
     }
 
-    // Phase 1 (driver approaching pickup)
-    if (s == 'driver_assigned' ||
-        s == 'accepted' ||
-        s == 'driver_approaching' ||
-        s == 'approaching' ||
-        s == 'arriving' ||
-        s == 'assigned') {
-      final pickup = customerLatLng;
-      if (driverPos != null && pickup != null) {
-        _maybeRerouteFromDriver(driverPos, force: force);
-      }
-    }
+    // The route phase is decided by the authoritative `driverStartedRide` flag
+    // (set by the `ride-started` event / a drop-phase status), NOT by the
+    // per-packet status string. The server keeps sending `status: ACCEPTED` in
+    // driver-location packets even AFTER the ride starts — relying on that
+    // string previously left the drop route unfetched (no driver->drop line).
+    // `_maybeRerouteFromDriver` reads `_activeDestination()` (pickup before
+    // start, drop after), so we just always reroute and let it pick the leg.
+    _maybeRerouteFromDriver(driverPos, force: force);
   }
 
   String _currentPolylineId() {

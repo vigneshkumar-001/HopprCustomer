@@ -1,5 +1,3 @@
-import 'dart:async' show unawaited;
-
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
@@ -8,17 +6,14 @@ import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:get/get.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:hopper/Presentation/Drawer/controller/profle_cotroller.dart';
+import 'package:hopper/Presentation/Drawer/screens/about_screen.dart';
+import 'package:hopper/Presentation/Drawer/screens/favourites_screen.dart';
 import 'package:hopper/Presentation/Drawer/screens/notification_screens.dart';
 import 'package:hopper/Presentation/Drawer/screens/ride_and_package_history_screen.dart';
 import 'package:hopper/Presentation/Drawer/screens/settings_screen.dart';
 import 'package:hopper/Presentation/OnBoarding/Widgets/custom_bottomnavigation.dart';
 import 'package:hopper/Presentation/CustomerSupport/screens/customer_support_list_screen.dart';
 import 'package:hopper/Presentation/wallet/screens/wallet_screens.dart';
-import 'package:hopper/api/repository/api_consents.dart';
-import 'package:hopper/api/repository/request.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-
-import '../../Authentication/screens/mobile_screens.dart';
 
 class DrawerScreen extends StatefulWidget {
   const DrawerScreen({super.key});
@@ -66,7 +61,9 @@ class _DrawerScreenState extends State<DrawerScreen> {
                         horizontal: 20,
                         vertical: 20,
                       ),
-                      child: Column(
+                      child: SingleChildScrollView(
+                        physics: const BouncingScrollPhysics(),
+                        child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Row(
@@ -102,6 +99,29 @@ class _DrawerScreenState extends State<DrawerScreen> {
                                   ),
                                 ),
                               ),
+                              const Spacer(),
+                              // Hoppr logo + version (right side)
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.end,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Image.asset(
+                                    AppImages.hopprLogo,
+                                    height: 30,
+                                    fit: BoxFit.contain,
+                                    errorBuilder:
+                                        (_, __, ___) => const SizedBox.shrink(),
+                                  ),
+                                  const SizedBox(height: 3),
+                                  Text(
+                                    'Version 1.0.0',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: AppColors.greyDark,
+                                    ),
+                                  ),
+                                ],
+                              ),
                             ],
                           ),
                           const SizedBox(height: 40),
@@ -111,6 +131,21 @@ class _DrawerScreenState extends State<DrawerScreen> {
                             },
                             child: CustomTextFields.textWithStyles700(
                               'Ride Activity',
+                            ),
+                          ),
+                          const SizedBox(height: 15),
+                          Divider(
+                            color: AppColors.dividerColor.withOpacity(0.1),
+                            thickness: 1.5,
+                          ),
+
+                          const SizedBox(height: 30),
+                          InkWell(
+                            onTap: () {
+                              Get.to(() => const FavouritesScreen());
+                            },
+                            child: CustomTextFields.textWithStyles700(
+                              'Favourites',
                             ),
                           ),
                           const SizedBox(height: 15),
@@ -162,35 +197,12 @@ class _DrawerScreenState extends State<DrawerScreen> {
                           const SizedBox(height: 30),
                           InkWell(
                             onTap: () {
-                              Get.to(() => SettingsScreen());
+                              Get.to(() => const AboutScreen());
                             },
-                            child: CustomTextFields.textWithStyles700(
-                              'Settings',
-                            ),
-                          ),
-                          const SizedBox(height: 20),
-                          Divider(
-                            color: AppColors.dividerColor.withOpacity(0.1),
-                            thickness: 1.5,
-                          ),
-                          const SizedBox(height: 20),
-
-                          // 🔴 NEW: Shared Booking toggle
-                          InkWell(
-                            onTap: () => _showLogoutDialog(context),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                CustomTextFields.textWithStyles700('Log out'),
-                                const Icon(
-                                  Icons.logout,
-                                  color: Colors.red,
-                                  size: 22,
-                                ),
-                              ],
-                            ),
+                            child: CustomTextFields.textWithStyles700('About'),
                           ),
                         ],
+                      ),
                       ),
                     ),
                   ),
@@ -204,8 +216,11 @@ class _DrawerScreenState extends State<DrawerScreen> {
                       final user = controller.user.value;
                       if (user == null) return const SizedBox();
 
-                      return Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                      return InkWell(
+                        onTap: () => Get.to(() => SettingsScreen()),
+                        borderRadius: BorderRadius.circular(12),
+                        child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
                         children: [
                           ClipRRect(
                             borderRadius: BorderRadius.circular(50),
@@ -310,7 +325,13 @@ class _DrawerScreenState extends State<DrawerScreen> {
                               ],
                             ),
                           ),
+                          const SizedBox(width: 6),
+                          const Icon(
+                            Icons.chevron_right,
+                            color: Colors.grey,
+                          ),
                         ],
+                      ),
                       );
                     }),
                   ),
@@ -376,6 +397,7 @@ class _DrawerScreenState extends State<DrawerScreen> {
                     ),
                   ),*/
                   Divider(color: AppColors.dividerColor1, thickness: 2),
+                  const SizedBox(height: 8),
                 ],
               ),
             ),
@@ -385,119 +407,5 @@ class _DrawerScreenState extends State<DrawerScreen> {
     );
   }
 
-  void _showLogoutDialog(BuildContext context) {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) {
-        return Dialog(
-          backgroundColor: AppColors.commonWhite,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // Icon
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: Colors.red.withOpacity(0.1),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(Icons.logout, color: Colors.red, size: 28),
-                ),
-
-                const SizedBox(height: 16),
-
-                // Title
-                const Text(
-                  'Log out',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
-                ),
-
-                const SizedBox(height: 8),
-
-                // Message
-                const Text(
-                  'Do you want to log out?',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 14, color: Colors.black54),
-                ),
-
-                const SizedBox(height: 24),
-
-                // Buttons
-                Row(
-                  children: [
-                    Expanded(
-                      child: OutlinedButton(
-                        onPressed: () {
-                          Navigator.pop(context); // No
-                        },
-                        style: OutlinedButton.styleFrom(
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                        ),
-                        child: const Text('No'),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: ElevatedButton(
-                        onPressed: () async {
-                          Navigator.pop(context);
-                          _logout(context);
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.red,
-                          foregroundColor: Colors.white,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                        ),
-                        child: const Text('Yes'),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Future<void> _logout(BuildContext context) async {
-    final prefs = await SharedPreferences.getInstance();
-
-    final token = prefs.getString('token');
-    unawaited(
-      Request.sendLogoutFireAndForget(
-        url: ApiConsents.logout,
-        token: token,
-      ),
-    );
-
-    unawaited(prefs.remove('token'));
-    unawaited(prefs.remove('refreshToken'));
-    unawaited(prefs.remove('sessionToken'));
-    unawaited(prefs.remove('role'));
-    unawaited(prefs.remove('contacts_synced'));
-
-    controller.clearSession();
-
-    if (!context.mounted) return;
-
-    Navigator.pushAndRemoveUntil(
-      context,
-      MaterialPageRoute(builder: (_) => MobileScreens()),
-      (route) => false, // ❌ removes ALL previous routes
-    );
-  }
 }
 

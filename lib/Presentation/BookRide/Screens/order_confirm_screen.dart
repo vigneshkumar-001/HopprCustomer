@@ -11,6 +11,8 @@ import 'package:hopper/uitls/map/customer/customer_ride_map_view.dart';
 import 'package:hopper/uitls/map/customer/marker_icon_cache.dart' as icon_cache;
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:hopper/Presentation/BookRide/utils/trusted_contacts_store.dart';
 import 'package:hopper/Presentation/CustomerSupport/screens/customer_support_list_screen.dart';
 
 import 'package:hopper/Core/Consents/app_colors.dart';
@@ -97,6 +99,12 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
   Timer? _searchingElapsedTimer;
   int _searchingElapsedSeconds = 0;
   Worker? _rideSideEffectsWorker;
+
+  // A2 + A3: driver-arrival alert + waiting timer.
+  Worker? _arrivalWorker;
+  Timer? _waitTimer;
+  int _waitSeconds = 0;
+  bool _arrivalHandled = false;
 
   double? _toDouble(dynamic v) {
     if (v == null) return null;
@@ -212,6 +220,67 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
       },
     );
     _applyRideSideEffects();
+
+    // A2 + A3: alert + waiting timer when the driver arrives at pickup.
+    _arrivalWorker?.dispose();
+    _arrivalWorker = ever<bool>(c.driverArrived, (arrived) {
+      if (mounted && arrived) _onDriverArrived();
+    });
+    if (c.driverArrived.value && !c.driverStartedRide.value) {
+      _onDriverArrived();
+    }
+  }
+
+  void _onDriverArrived() {
+    if (_arrivalHandled) return;
+    _arrivalHandled = true;
+    HapticFeedback.heavyImpact();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: Color(0xFF12B76A),
+          duration: Duration(seconds: 4),
+          content: Row(
+            children: [
+              Icon(Icons.check_circle_rounded, color: Colors.white),
+              SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Your driver has arrived at the pickup point',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    _startWaitTimer();
+  }
+
+  void _startWaitTimer() {
+    _waitTimer?.cancel();
+    _waitSeconds = 0;
+    _waitTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted ||
+          c.driverStartedRide.value ||
+          c.destinationReached.value ||
+          c.isTripCancelled.value) {
+        _waitTimer?.cancel();
+        return;
+      }
+      setState(() => _waitSeconds += 1);
+    });
+  }
+
+  String _fmtWait(int s) {
+    final m = (s ~/ 60).toString();
+    final ss = (s % 60).toString().padLeft(2, '0');
+    return '$m:$ss';
   }
 
   void _applyRideSideEffects() {
@@ -257,6 +326,8 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
     _destController.dispose();
     _searchingElapsedTimer?.cancel();
     _rideSideEffectsWorker?.dispose();
+    _arrivalWorker?.dispose();
+    _waitTimer?.cancel();
     _setKeepScreenOn(false);
     WidgetsBinding.instance.removeObserver(this);
     Get.delete<OrderConfirmController>(tag: widget.bookingId, force: true);
@@ -280,93 +351,45 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
     } catch (_) {}
   }
 
+  String get _trackUrl =>
+      'https://hoppr-admin-e7bebfb9fb05.herokuapp.com/ride-tracker/${widget.bookingId}';
+
+  // A5: Safety toolkit sheet (emergency call, share live trip, trusted contacts).
+  void _openSafetySheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder:
+          (_) => _SafetySheet(
+            trackUrl: _trackUrl,
+            driverName: c.driverName.value,
+          ),
+    );
+  }
+
   /// Full-screen, pinch-zoomable preview for the driver / car photos so the
   /// rider can verify their actual driver and vehicle before boarding.
   void _showImagePreview(String url, {String? caption}) {
     if (url.trim().isEmpty) return;
-    showDialog(
+    showGeneralDialog(
       context: context,
-      barrierColor: Colors.black.withOpacity(0.92),
-      builder: (ctx) {
-        return Stack(
-          children: [
-            Positioned.fill(
-              child: InteractiveViewer(
-                minScale: 0.8,
-                maxScale: 4.5,
-                child: Center(
-                  child: Image.network(
-                    url,
-                    fit: BoxFit.contain,
-                    loadingBuilder: (c, child, progress) =>
-                        progress == null
-                            ? child
-                            : const Center(
-                              child: CircularProgressIndicator(
-                                color: Colors.white,
-                              ),
-                            ),
-                    errorBuilder: (_, __, ___) => const Icon(
-                      Icons.broken_image_rounded,
-                      color: Colors.white54,
-                      size: 64,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-            if (caption != null && caption.trim().isNotEmpty)
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: 44,
-                child: Center(
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 9,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.14),
-                      borderRadius: BorderRadius.circular(999),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(
-                          Icons.verified_rounded,
-                          color: Colors.white,
-                          size: 16,
-                        ),
-                        const SizedBox(width: 6),
-                        Text(
-                          caption,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            Positioned(
-              top: 46,
-              right: 16,
-              child: GestureDetector(
-                onTap: () => Navigator.of(ctx).pop(),
-                child: Container(
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.16),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(Icons.close_rounded, color: Colors.white),
-                ),
-              ),
-            ),
-          ],
+      barrierDismissible: true,
+      barrierLabel: 'driver-photo',
+      barrierColor: Colors.white,
+      transitionDuration: const Duration(milliseconds: 280),
+      pageBuilder: (ctx, _, __) => _DriverPhotoPreview(url: url, caption: caption),
+      transitionBuilder: (ctx, anim, _, child) {
+        final curved = CurvedAnimation(parent: anim, curve: Curves.easeOutCubic);
+        return FadeTransition(
+          opacity: anim,
+          child: ScaleTransition(
+            scale: Tween<double>(begin: 0.92, end: 1.0).animate(curved),
+            child: child,
+          ),
         );
       },
     );
@@ -422,47 +445,48 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                 ),
               ),
 
-              // Emergency
+              // A5: Safety button (replaces the old Emergency dialer).
               Positioned(
                 top: 50,
                 right: 15,
-                child: GestureDetector(
-                  onTap: () async {
-                    try {
-                      final prefs = await SharedPreferences.getInstance();
-                      String? sosNumber = prefs.getString('sosNumber');
-                      if (sosNumber == null || sosNumber.trim().isEmpty) {
-                        AppToasts.showError(context, 'SOS number not set');
-                        return;
-                      }
-
-                      sosNumber = sosNumber.trim();
-                      final normalized = sanitizePhoneNumber(sosNumber);
-                      if (normalized.isEmpty) {
-                        AppToasts.showError(context, 'Invalid SOS number');
-                        return;
-                      }
-                      final ok = await launchPhoneDialer(normalized);
-                      if (!ok) {
-                        AppToasts.showError(context, 'Could not open dialer');
-                      }
-                    } catch (_) {
-                      AppToasts.showError(context, 'Failed to start call');
-                    }
-                  },
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 2,
-                    ),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(15),
-                      color: AppColors.emergencyColor,
-                    ),
-                    child: CustomTextFields.textWithStyles600(
-                      'Emergency',
-                      color: AppColors.commonWhite,
-                      fontSize: 16,
+                child: SafeArea(
+                  child: GestureDetector(
+                    onTap: _openSafetySheet,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(16),
+                        color: const Color(0xFFE11D48),
+                        boxShadow: [
+                          BoxShadow(
+                            color: const Color(0xFFE11D48).withOpacity(0.35),
+                            blurRadius: 12,
+                            offset: const Offset(0, 5),
+                          ),
+                        ],
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.shield_rounded,
+                            color: Colors.white,
+                            size: 17,
+                          ),
+                          SizedBox(width: 5),
+                          Text(
+                            'Safety',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -927,23 +951,36 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
     final etaText = pieces.isNotEmpty ? pieces.first : raw.trim();
     final distText = pieces.length >= 2 ? pieces.last : '';
 
-    if (etaText.isEmpty && distText.isEmpty) return const SizedBox.shrink();
+    // A3: waiting timer — shown once the driver has arrived at pickup.
+    final waiting =
+        c.driverArrived.value &&
+        !c.driverStartedRide.value &&
+        !c.destinationReached.value;
 
-    Widget chip(IconData icon, String text) {
+    if (etaText.isEmpty && distText.isEmpty && !waiting) {
+      return const SizedBox.shrink();
+    }
+
+    Widget chip(IconData icon, String text, {Color color = Colors.black}) {
+      final isAccent = color != Colors.black;
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
-          color: Colors.black.withOpacity(0.05),
+          color: color.withOpacity(isAccent ? 0.12 : 0.05),
           borderRadius: BorderRadius.circular(999),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 16, color: Colors.black),
+            Icon(icon, size: 16, color: color),
             const SizedBox(width: 6),
             Text(
               text,
-              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800),
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w800,
+                color: color,
+              ),
             ),
           ],
         ),
@@ -955,6 +992,12 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
       runSpacing: 8,
       alignment: WrapAlignment.center,
       children: [
+        if (waiting)
+          chip(
+            Icons.timelapse_rounded,
+            'Waiting ${_fmtWait(_waitSeconds)}',
+            color: const Color(0xFF12B76A),
+          ),
         if (etaText.isNotEmpty) chip(Icons.timer_outlined, etaText),
         if (distText.isNotEmpty) chip(Icons.route_rounded, distText),
       ],
@@ -1901,6 +1944,664 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
             imgHeight: 17,
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Clean, premium driver-photo preview on a white background: the photo in a
+/// rounded card with a soft shadow, then the driver name (verified) and rating.
+/// The rating is embedded in the name string ("Name ⭐️ 4.5"), so we split it.
+class _DriverPhotoPreview extends StatelessWidget {
+  final String url;
+  final String? caption;
+
+  const _DriverPhotoPreview({required this.url, this.caption});
+
+  String get _name {
+    final c = (caption ?? '').trim();
+    final idx = c.indexOf('⭐');
+    return (idx >= 0 ? c.substring(0, idx) : c).trim();
+  }
+
+  String? get _rating {
+    final c = caption ?? '';
+    final idx = c.indexOf('⭐');
+    if (idx < 0) return null;
+    final r =
+        c.substring(idx).replaceAll('⭐️', '').replaceAll('⭐', '').trim();
+    return r.isEmpty ? null : r;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final media = MediaQuery.of(context);
+    final name = _name;
+    final rating = _rating;
+
+    return Material(
+      color: Colors.white,
+      child: SafeArea(
+        child: Stack(
+          children: [
+            Center(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 24,
+                  vertical: 24,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Photo card
+                    ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxWidth: media.size.width * 0.74,
+                        maxHeight: media.size.height * 0.55,
+                      ),
+                      child: AspectRatio(
+                        aspectRatio: 3 / 4,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(24),
+                            border: Border.all(
+                              color: Colors.black.withOpacity(0.06),
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.12),
+                                blurRadius: 26,
+                                offset: const Offset(0, 12),
+                              ),
+                            ],
+                          ),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(23),
+                            child: InteractiveViewer(
+                              minScale: 1,
+                              maxScale: 4,
+                              child: Image.network(
+                                url,
+                                fit: BoxFit.cover,
+                                loadingBuilder: (c, child, progress) =>
+                                    progress == null
+                                        ? child
+                                        : const ColoredBox(
+                                          color: Color(0xFFF1F2F5),
+                                          child: Center(
+                                            child: CircularProgressIndicator(),
+                                          ),
+                                        ),
+                                errorBuilder: (_, __, ___) => const ColoredBox(
+                                  color: Color(0xFFF1F2F5),
+                                  child: Center(
+                                    child: Icon(
+                                      Icons.person_rounded,
+                                      color: Colors.black26,
+                                      size: 72,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 22),
+                    // Driver name + verified tick
+                    if (name.isNotEmpty)
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Flexible(
+                            child: Text(
+                              name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 21,
+                                fontWeight: FontWeight.w800,
+                                color: Colors.black87,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          const Icon(
+                            Icons.verified_rounded,
+                            color: Color(0xFF2563EB),
+                            size: 20,
+                          ),
+                        ],
+                      ),
+                    // Rating pill
+                    if (rating != null) ...[
+                      const SizedBox(height: 12),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 7,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFFF7E6),
+                          borderRadius: BorderRadius.circular(999),
+                          border: Border.all(color: const Color(0xFFFFE3A3)),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(
+                              Icons.star_rounded,
+                              color: Color(0xFFE79700),
+                              size: 19,
+                            ),
+                            const SizedBox(width: 5),
+                            Text(
+                              rating,
+                              style: const TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w800,
+                                color: Color(0xFF7A5A00),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+
+            // Close button
+            Positioned(
+              top: 8,
+              right: 12,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(999),
+                onTap: () => Navigator.of(context).pop(),
+                child: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: const BoxDecoration(
+                    color: Color(0xFFF1F2F5),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(
+                    Icons.close_rounded,
+                    color: Colors.black87,
+                    size: 22,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A5 + A4: Safety toolkit bottom sheet — emergency call, share live trip,
+/// and trusted contacts (one-tap share the live link via SMS).
+class _SafetySheet extends StatefulWidget {
+  final String trackUrl;
+  final String driverName;
+
+  const _SafetySheet({required this.trackUrl, required this.driverName});
+
+  @override
+  State<_SafetySheet> createState() => _SafetySheetState();
+}
+
+class _SafetySheetState extends State<_SafetySheet> {
+  final TrustedContactsStore _store = const TrustedContactsStore();
+  List<TrustedContact> _contacts = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final list = await _store.load();
+    if (!mounted) return;
+    setState(() => _contacts = list);
+  }
+
+  String get _message => 'Track my Hoppr ride live: ${widget.trackUrl}';
+
+  Future<void> _callEmergency() async {
+    final prefs = await SharedPreferences.getInstance();
+    final sos = (prefs.getString('sosNumber') ?? '').trim();
+    if (sos.isEmpty) {
+      if (mounted) AppToasts.showError(context, 'SOS number not set');
+      return;
+    }
+    final n = sanitizePhoneNumber(sos);
+    if (n.isEmpty) return;
+    await launchPhoneDialer(n);
+  }
+
+  void _shareLiveTrip() => Share.share(_message);
+
+  Future<void> _smsContact(TrustedContact ct) async {
+    final uri = Uri.parse(
+      'sms:${ct.phone}?body=${Uri.encodeComponent(_message)}',
+    );
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      _shareLiveTrip();
+    }
+  }
+
+  Future<void> _addContact() async {
+    final nameC = TextEditingController();
+    final phoneC = TextEditingController();
+
+    Widget field({
+      required TextEditingController controller,
+      required String hint,
+      required IconData icon,
+      TextInputType? keyboard,
+      TextCapitalization caps = TextCapitalization.none,
+    }) {
+      return Container(
+        decoration: BoxDecoration(
+          color: const Color(0xFFF5F6F8),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: Colors.black.withOpacity(0.05)),
+        ),
+        child: TextField(
+          controller: controller,
+          keyboardType: keyboard,
+          textCapitalization: caps,
+          decoration: InputDecoration(
+            hintText: hint,
+            prefixIcon: Icon(icon, color: Colors.grey.shade600),
+            border: InputBorder.none,
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 6,
+              vertical: 16,
+            ),
+          ),
+        ),
+      );
+    }
+
+    final saved = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) {
+        return Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(ctx).viewInsets.bottom,
+          ),
+          child: SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Center(
+                    child: Container(
+                      width: 40,
+                      height: 5,
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.14),
+                        borderRadius: BorderRadius.circular(99),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  Row(
+                    children: [
+                      Container(
+                        height: 44,
+                        width: 44,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF2563EB).withOpacity(0.10),
+                          borderRadius: BorderRadius.circular(13),
+                        ),
+                        child: const Icon(
+                          Icons.person_add_alt_1_rounded,
+                          color: Color(0xFF2563EB),
+                          size: 24,
+                        ),
+                      ),
+                      const SizedBox(width: 13),
+                      const Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Add trusted contact',
+                              style: TextStyle(
+                                fontSize: 17,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            SizedBox(height: 2),
+                            Text(
+                              'Share your live trip with one tap',
+                              style: TextStyle(
+                                fontSize: 12.5,
+                                color: Colors.grey,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 22),
+                  field(
+                    controller: nameC,
+                    hint: 'Name',
+                    icon: Icons.person_outline_rounded,
+                    caps: TextCapitalization.words,
+                  ),
+                  const SizedBox(height: 12),
+                  field(
+                    controller: phoneC,
+                    hint: 'Phone number',
+                    icon: Icons.phone_outlined,
+                    keyboard: TextInputType.phone,
+                  ),
+                  const SizedBox(height: 22),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 52,
+                    child: ElevatedButton(
+                      onPressed: () => Navigator.pop(ctx, true),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF2563EB),
+                        foregroundColor: Colors.white,
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                      child: const Text(
+                        'Save contact',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+
+    if (saved == true && phoneC.text.trim().isNotEmpty) {
+      await _store.add(
+        TrustedContact(
+          name: nameC.text.trim().isEmpty ? 'Contact' : nameC.text.trim(),
+          phone: phoneC.text.trim(),
+        ),
+      );
+      await _load();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 18),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 5,
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.14),
+                    borderRadius: BorderRadius.circular(99),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Container(
+                    height: 40,
+                    width: 40,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE11D48).withOpacity(0.10),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Icon(
+                      Icons.shield_rounded,
+                      color: Color(0xFFE11D48),
+                      size: 22,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Safety toolkit',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        Text(
+                          'Your safety, our priority',
+                          style: TextStyle(fontSize: 12.5, color: Colors.grey),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 18),
+              _actionCard(
+                icon: Icons.emergency_share_rounded,
+                color: const Color(0xFFE11D48),
+                title: 'Call emergency',
+                subtitle: 'Reach the Hoppr SOS line right away',
+                onTap: _callEmergency,
+              ),
+              const SizedBox(height: 10),
+              _actionCard(
+                icon: Icons.ios_share_rounded,
+                color: const Color(0xFF2563EB),
+                title: 'Share live trip',
+                subtitle: 'Send your live tracking link to anyone',
+                onTap: _shareLiveTrip,
+              ),
+              const SizedBox(height: 22),
+              Row(
+                children: [
+                  const Expanded(
+                    child: Text(
+                      'Trusted contacts',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  TextButton.icon(
+                    onPressed: _addContact,
+                    icon: const Icon(Icons.add, size: 18),
+                    label: const Text('Add'),
+                    style: TextButton.styleFrom(
+                      foregroundColor: const Color(0xFF2563EB),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              if (_contacts.isEmpty)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF7F8FA),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: const Text(
+                    'Add a trusted contact to share your live trip with one tap.',
+                    style: TextStyle(fontSize: 13, color: Colors.black54),
+                  ),
+                )
+              else
+                ..._contacts.map(_contactRow),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _actionCard({
+    required IconData icon,
+    required Color color,
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(16),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: color.withOpacity(0.25)),
+          ),
+          child: Row(
+            children: [
+              Container(
+                height: 42,
+                width: 42,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: color.withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(icon, color: color, size: 22),
+              ),
+              const SizedBox(width: 13),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: TextStyle(
+                        fontSize: 15.5,
+                        fontWeight: FontWeight.w700,
+                        color: color,
+                      ),
+                    ),
+                    const SizedBox(height: 1),
+                    Text(
+                      subtitle,
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        color: Colors.black54,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(Icons.chevron_right, color: Colors.grey),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _contactRow(TrustedContact ct) {
+    final initial =
+        ct.name.trim().isNotEmpty ? ct.name.trim()[0].toUpperCase() : '?';
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: Colors.black.withOpacity(0.06)),
+        ),
+        child: Row(
+          children: [
+            CircleAvatar(
+              radius: 18,
+              backgroundColor: const Color(0xFF2563EB),
+              child: Text(
+                initial,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    ct.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 14,
+                    ),
+                  ),
+                  Text(
+                    ct.phone,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 12.5, color: Colors.grey),
+                  ),
+                ],
+              ),
+            ),
+            IconButton(
+              tooltip: 'Share live trip',
+              onPressed: () => _smsContact(ct),
+              icon: const Icon(Icons.send_rounded, color: Color(0xFF2563EB)),
+            ),
+            IconButton(
+              tooltip: 'Remove',
+              onPressed: () async {
+                await _store.remove(ct.phone);
+                await _load();
+              },
+              icon: const Icon(Icons.close_rounded, color: Colors.grey),
+            ),
+          ],
+        ),
       ),
     );
   }

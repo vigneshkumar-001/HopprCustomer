@@ -10,6 +10,7 @@ import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:hopper/Presentation/BookRide/Screens/book_map_screen.dart';
 import 'package:hopper/Presentation/BookRide/Screens/locate_on_map_screen.dart';
 import 'package:hopper/uitls/map/search.dart';
+import 'package:hopper/Presentation/OnBoarding/utils/saved_addresses_store.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class BookRideSearchScreen extends StatefulWidget {
@@ -46,6 +47,11 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
 
   /// recent locations (encoded as String)
   List<String> _recentLocations = [];
+
+  /// saved favourite places (Home / Work / others) — shared with the
+  /// package flow via the same store.
+  final SavedAddressesStore _savedStore = const SavedAddressesStore();
+  List<SavedAddressEntry> _savedPlaces = const [];
 
   /// Quick "favourite" nearby destinations shown when the field is empty.
   static const List<Map<String, dynamic>> _quickDestinations = [
@@ -107,6 +113,7 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
 
     // Keyboard is NOT auto-opened — the user taps a field to open it.
     _loadRecentLocations();
+    _loadSavedPlaces();
   }
 
   @override
@@ -330,6 +337,34 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
     final prefs = await SharedPreferences.getInstance();
     final recentStrings = prefs.getStringList('recent_locations') ?? [];
     setState(() => _recentLocations = recentStrings);
+  }
+
+  Future<void> _loadSavedPlaces() async {
+    final list = await _savedStore.load();
+    if (!mounted) return;
+    setState(() => _savedPlaces = _savedStore.normalized(list));
+  }
+
+  IconData _savedIcon(String label) {
+    switch (label.toLowerCase()) {
+      case 'home':
+        return Icons.home_rounded;
+      case 'work':
+      case 'office':
+        return Icons.work_rounded;
+      default:
+        return Icons.star_rounded;
+    }
+  }
+
+  void _selectSavedPlace(SavedAddressEntry e) {
+    final desc = e.address.mapAddress.trim().isNotEmpty
+        ? e.address.mapAddress
+        : (e.address.address.trim().isNotEmpty ? e.address.address : e.label);
+    _handleSelection({
+      'description': desc,
+      'location': LatLng(e.address.latitude, e.address.longitude),
+    });
   }
 
   /// Premium, equal-sized quick-destination card (2-per-row grid). Staggers
@@ -672,6 +707,59 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
                                 ],
                               ),
                               const SizedBox(height: 18),
+                              // Saved favourite places (Home / Work / others)
+                              if (_savedPlaces.isNotEmpty) ...[
+                                const Text(
+                                  'Saved places',
+                                  style: TextStyle(
+                                    color: Colors.black87,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                ..._savedPlaces.map((e) {
+                                  final desc =
+                                      e.address.mapAddress.trim().isNotEmpty
+                                          ? e.address.mapAddress
+                                          : (e.address.address.trim().isNotEmpty
+                                              ? e.address.address
+                                              : e.label);
+                                  return ListTile(
+                                    contentPadding: EdgeInsets.zero,
+                                    leading: Container(
+                                      height: 38,
+                                      width: 38,
+                                      alignment: Alignment.center,
+                                      decoration: BoxDecoration(
+                                        color: const Color(
+                                          0xFF2563EB,
+                                        ).withOpacity(0.10),
+                                        borderRadius: BorderRadius.circular(11),
+                                      ),
+                                      child: Icon(
+                                        _savedIcon(e.label),
+                                        color: const Color(0xFF2563EB),
+                                        size: 20,
+                                      ),
+                                    ),
+                                    title: Text(
+                                      e.label,
+                                      style: const TextStyle(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                    subtitle: Text(
+                                      desc,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(fontSize: 12.5),
+                                    ),
+                                    onTap: () => _selectSavedPlace(e),
+                                  );
+                                }),
+                                const SizedBox(height: 8),
+                              ],
                               if (_recentLocations.isNotEmpty)
                                 const Text(
                                   'Recent locations',

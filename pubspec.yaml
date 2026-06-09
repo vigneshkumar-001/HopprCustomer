@@ -27,6 +27,7 @@ dependencies:
   country_picker: any
   intl_phone_field: any
   pin_code_fields: any
+  smart_auth: ^3.2.0
   google_maps_flutter: any
   geolocator: any
   permission_handler: any
