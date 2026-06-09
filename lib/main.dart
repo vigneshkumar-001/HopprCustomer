@@ -29,14 +29,15 @@ Future<void> main() async {
   _initMapsRenderer();
 
   // Keep only critical init work before first frame.
-  await Firebase.initializeApp();
-  AppLogger.log.i('Firebase.initializeApp() completed in main()');
+  final firebaseReady = await _initializeFirebaseCore();
 
   // Register background handler BEFORE runApp (required for terminated/background delivery).
-  try {
-    FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
-  } catch (e, st) {
-    AppLogger.log.w('FCM BG handler register failed: $e\n$st');
+  if (firebaseReady) {
+    try {
+      FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+    } catch (e, st) {
+      AppLogger.log.w('FCM BG handler register failed: $e\n$st');
+    }
   }
 
   await initController();
@@ -58,7 +59,20 @@ Future<void> main() async {
   );
 
   runApp(const MyApp());
-  unawaited(_bootstrapBackgroundServices());
+  if (firebaseReady) {
+    unawaited(_bootstrapBackgroundServices());
+  }
+}
+
+Future<bool> _initializeFirebaseCore() async {
+  try {
+    await Firebase.initializeApp();
+    AppLogger.log.i('Firebase.initializeApp() completed in main()');
+    return true;
+  } catch (e, st) {
+    AppLogger.log.e('Firebase initialization failed: $e\n$st');
+    return false;
+  }
 }
 
 void _initMapsRenderer() {
