@@ -9,6 +9,7 @@ import 'package:hopper/Presentation/Authentication/controller/authcontroller.dar
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:country_picker/country_picker.dart';
 import 'package:get/get.dart';
+import 'package:smart_auth/smart_auth.dart';
 
 class MobileScreens extends StatefulWidget {
   const MobileScreens({super.key});
@@ -94,6 +95,41 @@ class _MobileScreensState extends State<MobileScreens> {
   void initState() {
     super.initState();
     controller.initCountrySelection();
+    // Auto-detect the device phone number (Android "Choose a phone number"
+    // picker) and pre-fill the field.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _autoFillPhoneNumber());
+  }
+
+  void _setCountry(String code, String flag) {
+    controller.selectedCountryCode.value = code;
+    controller.countryCodeController.text = code;
+    selectedCountryFlag = flag;
+  }
+
+  Future<void> _autoFillPhoneNumber() async {
+    // Never override what the user already typed.
+    if (!mounted || controller.mobileNumber.text.trim().isNotEmpty) return;
+    try {
+      final res = await SmartAuth.instance.requestPhoneNumberHint();
+      if (!mounted || !res.hasData) return;
+
+      final digits = (res.data ?? '').replaceAll(RegExp(r'[^0-9]'), '');
+      if (digits.isEmpty) return;
+
+      // Best-effort: detect the country code from the prefix, then keep the
+      // last 10 as the national number (matches the field's 10-digit limit).
+      if (digits.startsWith('234') && digits.length >= 13) {
+        _setCountry('+234', '🇳🇬');
+      } else if (digits.startsWith('91') && digits.length >= 12) {
+        _setCountry('+91', '🇮🇳');
+      }
+      final national =
+          digits.length > 10 ? digits.substring(digits.length - 10) : digits;
+      controller.mobileNumber.text = national;
+      controller.errorText.value = '';
+    } catch (_) {
+      // Picker unavailable / user dismissed — silently ignore.
+    }
   }
 
   @override

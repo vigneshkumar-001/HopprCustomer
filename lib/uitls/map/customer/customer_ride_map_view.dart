@@ -262,6 +262,15 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       _syncRoute(force: true);
       _syncMarkers(force: true);
       _rebuildPolylines();
+      // Drop the stale pickup-phase motion (queued poses + carried-over
+      // bearing) so the car doesn't glide the wrong way into the drop leg. It
+      // re-seeds at the current display pose and re-derives heading from the
+      // drop route on the next location update.
+      if (_vehiclePos != null) {
+        _motion.reset(_vehiclePos!, bearing: _vehicleBearing);
+      } else {
+        _motion.clearQueue();
+      }
       // New phase: allow exactly one fresh fit once its valid route arrives.
       _fittedForMode = null;
     }
@@ -888,10 +897,13 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     double? rawBearing,
     double? toleranceMeters,
   }) {
-    final routeForSnap =
-        widget.mode == RideMapMode.toDrop && _remainingRoute.length >= 2
-            ? _remainingRoute
-            : _fullRoute;
+    // Always snap onto the FULL route in BOTH phases. `_lastTrimIndex` — used
+    // as the snap-window base in `_nearestSnapCandidate` — is a `_fullRoute`-
+    // space index, so snapping onto the trimmed `_remainingRoute` in drop mode
+    // mis-indexed the window (biased the snap forward → visible gap) and took
+    // the bearing from the wrong segment (→ car faced the wrong direction).
+    // Pickup always used `_fullRoute` and was perfect; drop now matches it.
+    final routeForSnap = _fullRoute;
     final fallbackBearing = rawBearing ?? _vehicleBearing;
 
     if (routeForSnap.length < 2) {

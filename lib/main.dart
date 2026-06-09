@@ -88,10 +88,23 @@ class MyApp extends StatelessWidget {
         return GetMaterialApp(
           debugShowCheckedModeBanner: false,
           scaffoldMessengerKey: AppToasts.messengerKey,
+          // App-wide premium page transition for ALL GetX navigations
+          // (Get.to / Get.off / Get.offAll). Smooth iOS-style slide.
+          defaultTransition: Transition.cupertino,
+          transitionDuration: const Duration(milliseconds: 300),
           theme: ThemeData(
             scaffoldBackgroundColor: AppColors.commonWhite,
             textSelectionTheme: const TextSelectionThemeData(
               selectionHandleColor: Colors.black,
+            ),
+            // App-wide premium page transition for ALL Navigator.push
+            // (MaterialPageRoute) navigations — same smooth slide on every
+            // platform, so the whole app feels consistent and polished.
+            pageTransitionsTheme: const PageTransitionsTheme(
+              builders: {
+                TargetPlatform.android: CupertinoPageTransitionsBuilder(),
+                TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
+              },
             ),
           ),
           home: const SplashScreens(),

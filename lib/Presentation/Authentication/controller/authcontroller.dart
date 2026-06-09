@@ -141,6 +141,7 @@ class AuthController extends GetxController {
       );
     } catch (e) {
       isLoading.value = false;
+      AppLogger.log.e(e);
       return '';
     }
     isLoading.value = false;

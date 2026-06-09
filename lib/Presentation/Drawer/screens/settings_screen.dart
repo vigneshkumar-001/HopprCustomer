@@ -1,5 +1,10 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:country_picker/country_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:hopper/api/repository/request.dart';
+import 'package:hopper/api/repository/api_consents.dart';
+import 'package:hopper/Presentation/Authentication/screens/mobile_screens.dart';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:hopper/Core/Utility/app_loader.dart';
@@ -319,8 +324,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
       await controller.saveData(_formKey, context);
       _resetReadOnlyUiState();
+      // Save pressed -> drop focus / close the keyboard.
+      if (mounted) FocusScope.of(context).unfocus();
     } else {
+      // Edit pressed -> enter edit mode and auto-focus the name field.
       controller.toggleEdit();
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (!mounted) return;
+        await _scrollToField(_nameKey);
+        if (!mounted) return;
+        FocusScope.of(context).requestFocus(_nameFocus);
+      });
     }
   }
 
@@ -338,6 +352,47 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 : const SizedBox.shrink();
           }),
         ],
+      ),
+      // Fixed Edit / Save action at the bottom.
+      bottomNavigationBar: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 6, 16, 12),
+          child: Obx(() {
+            final editing = controller.isEditing.value;
+            return SizedBox(
+              width: double.infinity,
+              height: 52,
+              child: ElevatedButton.icon(
+                key: profileKeys.profileEditButton,
+                onPressed: () {
+                  HapticFeedback.mediumImpact();
+                  _handleEditSave();
+                },
+                style: ElevatedButton.styleFrom(
+                  // Save = green (confirm), Edit = black (neutral) → clearly different.
+                  backgroundColor:
+                      editing ? const Color(0xFF12B76A) : AppColors.commonBlack,
+                  foregroundColor: Colors.white,
+                  elevation: 0,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                icon: Icon(
+                  editing ? Icons.check_circle_rounded : Icons.edit_rounded,
+                  size: 20,
+                ),
+                label: Text(
+                  editing ? 'Save' : 'Edit',
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            );
+          }),
+        ),
       ),
     );
   }
@@ -369,7 +424,105 @@ class _SettingsScreenState extends State<SettingsScreen> {
         const SizedBox(height: 20),
         buildProfileSection(),
         buildBasicInfoForm(),
+        const SizedBox(height: 24),
       ],
+    );
+  }
+
+  void _showLogoutDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return Dialog(
+          backgroundColor: AppColors.commonWhite,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.red.withOpacity(0.1),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.logout, color: Colors.red, size: 28),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Log out',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Do you want to log out?',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 14, color: Colors.black54),
+                ),
+                const SizedBox(height: 24),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () => Navigator.pop(context),
+                        style: OutlinedButton.styleFrom(
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                        ),
+                        child: const Text('No'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: () {
+                          Navigator.pop(context);
+                          _logout(context);
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.red,
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                        ),
+                        child: const Text('Yes'),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _logout(BuildContext context) async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('token');
+    unawaited(
+      Request.sendLogoutFireAndForget(url: ApiConsents.logout, token: token),
+    );
+    unawaited(prefs.remove('token'));
+    unawaited(prefs.remove('refreshToken'));
+    unawaited(prefs.remove('sessionToken'));
+    unawaited(prefs.remove('role'));
+    unawaited(prefs.remove('contacts_synced'));
+
+    controller.clearSession();
+
+    if (!context.mounted) return;
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(builder: (_) => MobileScreens()),
+      (route) => false,
     );
   }
 
@@ -384,30 +537,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: Image.asset(AppImages.backImage, height: 19, width: 19),
             ),
           const Spacer(),
-          CustomTextFields.textWithStyles700('Settings', fontSize: 20),
+          CustomTextFields.textWithStyles700('Profile', fontSize: 20),
           const Spacer(),
-          Obx(
-                () => Material(
-              color: Colors.transparent,
-              child: InkWell(
-                key: controller.isEditing.value
-                    ? profileKeys.profileEditButton
-                    : null,
-                borderRadius: BorderRadius.circular(5),
-                onTap: _handleEditSave,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 11,
-                    vertical: 6,
-                  ),
-                  decoration: BoxDecoration(
-                    color: AppColors.containerColor,
-                    borderRadius: BorderRadius.circular(5),
-                  ),
-                  child: CustomTextFields.textWithStyles600(
-                    controller.isEditing.value ? "Save" : "Edit",
-                  ),
+          // Logout (moved here from the Edit button position).
+          Material(
+            color: Colors.transparent,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: () => _showLogoutDialog(context),
+              child: Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.red.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(8),
                 ),
+                child: const Icon(Icons.logout, color: Colors.red, size: 22),
               ),
             ),
           ),
