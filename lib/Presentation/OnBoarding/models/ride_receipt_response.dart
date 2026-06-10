@@ -32,6 +32,12 @@ class RideReceiptResponse {
 
   bool get hasText => text.trim().isNotEmpty;
   bool get hasHtml => html.trim().isNotEmpty;
+
+  /// Ready-to-open signed receipt link from the backend (no local PDF build).
+  /// Empty when the backend hasn't supplied one (older builds) -> caller then
+  /// falls back to the HTML/text export.
+  String get downloadUrl => data?.downloadUrl ?? '';
+  bool get hasDownloadUrl => downloadUrl.trim().isNotEmpty;
 }
 
 class ReceiptData {
@@ -47,6 +53,7 @@ class ReceiptData {
   final double total;
   final double discount;
   final String downloadPath;
+  final String downloadUrl;
 
   const ReceiptData({
     required this.currency,
@@ -61,6 +68,7 @@ class ReceiptData {
     required this.total,
     required this.discount,
     required this.downloadPath,
+    required this.downloadUrl,
   });
 
   factory ReceiptData.fromJson(Map<String, dynamic> json) {
@@ -86,6 +94,10 @@ class ReceiptData {
       total: _toDouble(fare is Map ? fare['total'] : null),
       discount: _toDouble(fare is Map ? fare['discount'] : null),
       downloadPath: (json['downloadPath'] ?? '').toString(),
+      // Ready-to-open signed receipt link (full URL). Tolerate either
+      // `downloadUrl` (new) or a `downloadLink` alias.
+      downloadUrl:
+          (json['downloadUrl'] ?? json['downloadLink'] ?? '').toString(),
     );
   }
 

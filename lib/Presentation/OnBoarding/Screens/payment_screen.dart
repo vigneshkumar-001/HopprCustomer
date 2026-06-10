@@ -29,10 +29,12 @@ import 'package:get/get.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:printing/printing.dart';
 import 'package:pdf/pdf.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:hopper/api/dataSource/apiDataSource.dart';
 import 'package:hopper/Presentation/OnBoarding/models/ride_receipt_response.dart';
+import 'package:hopper/Presentation/OnBoarding/models/saved_card.dart';
 
 class PaymentScreen extends StatefulWidget {
   final String? bookingId;
@@ -75,6 +77,14 @@ class _PaymentScreenState extends State<PaymentScreen> {
   bool payPalLoading = false;
   bool flutterWaveLoading = false;
   bool payStackLoading = false;
+
+  // ── Paystack saved cards (one-tap "pay with card") ──────────────────────
+  // Card numbers are entered on Paystack's hosted page only — never sent to
+  // our API. We keep only the safe display fields returned by the backend.
+  List<SavedCard> _savedCards = [];
+  bool _cardsLoading = false;
+  bool _addingCard = false;
+  String? _busyCardId; // id of the card currently being charged / deleted
 
   Future<void> _markCustomerCashPaymentCompleted() async {
     final bookingId = (widget.bookingId ?? '').trim();
@@ -897,6 +907,284 @@ class _PaymentScreenState extends State<PaymentScreen> {
     }
   }
 
+  // ════════════════════════════════════════════════════════════════════════
+  // Paystack saved cards. The card number is collected on Paystack's hosted
+  // page only and never reaches our API. These calls mirror the existing
+  // raw-http payment flows (payWithPayStack) to stay consistent and avoid
+  // touching shared API infrastructure.
+  // ════════════════════════════════════════════════════════════════════════
+  static const String _cardsApiBase =
+      'https://bk.myhoppr.com/api/customer/cards';
+
+  Future<Map<String, String>> _authHeaders() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('token');
+    return {
+      'Content-Type': 'application/json',
+      if (token != null && token.isNotEmpty) 'Authorization': 'Bearer $token',
+    };
+  }
+
+  /// GET /api/customer/cards -> data:[{ id, last4, cardType, bank, label }]
+  Future<void> _loadSavedCards() async {
+    if (!mounted) return;
+    setState(() => _cardsLoading = true);
+    try {
+      final res = await http.get(
+        Uri.parse(_cardsApiBase),
+        headers: await _authHeaders(),
+      );
+      if (res.statusCode == 200) {
+        final body = jsonDecode(res.body);
+        final list = (body is Map) ? body['data'] : null;
+        final cards = <SavedCard>[];
+        if (list is List) {
+          for (final e in list) {
+            if (e is Map<String, dynamic>) {
+              final c = SavedCard.fromJson(e);
+              if (c.isValid) cards.add(c);
+            }
+          }
+        }
+        if (mounted) setState(() => _savedCards = cards);
+      }
+    } catch (e) {
+      AppLogger.log.e('Load saved cards failed: $e');
+    } finally {
+      if (mounted) setState(() => _cardsLoading = false);
+    }
+  }
+
+  /// POST /api/customer/cards/init -> open Paystack page -> refresh on return.
+  /// The verify charge (₦50) is credited back to the customer's wallet.
+  Future<void> _addNewCard() async {
+    if (_addingCard) return;
+    setState(() => _addingCard = true);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final email = prefs.getString('flutterwave_email');
+      final res = await http.post(
+        Uri.parse('$_cardsApiBase/init'),
+        headers: await _authHeaders(),
+        body: jsonEncode({
+          if (email != null && email.trim().isNotEmpty) 'email': email.trim(),
+        }),
+      );
+      final data = jsonDecode(res.body);
+      final authUrl =
+          (data is Map) ? data['authorization_url']?.toString() : null;
+      if ((res.statusCode == 200 || res.statusCode == 201) &&
+          authUrl != null &&
+          authUrl.isNotEmpty) {
+        final int before = _savedCards.length;
+        if (!mounted) return;
+        // Paystack collects the card and charges the small verify amount; on
+        // return we always refresh (Paystack may not emit a standard signal).
+        await Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => PaymentWebView(url: authUrl)),
+        );
+        await _loadSavedCards();
+        walletController.getWalletBalance();
+        if (!mounted) return;
+        if (_savedCards.length > before) {
+          AppToasts.showSuccess(
+            context,
+            'Card added · ₦50 was added to your wallet',
+          );
+        }
+      } else {
+        final msg = (data is Map ? data['message'] : null)?.toString() ??
+            'Could not start card setup';
+        if (mounted) AppToasts.showError(context, msg);
+      }
+    } catch (e) {
+      AppLogger.log.e('Card init failed: $e');
+      if (mounted) {
+        AppToasts.showError(
+          context,
+          'Could not start card setup. Please try again.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _addingCard = false);
+    }
+  }
+
+  /// POST /api/customer/cards/charge -> { success, bookingStatus:"PAID" }.
+  /// One tap, no card re-entry. On success shows the Payment Successful sheet.
+  Future<void> _payWithSavedCard(SavedCard card) async {
+    if (_busyCardId != null) return;
+    final bookingId = (widget.bookingId ?? '').trim();
+    if (bookingId.isEmpty) {
+      AppToasts.showError(context, 'Missing booking reference');
+      return;
+    }
+    setState(() => _busyCardId = card.id);
+    bool success = false;
+    try {
+      final res = await http.post(
+        Uri.parse('$_cardsApiBase/charge'),
+        headers: await _authHeaders(),
+        body: jsonEncode({'userBookingId': bookingId, 'cardId': card.id}),
+      );
+      final data = jsonDecode(res.body);
+      final paid = (data is Map) &&
+          (data['success'] == true ||
+              data['bookingStatus']?.toString().toUpperCase() == 'PAID');
+      if ((res.statusCode == 200 || res.statusCode == 201) && paid) {
+        success = true;
+      } else {
+        final msg = (data is Map ? data['message'] : null)?.toString() ??
+            'Card payment failed';
+        if (mounted) AppToasts.showError(context, msg);
+      }
+    } catch (e) {
+      AppLogger.log.e('Card charge failed: $e');
+      if (mounted) {
+        AppToasts.showError(context, 'Card payment failed. Please try again.');
+      }
+    } finally {
+      if (mounted) setState(() => _busyCardId = null);
+    }
+    if (success && mounted) {
+      await _completePaymentFlow(paymentMethod: 'Card');
+    }
+  }
+
+  /// DELETE /api/customer/cards/{cardId}
+  Future<void> _deleteSavedCard(SavedCard card) async {
+    if (_busyCardId != null) return;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Remove card'),
+        content: Text('Remove ${card.display} from your account?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Remove', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    setState(() => _busyCardId = card.id);
+    try {
+      final res = await http.delete(
+        Uri.parse('$_cardsApiBase/${Uri.encodeComponent(card.id)}'),
+        headers: await _authHeaders(),
+      );
+      if (res.statusCode == 200 || res.statusCode == 204) {
+        if (mounted) {
+          setState(() => _savedCards.removeWhere((c) => c.id == card.id));
+          AppToasts.showSuccess(context, 'Card removed');
+        }
+      } else {
+        String msg = 'Could not remove card';
+        try {
+          final d = jsonDecode(res.body);
+          if (d is Map && d['message'] != null) msg = d['message'].toString();
+        } catch (_) {}
+        if (mounted) AppToasts.showError(context, msg);
+      }
+    } catch (e) {
+      AppLogger.log.e('Card delete failed: $e');
+      if (mounted) {
+        AppToasts.showError(context, 'Could not remove card. Please try again.');
+      }
+    } finally {
+      if (mounted) setState(() => _busyCardId = null);
+    }
+  }
+
+  Widget _buildSavedCardRow(SavedCard card) {
+    final bool busy = _busyCardId == card.id;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Container(
+        decoration: BoxDecoration(
+          border: Border.all(color: AppColors.containerColor, width: 1),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
+        child: Row(
+          children: [
+            const Icon(Icons.credit_card, size: 24, color: Colors.black87),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    card.display,
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.black,
+                    ),
+                  ),
+                  if (card.bank.trim().isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        card.bank,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFF667085),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            if (busy)
+              const SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            else ...[
+              GestureDetector(
+                onTap: () => _payWithSavedCard(card),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(vertical: 7, horizontal: 16),
+                  decoration: BoxDecoration(
+                    color: AppColors.commonBlack,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Text(
+                    'Pay',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 4),
+              GestureDetector(
+                onTap: () => _deleteSavedCard(card),
+                child: const Padding(
+                  padding: EdgeInsets.all(4),
+                  child:
+                      Icon(Icons.delete_outline, size: 22, color: Colors.red),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildUnderDevelopmentDialog(BuildContext context) {
     return Dialog(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -949,6 +1237,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
     super.initState();
     walletController.getWalletBalance();
     controller.getProfileData();
+    _loadSavedCards();
   }
 
   @override
@@ -1270,26 +1559,33 @@ class _PaymentScreenState extends State<PaymentScreen> {
                   // SizedBox(height: 15),
 
                   CustomTextFields.textWithStyles700('Card', fontSize: 16),
-                  SizedBox(height: 15),
+                  const SizedBox(height: 15),
+                  if (_cardsLoading && _savedCards.isEmpty)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      child: Center(child: AppLoader.circularLoader()),
+                    ),
+                  ..._savedCards.map(_buildSavedCardRow),
                   PackageContainer.customWalletContainer(
-                    onTap: () {
-                      showDialog(
-                        context: context,
-                        builder:
-                            (context) => _buildUnderDevelopmentDialog(context),
-                      );
-                    },
-
-                    title: 'Add a new card',
+                    onTap: _addNewCard,
+                    title: _addingCard
+                        ? 'Opening secure card setup…'
+                        : 'Add a new card',
                     textColor: AppColors.resendBlue,
                     fontWeight: FontWeight.w400,
                     leadingImagePath: AppImages.borderAdd,
-                    trailing: Image.asset(
-                      AppImages.rightArrow,
-                      color: AppColors.commonBlack,
-                      width: 16,
-                      height: 16,
-                    ),
+                    trailing: _addingCard
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : Image.asset(
+                            AppImages.rightArrow,
+                            color: AppColors.commonBlack,
+                            width: 16,
+                            height: 16,
+                          ),
                   ),
                   SizedBox(height: 15),
 
@@ -1640,11 +1936,37 @@ class _PaymentSuccessSheetState extends State<_PaymentSuccessSheet> {
     AppToasts.showSuccess(context, 'Receipt copied');
   }
 
-  void _share() => Share.share(_shareText);
+  // Share the openable receipt link when the backend provides one (recipient can
+  // view + Save as PDF in the browser), else fall back to the text summary.
+  void _share() {
+    final url = _receipt?.downloadUrl ?? '';
+    if (url.isNotEmpty) {
+      Share.share('$_shareText\n\nView receipt: $url');
+    } else {
+      Share.share(_shareText);
+    }
+  }
 
   Future<void> _download() async {
+    // Preferred path: backend-provided ready-to-open receipt link. Opens the
+    // styled receipt in the device browser (which has its own "Save as PDF").
+    // No PDF packages / building needed.
+    final url = _receipt?.downloadUrl ?? '';
+    if (url.isNotEmpty) {
+      try {
+        final ok = await launchUrl(
+          Uri.parse(url),
+          mode: LaunchMode.externalApplication,
+        );
+        if (ok) return;
+      } catch (_) {
+        // fall through to the local PDF/text export below
+      }
+    }
+
+    // Fallback (older backend, no downloadUrl): build the PDF locally from the
+    // receipt HTML; if even that is missing, use the local text export.
     final html = _receipt?.html ?? '';
-    // No backend HTML yet -> fall back to the local text export (never crash).
     if (html.trim().isEmpty) {
       await widget.onFallbackDownload();
       return;
