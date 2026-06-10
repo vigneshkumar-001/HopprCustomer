@@ -10,6 +10,7 @@ import 'package:hopper/Presentation/Authentication/screens/mobile_screens.dart';
 import 'package:hopper/Presentation/Drawer/controller/profle_cotroller.dart';
 import 'package:hopper/Presentation/Drawer/controller/ride_history_controller.dart';
 import 'package:hopper/Presentation/OnBoarding/Widgets/custom_bottomnavigation.dart';
+import 'package:hopper/Presentation/OnBoarding/Screens/intro_screens.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class SplashScreens extends StatefulWidget {
@@ -38,6 +39,18 @@ class _SplashScreensState extends State<SplashScreens> {
     if (token != null && token.isNotEmpty) {
       Get.off(() => CommonBottomNavigation(initialIndex: 0));
       unawaited(_warmupForLoggedInUser());
+      return;
+    }
+
+    // Not logged in: still fetch app-settings now (gMapKey + sosNumber) so the
+    // billing-enabled Maps key is ready before the user reaches login/search.
+    // Runs from the splash (GetX is up) — a reliable point on every cold open.
+    unawaited(Get.put(AuthController()).getAppSettings());
+
+    // First launch (not logged in, onboarding not seen) -> show the intro.
+    final onboardingSeen = prefs.getBool('onboarding_seen') ?? false;
+    if (!onboardingSeen) {
+      Get.off(() => const IntroScreens());
       return;
     }
 

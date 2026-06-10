@@ -27,8 +27,14 @@ import 'package:flutter_stripe/flutter_stripe.dart';
 import 'package:http/http.dart' as http;
 import 'package:get/get.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:printing/printing.dart';
+import 'package:pdf/pdf.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:hopper/api/dataSource/apiDataSource.dart';
+import 'package:hopper/Presentation/OnBoarding/models/ride_receipt_response.dart';
+import 'package:hopper/Presentation/OnBoarding/models/saved_card.dart';
 
 class PaymentScreen extends StatefulWidget {
   final String? bookingId;
@@ -71,6 +77,14 @@ class _PaymentScreenState extends State<PaymentScreen> {
   bool payPalLoading = false;
   bool flutterWaveLoading = false;
   bool payStackLoading = false;
+
+  // ── Paystack saved cards (one-tap "pay with card") ──────────────────────
+  // Card numbers are entered on Paystack's hosted page only — never sent to
+  // our API. We keep only the safe display fields returned by the backend.
+  List<SavedCard> _savedCards = [];
+  bool _cardsLoading = false;
+  bool _addingCard = false;
+  String? _busyCardId; // id of the card currently being charged / deleted
 
   Future<void> _markCustomerCashPaymentCompleted() async {
     final bookingId = (widget.bookingId ?? '').trim();
@@ -147,6 +161,8 @@ class _PaymentScreenState extends State<PaymentScreen> {
   }
 
   Future<void> _showPaymentSuccessSheet({required String paymentMethod, String? transactionId}) async {
+    // Local summary is only a FALLBACK (used if the backend receipt can't be
+    // fetched) — the card + buttons prefer the backend receipt's exact numbers.
     final summary = _receiptSummary(paymentMethod, transactionId: transactionId);
     await showModalBottomSheet(
       context: context,
@@ -155,132 +171,12 @@ class _PaymentScreenState extends State<PaymentScreen> {
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (sheetContext) {
-        final media = MediaQuery.of(sheetContext);
-        return SafeArea(
-          top: false,
-          child: Container(
-            constraints: BoxConstraints(maxHeight: media.size.height * 0.9),
-            padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
-            decoration: const BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
-            ),
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Center(
-                    child: Container(
-                      width: 48,
-                      height: 5,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFD0D5DD),
-                        borderRadius: BorderRadius.circular(999),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 18),
-                  const Center(
-                    child: CircleAvatar(
-                      radius: 28,
-                      backgroundColor: Colors.black,
-                      child: Icon(
-                        Icons.check_rounded,
-                        color: Colors.white,
-                        size: 30,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  const Center(
-                    child: Text(
-                      'Payment Successful',
-                      style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  const Center(
-                    child: Text(
-                      'Your payment is confirmed. Review or share the trip summary before rating.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: Color(0xFF667085), fontSize: 13),
-                    ),
-                  ),
-                  const SizedBox(height: 18),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(14),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF8FAFC),
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: const Color(0xFFE5E7EB)),
-                    ),
-                    child: Text(
-                      summary,
-                      style: const TextStyle(
-                        height: 1.5,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: AppButtons.button(
-                          onTap: () => Share.share(summary),
-                          text: 'Share',
-                          buttonColor: Colors.white,
-                          textColor: Colors.black,
-                          hasBorder: true,
-                          borderColor: const Color(0xFFD0D5DD),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: AppButtons.button(
-                          onTap: () async {
-                            await Clipboard.setData(ClipboardData(text: summary));
-                            AppToasts.showSuccess(context, 'Receipt copied');
-                          },
-                          text: 'Copy',
-                          buttonColor: Colors.white,
-                          textColor: Colors.black,
-                          hasBorder: true,
-                          borderColor: const Color(0xFFD0D5DD),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: AppButtons.button(
-                          onTap: () async => _exportReceipt(summary),
-                          text: 'Download',
-                          buttonColor: Colors.white,
-                          textColor: Colors.black,
-                          hasBorder: true,
-                          borderColor: const Color(0xFFD0D5DD),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: AppButtons.button(
-                          onTap: () => Navigator.pop(sheetContext),
-                          text: 'Continue',
-                          buttonColor: AppColors.commonBlack,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
+        return _PaymentSuccessSheet(
+          bookingId: (widget.bookingId ?? '').trim(),
+          paymentMethod: paymentMethod,
+          fallbackSummary: summary,
+          onContinue: () => Navigator.pop(sheetContext),
+          onFallbackDownload: () => _exportReceipt(summary),
         );
       },
     );
@@ -1011,6 +907,284 @@ class _PaymentScreenState extends State<PaymentScreen> {
     }
   }
 
+  // ════════════════════════════════════════════════════════════════════════
+  // Paystack saved cards. The card number is collected on Paystack's hosted
+  // page only and never reaches our API. These calls mirror the existing
+  // raw-http payment flows (payWithPayStack) to stay consistent and avoid
+  // touching shared API infrastructure.
+  // ════════════════════════════════════════════════════════════════════════
+  static const String _cardsApiBase =
+      'https://bk.myhoppr.com/api/customer/cards';
+
+  Future<Map<String, String>> _authHeaders() async {
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('token');
+    return {
+      'Content-Type': 'application/json',
+      if (token != null && token.isNotEmpty) 'Authorization': 'Bearer $token',
+    };
+  }
+
+  /// GET /api/customer/cards -> data:[{ id, last4, cardType, bank, label }]
+  Future<void> _loadSavedCards() async {
+    if (!mounted) return;
+    setState(() => _cardsLoading = true);
+    try {
+      final res = await http.get(
+        Uri.parse(_cardsApiBase),
+        headers: await _authHeaders(),
+      );
+      if (res.statusCode == 200) {
+        final body = jsonDecode(res.body);
+        final list = (body is Map) ? body['data'] : null;
+        final cards = <SavedCard>[];
+        if (list is List) {
+          for (final e in list) {
+            if (e is Map<String, dynamic>) {
+              final c = SavedCard.fromJson(e);
+              if (c.isValid) cards.add(c);
+            }
+          }
+        }
+        if (mounted) setState(() => _savedCards = cards);
+      }
+    } catch (e) {
+      AppLogger.log.e('Load saved cards failed: $e');
+    } finally {
+      if (mounted) setState(() => _cardsLoading = false);
+    }
+  }
+
+  /// POST /api/customer/cards/init -> open Paystack page -> refresh on return.
+  /// The verify charge (₦50) is credited back to the customer's wallet.
+  Future<void> _addNewCard() async {
+    if (_addingCard) return;
+    setState(() => _addingCard = true);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final email = prefs.getString('flutterwave_email');
+      final res = await http.post(
+        Uri.parse('$_cardsApiBase/init'),
+        headers: await _authHeaders(),
+        body: jsonEncode({
+          if (email != null && email.trim().isNotEmpty) 'email': email.trim(),
+        }),
+      );
+      final data = jsonDecode(res.body);
+      final authUrl =
+          (data is Map) ? data['authorization_url']?.toString() : null;
+      if ((res.statusCode == 200 || res.statusCode == 201) &&
+          authUrl != null &&
+          authUrl.isNotEmpty) {
+        final int before = _savedCards.length;
+        if (!mounted) return;
+        // Paystack collects the card and charges the small verify amount; on
+        // return we always refresh (Paystack may not emit a standard signal).
+        await Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => PaymentWebView(url: authUrl)),
+        );
+        await _loadSavedCards();
+        walletController.getWalletBalance();
+        if (!mounted) return;
+        if (_savedCards.length > before) {
+          AppToasts.showSuccess(
+            context,
+            'Card added · ₦50 was added to your wallet',
+          );
+        }
+      } else {
+        final msg = (data is Map ? data['message'] : null)?.toString() ??
+            'Could not start card setup';
+        if (mounted) AppToasts.showError(context, msg);
+      }
+    } catch (e) {
+      AppLogger.log.e('Card init failed: $e');
+      if (mounted) {
+        AppToasts.showError(
+          context,
+          'Could not start card setup. Please try again.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _addingCard = false);
+    }
+  }
+
+  /// POST /api/customer/cards/charge -> { success, bookingStatus:"PAID" }.
+  /// One tap, no card re-entry. On success shows the Payment Successful sheet.
+  Future<void> _payWithSavedCard(SavedCard card) async {
+    if (_busyCardId != null) return;
+    final bookingId = (widget.bookingId ?? '').trim();
+    if (bookingId.isEmpty) {
+      AppToasts.showError(context, 'Missing booking reference');
+      return;
+    }
+    setState(() => _busyCardId = card.id);
+    bool success = false;
+    try {
+      final res = await http.post(
+        Uri.parse('$_cardsApiBase/charge'),
+        headers: await _authHeaders(),
+        body: jsonEncode({'userBookingId': bookingId, 'cardId': card.id}),
+      );
+      final data = jsonDecode(res.body);
+      final paid = (data is Map) &&
+          (data['success'] == true ||
+              data['bookingStatus']?.toString().toUpperCase() == 'PAID');
+      if ((res.statusCode == 200 || res.statusCode == 201) && paid) {
+        success = true;
+      } else {
+        final msg = (data is Map ? data['message'] : null)?.toString() ??
+            'Card payment failed';
+        if (mounted) AppToasts.showError(context, msg);
+      }
+    } catch (e) {
+      AppLogger.log.e('Card charge failed: $e');
+      if (mounted) {
+        AppToasts.showError(context, 'Card payment failed. Please try again.');
+      }
+    } finally {
+      if (mounted) setState(() => _busyCardId = null);
+    }
+    if (success && mounted) {
+      await _completePaymentFlow(paymentMethod: 'Card');
+    }
+  }
+
+  /// DELETE /api/customer/cards/{cardId}
+  Future<void> _deleteSavedCard(SavedCard card) async {
+    if (_busyCardId != null) return;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Remove card'),
+        content: Text('Remove ${card.display} from your account?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Remove', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    setState(() => _busyCardId = card.id);
+    try {
+      final res = await http.delete(
+        Uri.parse('$_cardsApiBase/${Uri.encodeComponent(card.id)}'),
+        headers: await _authHeaders(),
+      );
+      if (res.statusCode == 200 || res.statusCode == 204) {
+        if (mounted) {
+          setState(() => _savedCards.removeWhere((c) => c.id == card.id));
+          AppToasts.showSuccess(context, 'Card removed');
+        }
+      } else {
+        String msg = 'Could not remove card';
+        try {
+          final d = jsonDecode(res.body);
+          if (d is Map && d['message'] != null) msg = d['message'].toString();
+        } catch (_) {}
+        if (mounted) AppToasts.showError(context, msg);
+      }
+    } catch (e) {
+      AppLogger.log.e('Card delete failed: $e');
+      if (mounted) {
+        AppToasts.showError(context, 'Could not remove card. Please try again.');
+      }
+    } finally {
+      if (mounted) setState(() => _busyCardId = null);
+    }
+  }
+
+  Widget _buildSavedCardRow(SavedCard card) {
+    final bool busy = _busyCardId == card.id;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Container(
+        decoration: BoxDecoration(
+          border: Border.all(color: AppColors.containerColor, width: 1),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 14),
+        child: Row(
+          children: [
+            const Icon(Icons.credit_card, size: 24, color: Colors.black87),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    card.display,
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.black,
+                    ),
+                  ),
+                  if (card.bank.trim().isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        card.bank,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFF667085),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            if (busy)
+              const SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            else ...[
+              GestureDetector(
+                onTap: () => _payWithSavedCard(card),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(vertical: 7, horizontal: 16),
+                  decoration: BoxDecoration(
+                    color: AppColors.commonBlack,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Text(
+                    'Pay',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 4),
+              GestureDetector(
+                onTap: () => _deleteSavedCard(card),
+                child: const Padding(
+                  padding: EdgeInsets.all(4),
+                  child:
+                      Icon(Icons.delete_outline, size: 22, color: Colors.red),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildUnderDevelopmentDialog(BuildContext context) {
     return Dialog(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -1063,6 +1237,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
     super.initState();
     walletController.getWalletBalance();
     controller.getProfileData();
+    _loadSavedCards();
   }
 
   @override
@@ -1384,26 +1559,33 @@ class _PaymentScreenState extends State<PaymentScreen> {
                   // SizedBox(height: 15),
 
                   CustomTextFields.textWithStyles700('Card', fontSize: 16),
-                  SizedBox(height: 15),
+                  const SizedBox(height: 15),
+                  if (_cardsLoading && _savedCards.isEmpty)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      child: Center(child: AppLoader.circularLoader()),
+                    ),
+                  ..._savedCards.map(_buildSavedCardRow),
                   PackageContainer.customWalletContainer(
-                    onTap: () {
-                      showDialog(
-                        context: context,
-                        builder:
-                            (context) => _buildUnderDevelopmentDialog(context),
-                      );
-                    },
-
-                    title: 'Add a new card',
+                    onTap: _addNewCard,
+                    title: _addingCard
+                        ? 'Opening secure card setup…'
+                        : 'Add a new card',
                     textColor: AppColors.resendBlue,
                     fontWeight: FontWeight.w400,
                     leadingImagePath: AppImages.borderAdd,
-                    trailing: Image.asset(
-                      AppImages.rightArrow,
-                      color: AppColors.commonBlack,
-                      width: 16,
-                      height: 16,
-                    ),
+                    trailing: _addingCard
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : Image.asset(
+                            AppImages.rightArrow,
+                            color: AppColors.commonBlack,
+                            width: 16,
+                            height: 16,
+                          ),
                   ),
                   SizedBox(height: 15),
 
@@ -1687,6 +1869,377 @@ class _PaymentScreenState extends State<PaymentScreen> {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// "Payment Successful" sheet. Fetches the backend ride receipt (universal
+/// endpoint — works for COD / Wallet / Paystack / Flutterwave) and drives the
+/// card + Copy / Share / Download from it. Falls back to a locally-built summary
+/// if the receipt isn't ready yet, and never crashes.
+class _PaymentSuccessSheet extends StatefulWidget {
+  final String bookingId;
+  final String paymentMethod;
+  final String fallbackSummary;
+  final VoidCallback onContinue;
+  final Future<void> Function() onFallbackDownload;
+
+  const _PaymentSuccessSheet({
+    required this.bookingId,
+    required this.paymentMethod,
+    required this.fallbackSummary,
+    required this.onContinue,
+    required this.onFallbackDownload,
+  });
+
+  @override
+  State<_PaymentSuccessSheet> createState() => _PaymentSuccessSheetState();
+}
+
+class _PaymentSuccessSheetState extends State<_PaymentSuccessSheet> {
+  RideReceiptResponse? _receipt;
+  bool _loading = true;
+  bool _pdfBuilding = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchReceipt();
+  }
+
+  Future<void> _fetchReceipt() async {
+    if (widget.bookingId.isEmpty) {
+      if (mounted) setState(() => _loading = false);
+      return;
+    }
+    final res =
+        await ApiDataSource().getRideReceipt(bookingId: widget.bookingId);
+    if (!mounted) return;
+    res.fold(
+      (_) => setState(() => _loading = false),
+      (r) => setState(() {
+        _receipt = r.success ? r : null;
+        _loading = false;
+      }),
+    );
+  }
+
+  // Backend text when available, else the local summary — so Copy / Share always
+  // produce something useful.
+  String get _shareText =>
+      (_receipt?.hasText ?? false) ? _receipt!.text : widget.fallbackSummary;
+
+  Future<void> _copy() async {
+    await Clipboard.setData(ClipboardData(text: _shareText));
+    if (!mounted) return;
+    AppToasts.showSuccess(context, 'Receipt copied');
+  }
+
+  // Share the openable receipt link when the backend provides one (recipient can
+  // view + Save as PDF in the browser), else fall back to the text summary.
+  void _share() {
+    final url = _receipt?.downloadUrl ?? '';
+    if (url.isNotEmpty) {
+      Share.share('$_shareText\n\nView receipt: $url');
+    } else {
+      Share.share(_shareText);
+    }
+  }
+
+  Future<void> _download() async {
+    // Preferred path: backend-provided ready-to-open receipt link. Opens the
+    // styled receipt in the device browser (which has its own "Save as PDF").
+    // No PDF packages / building needed.
+    final url = _receipt?.downloadUrl ?? '';
+    if (url.isNotEmpty) {
+      try {
+        final ok = await launchUrl(
+          Uri.parse(url),
+          mode: LaunchMode.externalApplication,
+        );
+        if (ok) return;
+      } catch (_) {
+        // fall through to the local PDF/text export below
+      }
+    }
+
+    // Fallback (older backend, no downloadUrl): build the PDF locally from the
+    // receipt HTML; if even that is missing, use the local text export.
+    final html = _receipt?.html ?? '';
+    if (html.trim().isEmpty) {
+      await widget.onFallbackDownload();
+      return;
+    }
+    setState(() => _pdfBuilding = true);
+    try {
+      final bytes = await Printing.convertHtml(
+        format: PdfPageFormat.a4,
+        html: html,
+      );
+      final safeId =
+          widget.bookingId.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
+      await Printing.sharePdf(
+        bytes: bytes,
+        filename: 'Hoppr_Receipt_$safeId.pdf',
+      );
+    } catch (_) {
+      if (mounted) AppToasts.showError(context, 'Failed to build receipt PDF');
+    } finally {
+      if (mounted) setState(() => _pdfBuilding = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final media = MediaQuery.of(context);
+    final busy = _pdfBuilding; // disable every action while the PDF builds
+    return SafeArea(
+      top: false,
+      child: Container(
+        constraints: BoxConstraints(maxHeight: media.size.height * 0.9),
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+        ),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 48,
+                  height: 5,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFD0D5DD),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 18),
+              const Center(
+                child: CircleAvatar(
+                  radius: 28,
+                  backgroundColor: Colors.black,
+                  child: Icon(
+                    Icons.check_rounded,
+                    color: Colors.white,
+                    size: 30,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Center(
+                child: Text(
+                  'Payment Successful',
+                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Center(
+                child: Text(
+                  'Your payment is confirmed. Review or share the trip summary before rating.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Color(0xFF667085), fontSize: 13),
+                ),
+              ),
+              const SizedBox(height: 18),
+              _receiptCard(),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  Expanded(
+                    child: AppButtons.button(
+                      onTap: busy ? null : _share,
+                      text: 'Share',
+                      buttonColor: Colors.white,
+                      textColor: Colors.black,
+                      hasBorder: true,
+                      borderColor: const Color(0xFFD0D5DD),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: AppButtons.button(
+                      onTap: busy ? null : _copy,
+                      text: 'Copy',
+                      buttonColor: Colors.white,
+                      textColor: Colors.black,
+                      hasBorder: true,
+                      borderColor: const Color(0xFFD0D5DD),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: AppButtons.button(
+                      onTap: busy ? null : _download,
+                      isLoading: _pdfBuilding,
+                      text: 'Download',
+                      buttonColor: Colors.white,
+                      textColor: Colors.black,
+                      hasBorder: true,
+                      borderColor: const Color(0xFFD0D5DD),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: AppButtons.button(
+                      onTap: busy ? null : widget.onContinue,
+                      text: 'Continue',
+                      buttonColor: AppColors.commonBlack,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _receiptCard() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFE5E7EB)),
+      ),
+      child: _loading
+          ? const SizedBox(
+              height: 96,
+              child: Center(
+                child: SizedBox(
+                  height: 22,
+                  width: 22,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ),
+            )
+          : (_receipt?.data != null
+              ? _structuredCard(_receipt!.data!)
+              : _fallbackCard()),
+    );
+  }
+
+  Widget _structuredCard(ReceiptData d) {
+    final method = d.paymentMethod.trim().isNotEmpty
+        ? d.paymentMethod
+        : widget.paymentMethod;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Icon(
+              Icons.receipt_long_rounded,
+              size: 18,
+              color: Color(0xFF101828),
+            ),
+            const SizedBox(width: 8),
+            const Text(
+              'Hoppr Receipt',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800),
+            ),
+            const Spacer(),
+            if (d.status.trim().isNotEmpty)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFE7F6EC),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Text(
+                  d.status,
+                  style: const TextStyle(
+                    color: Color(0xFF067647),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        if (d.bookingId.isNotEmpty) _kv('Booking ID', d.bookingId),
+        if (d.rideDate.isNotEmpty) _kv('Date', d.rideDate),
+        _kv('Amount', d.formattedTotal),
+        if (method.trim().isNotEmpty) _kv('Payment', method),
+        if (d.driverName.isNotEmpty) _kv('Driver', d.driverWithRating),
+      ],
+    );
+  }
+
+  Widget _fallbackCard() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: const [
+            Icon(Icons.info_outline_rounded, size: 16, color: Color(0xFF98A2B3)),
+            SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                'Receipt not available yet',
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xFF667085),
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Text(
+          widget.fallbackSummary,
+          style: const TextStyle(
+            height: 1.5,
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _kv(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 92,
+            child: Text(
+              label,
+              style: const TextStyle(
+                color: Color(0xFF667085),
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              value,
+              textAlign: TextAlign.right,
+              style: const TextStyle(
+                fontSize: 13.5,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

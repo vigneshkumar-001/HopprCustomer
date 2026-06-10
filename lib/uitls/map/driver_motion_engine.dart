@@ -207,6 +207,12 @@ class DriverMotionEngine {
           if (implied <= _stationarySpeedThresholdMps &&
               d <= _stationaryIgnoreUnderMeters) {
             _lastPacketTs = ts;
+            // Driver is stopped (e.g. at a signal). Kill the carried-over speed
+            // and any active dead-reckoning so the marker stops drifting AHEAD
+            // of the real position and then snapping back when movement resumes
+            // — that overshoot/snap-back was the "car shakes at the signal" bug.
+            _lastSpeedMps = 0.0;
+            _deadReckonTimer?.cancel();
             return false;
           }
         }
@@ -360,6 +366,15 @@ class DriverMotionEngine {
       }
 
       final dt = _deadReckonTick.inMilliseconds / 1000.0;
+      // Ease the projected speed down so a driver who is slowing/stopping (e.g.
+      // approaching a signal) COASTS to a halt instead of drifting ahead at full
+      // speed and then snapping back when the real fix lands. ~0.93/100ms tick
+      // halves in ~1s and stops in ~2s, bounding any overshoot.
+      _lastSpeedMps *= 0.93;
+      if (_lastSpeedMps < 0.6) {
+        _deadReckonTimer?.cancel();
+        return;
+      }
       final projected = _projectPosition(_displayPos!, _lastBearing, _lastSpeedMps * dt);
       _displayPos = projected;
       _emaPos = projected;
