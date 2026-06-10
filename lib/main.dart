@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
@@ -114,7 +115,7 @@ class MyApp extends StatelessWidget {
             // App-wide premium page transition for ALL Navigator.push
             // (MaterialPageRoute) navigations — same smooth slide on every
             // platform, so the whole app feels consistent and polished.
-            pageTransitionsTheme: const PageTransitionsTheme(
+            pageTransitionsTheme: PageTransitionsTheme(
               builders: {
                 TargetPlatform.android: CupertinoPageTransitionsBuilder(),
                 TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
