@@ -54,6 +54,7 @@ class DriverMotionEngine {
     bool enableDeadReckoning = true,
     bool requireBearingForDeadReckoning = false,
     Duration maxDeadReckonPacketGap = const Duration(seconds: 4),
+    Duration deadReckonStopAfter = const Duration(seconds: 5),
     // When driver is stopped, GPS jitter can cause the marker to "dance".
     // We detect low implied speed (from timestamps) and ignore small moves.
     double stationarySpeedThresholdMps = 0.6,
@@ -76,6 +77,7 @@ class DriverMotionEngine {
         _enableDeadReckoning = enableDeadReckoning,
         _requireBearingForDeadReckoning = requireBearingForDeadReckoning,
         _maxDeadReckonPacketGap = maxDeadReckonPacketGap,
+        _deadReckonStopAfter = deadReckonStopAfter,
         _stationarySpeedThresholdMps = stationarySpeedThresholdMps,
         _stationaryIgnoreUnderMeters = stationaryIgnoreUnderMeters,
         _moveCtrl = AnimationController(vsync: vsync);
@@ -103,6 +105,7 @@ class DriverMotionEngine {
   final bool _enableDeadReckoning;
   final bool _requireBearingForDeadReckoning;
   final Duration _maxDeadReckonPacketGap;
+  final Duration _deadReckonStopAfter;
   final double _stationarySpeedThresholdMps;
   final double _stationaryIgnoreUnderMeters;
 
@@ -115,7 +118,6 @@ class DriverMotionEngine {
   DateTime _deadReckonStartAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   static const Duration _deadReckonTick = Duration(milliseconds: 100);
-  static const Duration _deadReckonStopAfter = Duration(seconds: 15);
   double _lastSpeedMps = 0.0;
   int? _lastPacketIntervalMs;
   bool _lastPacketHadBearing = false;

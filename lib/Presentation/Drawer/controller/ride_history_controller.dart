@@ -10,6 +10,11 @@ class RideHistoryController extends GetxController {
   final RxBool isLoading = false.obs;
   final RxBool isMoreLoading = false.obs;
 
+  /// True when the last fetch failed (network / 500) so the screen can show
+  /// the server-error state with a "Try again" action instead of a plain
+  /// "no rides" message.
+  final RxBool hasError = false.obs;
+
   final RxList<RideHistoryData> rideHistoryList = <RideHistoryData>[].obs;
   final RxList<RideHistoryData> parcelHistoryList = <RideHistoryData>[].obs;
 
@@ -25,6 +30,7 @@ class RideHistoryController extends GetxController {
       totalPages = 1;
       rideHistoryList.clear();
       parcelHistoryList.clear();
+      hasError.value = false;
       isLoading.value = true;
     } else {
       if (isMoreLoading.value || isLoading.value || currentPage > totalPages) {
@@ -38,6 +44,7 @@ class RideHistoryController extends GetxController {
 
       response.fold((failure) {
         AppLogger.log.e('Ride history fetch failed: $failure');
+        if (isFirstLoad) hasError.value = true;
       }, (res) {
         totalPages = res.totalPages;
 
@@ -59,6 +66,7 @@ class RideHistoryController extends GetxController {
       });
     } catch (e) {
       AppLogger.log.e('Ride history exception: $e');
+      if (isFirstLoad) hasError.value = true;
     } finally {
       isLoading.value = false;
       isMoreLoading.value = false;

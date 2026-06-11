@@ -129,6 +129,18 @@ class SocketService {
   }
 
   // 🔹 Event handling
+  void retainOnlyBookingContext(
+    String bookingId, {
+    bool keepDriverTrackingForBooking = false,
+  }) {
+    _bookingRoomPayloads.removeWhere((key, _) => key != bookingId);
+    if (keepDriverTrackingForBooking) {
+      _joinedRooms.removeWhere((key, _) => key != bookingId);
+    } else {
+      _joinedRooms.clear();
+    }
+  }
+
   void onConnect(Function() callback) => _socket.onConnect((_) => callback());
   void onReconnect(Function() callback) =>
       _socket.onReconnect((_) => callback());

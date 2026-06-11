@@ -279,6 +279,92 @@ class OrderConfirmController extends GetxController
         s == 'DRIVER_REACHED_DESTINATION';
   }
 
+  // --------------------------------------------------------------------------
+  // Monotonic phase/state machine: ACCEPTED(1) -> ARRIVED(2) -> STARTED(3) ->
+  // COMPLETED(4). Phase only ever ADVANCES. Applied independently of the
+  // position-ordering gate because a snapshot can carry a FORWARD status with an
+  // OLD timestamp (booking-954881): the pickup->drop switch must not be lost to
+  // a stale-by-time position drop, and a late ACCEPTED/ARRIVED must never rewind
+  // us back to the pickup route.
+  // --------------------------------------------------------------------------
+  int _maxPhaseRank = 0;
+
+  int _phaseRankForStatus(String status) {
+    final s = status.trim().toUpperCase();
+    if (_isCompletedStatus(s)) return 4;
+    if (_isDropPhaseStatus(s)) return 3;
+    if (s == 'ARRIVED' ||
+        s == 'DRIVER_ARRIVED' ||
+        s == 'REACHED' ||
+        s == 'DRIVER_REACHED' ||
+        s == 'ARRIVED_AT_PICKUP') {
+      return 2;
+    }
+    if (s == 'ACCEPTED' ||
+        s == 'CONFIRMED' ||
+        s == 'ASSIGNED' ||
+        s == 'DRIVER_ASSIGNED' ||
+        s == 'DRIVER_ACCEPTED' ||
+        s == 'ARRIVING' ||
+        s == 'ON_THE_WAY' ||
+        s == 'EN_ROUTE') {
+      return 1;
+    }
+    return 0; // unknown -> leave phase untouched
+  }
+
+  /// Apply a status update under the monotonic phase rule. Safe to call for
+  /// EVERY packet (including stale-by-time snapshots) and for the dedicated
+  /// status socket events. Forward transitions run exactly once; regressions and
+  /// same-rank repeats are ignored.
+  void _applyMonotonicPhase(String latestStatus, {required LatLng driverPos}) {
+    // Sync from any other path that may have advanced the phase (joined-booking,
+    // ride-started event, resume) so those states can't be rewound here either.
+    if (driverStartedRide.value && _maxPhaseRank < 3) _maxPhaseRank = 3;
+
+    final rank = _phaseRankForStatus(latestStatus);
+    if (rank == 0) return; // unknown status
+    if (rank < _maxPhaseRank) {
+      if (kDebugMode) {
+        AppLogger.log.d(
+          'phase regression ignored status=$latestStatus '
+          'rank=$rank max=$_maxPhaseRank',
+        );
+      }
+      return;
+    }
+    if (rank == _maxPhaseRank) return; // no phase change
+    _maxPhaseRank = rank;
+
+    final effectiveStatus =
+        latestStatus.trim().isNotEmpty ? latestStatus : latestRideStatus.value;
+
+    // STARTED / drop phase: switch to toDrop exactly once. The map view resets
+    // its forward-only trim index when the new (drop) route is applied.
+    if (rank >= 3 && !driverStartedRide.value) {
+      driverStartedRide.value = true;
+      _didFitDriverAndDrop = false;
+      _seedStaticMarkers(forceRecreate: false);
+      _refreshPulseCircles();
+      _updatePolylinesForStatus(
+        effectiveStatus,
+        driverPos: driverPos,
+        force: true,
+      );
+    }
+
+    // COMPLETED: arrived at destination, clear the active route.
+    if (rank >= 4) {
+      if (!driverStartedRide.value) driverStartedRide.value = true;
+      destinationReached.value = true;
+      nearDestination.value = true;
+      etaChipText.value = 'Arrived at destination';
+      _seedStaticMarkers(forceRecreate: false);
+      _refreshPulseCircles();
+      _clearActiveRoute();
+    }
+  }
+
   // =================================================================
   //                  SMOOTH DRIVER ENGINE
   // =================================================================
@@ -291,6 +377,45 @@ class OrderConfirmController extends GetxController
     isUtc: true,
   );
   LatLng? _lastAcceptedDriverLocationPos;
+  int _lastAcceptedDriverSeq = -1;
+  DateTime _receiveMetricsWindowStartedAt = DateTime.now().toUtc();
+  int _receiveCountWindow = 0;
+  int _lastGapMs = 0;
+  int _duplicateDroppedCount = 0;
+  int _staleDroppedCount = 0;
+  DateTime _lastAcceptedUpdateLocationAt = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _heartbeatLowPriorityWindow = Duration(seconds: 4);
+
+  // Tiered live-tracking freshness (AC#1). Measured from the last ACCEPTED
+  // driver fix (server/device time), not wall-clock receive time. Lets the UI
+  // distinguish live / reconnecting / signal-lost instead of silently showing a
+  // frozen car. The motion engine already glides (dead-reckon) for the first
+  // few seconds; these flags drive the chip once the gap is clearly too long.
+  Timer? _freshnessTimer;
+  static const Duration _trackingStaleAfter = Duration(seconds: 8);
+  static const Duration _trackingHardStaleAfter = Duration(seconds: 10);
+  final RxBool driverSignalStale = false.obs; // >8s -> "Reconnecting…"
+  final RxBool driverSignalLost = false.obs; // >10s -> "Driver signal lost"
+  // Wall-clock time of the last VALID tracking packet for this booking — any
+  // packet carrying coordinates, INCLUDING stationary same-point snapshots. The
+  // watchdog measures CONTACT from here, not marker movement: a driver stopped
+  // at a signal still emits, so identical snapshots must not read as "lost".
+  DateTime _lastTrackingContactAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  // Single source of truth for the live-tracking socket events this controller
+  // owns. Used both to clear-before-(re)subscribe in _setupSocketListeners and
+  // to tear them down in onClose, so the two lists can never drift apart.
+  static const List<String> _trackedSocketEvents = <String>[
+    'joined-booking',
+    'driver-location',
+    'driver-heartbeat',
+    'driver-arrived',
+    'otp-generated',
+    'ride-started',
+    'driver-reached-destination',
+    'customer-cancelled',
+    'driver-cancelled',
+  ];
 
   // =================================================================
   //                        POLYLINE CONTROL
@@ -326,19 +451,29 @@ class OrderConfirmController extends GetxController
         _emaPos = pos;
         _displayPos = pos;
         _lastBearing = bearing;
-        _updateDriverMarker(pos, bearing);
       },
-      onFrameSideEffects: (pos) {
-        _autoCameraUpdate();
-      },
-      // Tune closer to the home nearby-driver experience:
-      // lower playback lag + better visibility for slow traffic movement.
-      playbackDelay: const Duration(milliseconds: 220),
-      minSeg: const Duration(milliseconds: 320),
-      maxSeg: const Duration(milliseconds: 2600),
+      // CustomerRideMapView owns the visible marker animation + follow camera on
+      // the active ride screen. Running a second controller-side animation/camera
+      // loop against the same GoogleMap caused the vehicle to appear to jump,
+      // shake, and briefly "rewind" while the two loops fought each other.
+      onFrameSideEffects: (_) {},
+      // Buffer ~0.8 of a packet interval against the driver's steady ~1s feed:
+      // a small constant lag bought for near-zero stutter (Uber/Ola do the same).
+      playbackDelay: const Duration(milliseconds: 800),
+      // Clamp each segment to ~the real packet cadence so the marker keeps
+      // gliding until the next packet lands instead of racing then freezing.
+      minSeg: const Duration(milliseconds: 700),
+      maxSeg: const Duration(milliseconds: 1500),
       minMoveMeters: 1.5,
       requireBearingForDeadReckoning: true,
-      maxDeadReckonPacketGap: const Duration(seconds: 4),
+      // Sparse-feed glide (AC#1). At a steady ~1s feed a single dropped packet
+      // already coasts; this wider window also lets a CONSISTENTLY sparse feed
+      // (5-9s between fixes on weak network / OEM throttling) keep gliding
+      // instead of freezing the instant a segment ends. deadReckonStopAfter (5s)
+      // plus the 0.93/100ms speed decay still bound the projection (~2s of real
+      // glide then it holds), so this can never overshoot into a teleport.
+      maxDeadReckonPacketGap: const Duration(seconds: 7),
+      deadReckonStopAfter: const Duration(seconds: 5),
       stationarySpeedThresholdMps: 0.35,
       stationaryIgnoreUnderMeters: 1.8,
     );
@@ -354,6 +489,8 @@ class OrderConfirmController extends GetxController
     _seedStaticMarkers(forceRecreate: true);
     _startPulseAnimation();
     _setupSocketListeners();
+    _startFreshnessWatchdog();
+    socketService.retainOnlyBookingContext(bookingId);
     // ALWAYS join the booking room so the customer receives live driver-location
     // broadcasts — the backend joins the room by bookingId alone, no driverId
     // needed. Previously this was gated on `resumeDriverId`, so on a fresh ride
@@ -363,12 +500,6 @@ class OrderConfirmController extends GetxController
     // it auto-rejoins on every reconnect too.
     if (bookingId.trim().isNotEmpty) {
       socketService.joinBookingRoom(bookingId: bookingId);
-    }
-    if ((resumeDriverId ?? '').trim().isNotEmpty) {
-      socketService.joinBooking(
-        bookingId: bookingId,
-        driverId: resumeDriverId!.trim(),
-      );
     }
     await _initLocation();
   }
@@ -402,12 +533,15 @@ class OrderConfirmController extends GetxController
     _searchTimer?.cancel();
     _pulseTimer?.cancel();
     _driverMarkerFlushTimer?.cancel();
+    _freshnessTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     try {
-      socketService.off('joined-booking');
-      socketService.off('driver-location');
-      socketService.off('driver-arrived');
-      socketService.off('otp-generated');
+      socketService.leaveBooking(bookingId);
+      // Remove every listener this controller registered (not just four) so a
+      // back-to-back ride starts with a clean single listener per event.
+      for (final event in _trackedSocketEvents) {
+        socketService.off(event);
+      }
     } catch (_) {}
     _driverMotion.dispose();
     _clearActiveRoute();
@@ -726,6 +860,7 @@ class OrderConfirmController extends GetxController
 
     isDriverConfirmed.value = false;
     driverStartedRide.value = false;
+    _maxPhaseRank = 0; // reset phase machine for a fresh / back-to-back ride
     driverArrived.value = false;
     nearDestination.value = false;
     destinationReached.value = false;
@@ -827,6 +962,16 @@ class OrderConfirmController extends GetxController
   //                         SOCKETS
   // =================================================================
   void _setupSocketListeners() {
+    // Idempotent re-bind (req-6: exactly one listener per event). A controller
+    // can re-register on reconnect, app-resume, hot reload, or a back-to-back
+    // ride that re-uses the singleton socket. Without clearing first, each
+    // re-bind STACKS another handler on the same event, so a single
+    // driver-location packet is processed N times -> marker churn + duplicate
+    // status transitions. Clear our events before (re)subscribing.
+    for (final event in _trackedSocketEvents) {
+      socketService.off(event);
+    }
+
     socketService.onConnect(() {
       AppLogger.log.i("Socket connected on booking screen");
     });
@@ -906,14 +1051,17 @@ class OrderConfirmController extends GetxController
       profilePic.value = profile;
       carExteriorPhotos.value = photos;
 
-      // Ensure we are tracking the right booking/driver for this ride.
+      // Keep this screen on the booking room only.
+      //
+      // `CustomerRideMapView` renders from the booking-room `driver-location`
+      // stream. Re-subscribing to `track-driver` here produced an extra
+      // `tracked-driver-location` feed for the same driver, which added socket
+      // noise and made debugging the live movement much harder.
       final eventBookingId = (payload['bookingId'] ?? '').toString().trim();
       final joinBookingId = eventBookingId.isNotEmpty ? eventBookingId : '';
-      if (joinBookingId.isNotEmpty && driverId.trim().isNotEmpty) {
-        socketService.joinBooking(
-          bookingId: joinBookingId,
-          driverId: driverId.trim(),
-        );
+      if (joinBookingId.isNotEmpty) {
+        socketService.retainOnlyBookingContext(joinBookingId);
+        socketService.joinBookingRoom(bookingId: joinBookingId, force: true);
       }
 
       _seedStaticMarkers(forceRecreate: true);
@@ -996,6 +1144,10 @@ class OrderConfirmController extends GetxController
       'driver-location',
       (data) => _handleDriverTrackingUpdate(data, source: 'driver-location'),
     );
+    socketService.on(
+      'driver-heartbeat',
+      (data) => _handleDriverTrackingUpdate(data, source: 'driver-heartbeat'),
+    );
 
     socketService.on('driver-arrived', (data) {
       if (isClosed) return;
@@ -1021,7 +1173,9 @@ class OrderConfirmController extends GetxController
         final s = (data ?? '').toString().trim().toLowerCase();
         arrived = s == 'true' || s == '1' || s.contains('arriv');
       }
-      if (arrived) {
+      // Ignore a late ARRIVED once the ride has STARTED (monotonic phase rule):
+      // it must not rewrite the chip back to "Driver arrived".
+      if (arrived && !driverStartedRide.value) {
         driverArrived.value = true;
         etaChipText.value = 'Driver arrived';
       }
@@ -1057,8 +1211,11 @@ class OrderConfirmController extends GetxController
           statusStr == 'true' ||
           statusStr == '1' ||
           statusStr.contains('start');
-      driverStartedRide.value = status;
+      // Set-true-only: never let a malformed/late ride-started event (status
+      // parsed false) rewind us out of the drop phase (monotonic phase rule).
       if (status) {
+        driverStartedRide.value = true;
+        if (_maxPhaseRank < 3) _maxPhaseRank = 3;
         driverArrived.value = true;
         latestRideStatus.value = 'STARTED';
         _updateRideMetrics(data);
@@ -1162,15 +1319,59 @@ class OrderConfirmController extends GetxController
     required LatLng position,
     required bool simulated,
     required String source,
+    int? seq,
   }) {
     final lastAcceptedTsUtc = _lastAcceptedDriverLocationTs;
     final lastAcceptedPos = _lastAcceptedDriverLocationPos;
     String decision = 'accepted';
 
+    if (seq != null && seq > 0 && _lastAcceptedDriverSeq > 0) {
+      if (seq <= _lastAcceptedDriverSeq) {
+        // Seq-space reset detector (defense-in-depth). The driver app emits from
+        // two isolates with independent seq counters (foreground socket vs the
+        // background location service). On a foreground->background handoff —
+        // the driver opening Google Maps — the counter can restart lower, so a
+        // genuinely fresh fix looks "older" by seq. If the wall-clock timestamp
+        // is clearly newer than the last accepted fix, trust time over seq:
+        // accept and let the caller re-baseline _lastAcceptedDriverSeq to this
+        // new (lower) value. Keeps the marker live through navigation even if a
+        // driver build without the monotonic-seq fix is in the field.
+        final bool seqResetWithNewerTime =
+            seq < _lastAcceptedDriverSeq &&
+            receivedTsUtc.isAfter(
+              lastAcceptedTsUtc.add(const Duration(seconds: 2)),
+            );
+        if (!seqResetWithNewerTime) {
+          decision = seq == _lastAcceptedDriverSeq
+              ? 'duplicate_seq'
+              : 'older_seq';
+          if (seq == _lastAcceptedDriverSeq) {
+            _duplicateDroppedCount += 1;
+          } else {
+            _staleDroppedCount += 1;
+          }
+          _logReceiveMetricsIfNeeded();
+          if (kDebugMode) {
+            AppLogger.log.d(
+              'ride tracking decision source=$source receivedTsUtc=$receivedTsUtc '
+              'lastAcceptedTsUtc=$lastAcceptedTsUtc staleDecision=$decision '
+              'markerUpdated=false',
+            );
+          }
+          return false;
+        }
+        // Fall through: treat as a seq reset. The duplicate-point and
+        // older-than-last timestamp guards below still protect against
+        // teleports and true regressions.
+      }
+    }
+
     if (lastAcceptedPos != null) {
       final samePoint = _isSameTrackingPoint(lastAcceptedPos, position);
       if (samePoint) {
         decision = 'duplicate_same_point';
+        _duplicateDroppedCount += 1;
+        _logReceiveMetricsIfNeeded();
         if (kDebugMode) {
           AppLogger.log.d(
             'ride tracking decision source=$source receivedTsUtc=$receivedTsUtc '
@@ -1183,6 +1384,8 @@ class OrderConfirmController extends GetxController
 
       if (receivedTsUtc.isBefore(lastAcceptedTsUtc)) {
         decision = 'older_than_last';
+        _staleDroppedCount += 1;
+        _logReceiveMetricsIfNeeded();
         if (kDebugMode) {
           AppLogger.log.d(
             'ride tracking decision source=$source receivedTsUtc=$receivedTsUtc '
@@ -1196,6 +1399,8 @@ class OrderConfirmController extends GetxController
       final age = DateTime.now().toUtc().difference(receivedTsUtc);
       if (age > const Duration(minutes: 2)) {
         decision = 'too_old_initial';
+        _staleDroppedCount += 1;
+        _logReceiveMetricsIfNeeded();
         if (kDebugMode) {
           AppLogger.log.d(
             'ride tracking decision source=$source receivedTsUtc=$receivedTsUtc '
@@ -1217,21 +1422,90 @@ class OrderConfirmController extends GetxController
     return true;
   }
 
-  bool _shouldIgnoreInconsistentSimulatorPacket(
+  void _noteAcceptedTrackingPacket(DateTime receivedTsUtc) {
+    if (_lastAcceptedDriverLocationTs.millisecondsSinceEpoch > 0) {
+      _lastGapMs =
+          receivedTsUtc
+              .difference(_lastAcceptedDriverLocationTs)
+              .inMilliseconds
+              .clamp(0, 1 << 30);
+    }
+    _receiveCountWindow += 1;
+    _logReceiveMetricsIfNeeded();
+  }
+
+  /// Tiered freshness watchdog (AC#1). Runs at 1 Hz and flips two observables
+  /// from the gap since the last ACCEPTED driver fix:
+  ///   gap >= 8s  -> driverSignalStale  (UI: dim marker + "Reconnecting…")
+  ///   gap >= 10s -> driverSignalLost   (UI: "Driver signal lost")
+  /// 0-8s is left to the motion engine, which keeps the marker gliding /
+  /// dead-reckoning so short gaps never surface as a frozen car.
+  void _startFreshnessWatchdog() {
+    _freshnessTimer?.cancel();
+    _freshnessTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (isClosed) return;
+      final lastContact = _lastTrackingContactAt;
+      if (lastContact.millisecondsSinceEpoch <= 0) return; // no contact yet
+      final gap = DateTime.now().difference(lastContact);
+      final bool stale = gap >= _trackingStaleAfter;
+      final bool lost = gap >= _trackingHardStaleAfter;
+      if (driverSignalStale.value != stale) driverSignalStale.value = stale;
+      if (driverSignalLost.value != lost) driverSignalLost.value = lost;
+    });
+  }
+
+  void _logReceiveMetricsIfNeeded() {
+    if (!kDebugMode) return;
+    final now = DateTime.now().toUtc();
+    if (now.difference(_receiveMetricsWindowStartedAt) <
+        const Duration(minutes: 1)) {
+      return;
+    }
+    AppLogger.log.d(
+      'ride tracking metrics receive_rate=$_receiveCountWindow/min '
+      'last_gap_ms=$_lastGapMs duplicate_dropped=$_duplicateDroppedCount '
+      'stale_dropped=$_staleDroppedCount',
+    );
+    _receiveMetricsWindowStartedAt = now;
+    _receiveCountWindow = 0;
+  }
+
+  bool _isWrongBookingTrackingPacket(Map<String, dynamic> payload) {
+    final packetBookingId =
+        (payload['bookingId'] ?? payload['bookingID'] ?? '')
+            .toString()
+            .trim();
+    return packetBookingId.isNotEmpty && packetBookingId != bookingId.trim();
+  }
+
+  bool _shouldIgnoreInconsistentTrackingPacket(
     Map<String, dynamic> payload,
     LatLng newPos,
-  ) {
+    DateTime receivedTsUtc, {
+    required bool simulated,
+  }) {
     final latestStatus =
         (payload['latestStatus'] ?? payload['status'] ?? '')
             .toString()
             .toUpperCase();
-    if (!_isDropPhaseStatus(latestStatus)) return false;
+    final rideStartedLike =
+        _isDropPhaseStatus(latestStatus) || driverStartedRide.value;
 
     final incomingDropMeters = _toDouble(payload['dropDistanceInMeters']);
     final previousDropMeters = dropDistanceMeters.value;
+    final incomingPickupMeters = _toDouble(payload['pickupDistanceInMeters']);
+    final previousPickupMeters = pickupDistanceMeters.value;
     final incomingSpeed = _toDouble(payload['speed']) ?? 0.0;
+    final incomingAccuracy =
+        _toDouble(
+          payload['accuracy'] ??
+              payload['horizontalAccuracy'] ??
+              payload['accuracyInMeters'],
+        ) ??
+        999.0;
     final currentDisplay = _displayPos ?? _emaPos ?? driverLocation.value;
-    final activeDestination = customerToLatLng;
+    final activeDestination =
+        rideStartedLike ? customerToLatLng : customerLatLng;
     final travelMoveMeters =
         currentDisplay == null
             ? 0.0
@@ -1242,6 +1516,7 @@ class OrderConfirmController extends GetxController
               newPos.longitude,
             );
     final nearDrop =
+        rideStartedLike &&
         activeDestination != null &&
         Geolocator.distanceBetween(
               newPos.latitude,
@@ -1250,20 +1525,75 @@ class OrderConfirmController extends GetxController
               activeDestination.longitude,
             ) <=
             32.0;
+    final currentDestMeters =
+        currentDisplay == null || activeDestination == null
+            ? null
+            : Geolocator.distanceBetween(
+              currentDisplay.latitude,
+              currentDisplay.longitude,
+              activeDestination.latitude,
+              activeDestination.longitude,
+            );
+    final newDestMeters =
+        activeDestination == null
+            ? null
+            : Geolocator.distanceBetween(
+              newPos.latitude,
+              newPos.longitude,
+              activeDestination.latitude,
+              activeDestination.longitude,
+            );
+    final dtMs =
+        _lastAcceptedDriverLocationTs.millisecondsSinceEpoch <= 0
+            ? 0
+            : receivedTsUtc
+                .difference(_lastAcceptedDriverLocationTs)
+                .inMilliseconds;
+    final impliedSpeedMps =
+        dtMs > 0 ? travelMoveMeters / (dtMs / 1000.0) : 0.0;
 
     final suspiciousDistanceReset =
+        rideStartedLike &&
         incomingDropMeters != null &&
         previousDropMeters > 0 &&
         incomingDropMeters > previousDropMeters + 220.0 &&
         travelMoveMeters < 45.0;
 
     final suspiciousNearDropReset =
+        rideStartedLike &&
         incomingDropMeters != null &&
         nearDrop &&
         incomingDropMeters > 260.0 &&
         incomingSpeed <= 1.0;
 
-    return suspiciousDistanceReset || suspiciousNearDropReset;
+    final suspiciousPickupReset =
+        !rideStartedLike &&
+        incomingPickupMeters != null &&
+        previousPickupMeters > 0 &&
+        incomingPickupMeters > previousPickupMeters + 180.0 &&
+        travelMoveMeters < 35.0;
+
+    final suspiciousBackwardDestinationJump =
+        rideStartedLike &&
+        currentDestMeters != null &&
+        newDestMeters != null &&
+        newDestMeters > currentDestMeters + (rideStartedLike ? 28.0 : 24.0) &&
+        travelMoveMeters < (rideStartedLike ? 35.0 : 28.0) &&
+        incomingSpeed <= 6.0;
+
+    final suspiciousTeleport =
+        currentDisplay != null &&
+        dtMs > 0 &&
+        travelMoveMeters > 65.0 &&
+        impliedSpeedMps > 22.0 &&
+        incomingSpeed < 12.0 &&
+        incomingAccuracy > 20.0;
+
+    return suspiciousDistanceReset ||
+        suspiciousNearDropReset ||
+        suspiciousPickupReset ||
+        suspiciousBackwardDestinationJump ||
+        (!simulated && suspiciousTeleport);
   }
 
   /// True when a real (non-simulated) fix is a tiny backward GPS jitter: a
@@ -1290,11 +1620,51 @@ class OrderConfirmController extends GetxController
     return incoming != null && incoming > pickupDistanceMeters.value + 2.0;
   }
 
+  String _effectiveTrackingSource(
+    Map<String, dynamic> payload, {
+    required String fallbackSource,
+  }) {
+    final raw =
+        (payload['source'] ?? payload['event'] ?? fallbackSource)
+            .toString()
+            .trim()
+            .toLowerCase();
+    if (raw == 'driver-heartbeat' || raw == 'heartbeat') {
+      return 'driver-heartbeat';
+    }
+    if (raw == 'updatelocation' ||
+        raw == 'update_location' ||
+        raw == 'driver-location' ||
+        raw == 'location') {
+      return 'updateLocation';
+    }
+    return fallbackSource;
+  }
+
+  bool _isLowPriorityHeartbeatSource(String source) {
+    return source == 'driver-heartbeat';
+  }
+
+  void _markAcceptedTrackingSource(String source) {
+    if (source == 'updateLocation') {
+      _lastAcceptedUpdateLocationAt = DateTime.now();
+    }
+  }
+
   void _handleDriverTrackingUpdate(dynamic data, {required String source}) {
     if (isClosed) return;
 
     final payload = _normalizeSocketPayload(data);
     if (payload.isEmpty) return;
+    if (_isWrongBookingTrackingPacket(payload)) {
+      if (kDebugMode) {
+        AppLogger.log.w(
+          'Ignoring wrong-booking $source packet '
+          'screenBooking=$bookingId packetBooking=${payload['bookingId']}',
+        );
+      }
+      return;
+    }
 
     final lat = _toDouble(payload['latitude'] ?? payload['lat']);
     final lng = _toDouble(payload['longitude'] ?? payload['lng']);
@@ -1302,6 +1672,12 @@ class OrderConfirmController extends GetxController
       AppLogger.log.e("Invalid $source payload: $payload");
       return;
     }
+    // Valid packet for our booking = live contact. Stamp + recover the chip now
+    // (even for stationary same-point snapshots) so a stopped-but-connected
+    // driver never surfaces as stale/lost.
+    _lastTrackingContactAt = DateTime.now();
+    if (driverSignalStale.value) driverSignalStale.value = false;
+    if (driverSignalLost.value) driverSignalLost.value = false;
 
     final isSimulated =
         payload['simulated'] == true ||
@@ -1310,17 +1686,62 @@ class OrderConfirmController extends GetxController
 
     final rawTs = _normalizeTrackingTimestampUtc(
       _parseServerTime(
-        payload['timestamp'] ?? payload['ts'] ?? payload['time'],
+        payload['timestamp'] ??
+            payload['serverTime'] ??
+            payload['serverReceivedAt'] ??
+            payload['serverEmittedAt'] ??
+            payload['deviceTimestamp'] ??
+            payload['ts'] ??
+            payload['time'],
       ),
       simulated: isSimulated,
     );
+    final rawSeq =
+        payload['seq'] ?? payload['sequence'] ?? payload['locationSeq'];
+    final seq =
+        rawSeq is num
+            ? rawSeq.toInt()
+            : int.tryParse((rawSeq ?? '').toString().trim());
     final newPos = LatLng(lat, lng);
+    final effectiveSource = _effectiveTrackingSource(
+      payload,
+      fallbackSource: source,
+    );
+    final isHeartbeatSource = _isLowPriorityHeartbeatSource(effectiveSource);
+    if (isHeartbeatSource &&
+        _lastAcceptedUpdateLocationAt.millisecondsSinceEpoch > 0 &&
+        DateTime.now().difference(_lastAcceptedUpdateLocationAt) <
+            _heartbeatLowPriorityWindow) {
+      _updateRideMetrics(payload, packetPos: newPos);
+      if (kDebugMode) {
+        AppLogger.log.d(
+          'Ignoring low-priority heartbeat '
+          'lastUpdateAgeMs=${DateTime.now().difference(_lastAcceptedUpdateLocationAt).inMilliseconds}',
+        );
+      }
+      return;
+    }
+
+    // ---- Monotonic phase/state machine (independent of position ordering) ----
+    // Apply status BEFORE the position gates below: a STARTED snapshot can carry
+    // an old timestamp that the ordering gate would otherwise drop, losing the
+    // pickup->drop switch; and a late ACCEPTED/ARRIVED must not rewind the mode.
+    final String latestStatusEarly =
+        (payload['latestStatus'] ?? payload['status'] ?? '')
+            .toString()
+            .toUpperCase();
+    if (latestStatusEarly.trim().isNotEmpty) {
+      _applyMonotonicPhase(latestStatusEarly, driverPos: newPos);
+    }
+
     final samePointAsLast =
         _lastAcceptedDriverLocationPos != null &&
         _isSameTrackingPoint(_lastAcceptedDriverLocationPos!, newPos);
     final olderThanLast = rawTs.isBefore(_lastAcceptedDriverLocationTs);
     if (samePointAsLast && !olderThanLast) {
-      _updateRideMetrics(payload);
+      _duplicateDroppedCount += 1;
+      _logReceiveMetricsIfNeeded();
+      _updateRideMetrics(payload, packetPos: newPos);
       final liveRideType =
           (payload['rideType'] ??
                   payload['vehicleType'] ??
@@ -1330,55 +1751,34 @@ class OrderConfirmController extends GetxController
       if (liveRideType.trim().isNotEmpty) {
         cartypeFromServer.value = liveRideType;
       }
-      final latestStatus =
-          (payload['latestStatus'] ?? payload['status'] ?? '')
-              .toString()
-              .toUpperCase();
-      final derivedRideStarted = _isDropPhaseStatus(latestStatus);
-      final derivedRideCompleted = _isCompletedStatus(latestStatus);
-      final effectiveStatus =
-          latestStatus.trim().isNotEmpty ? latestStatus : latestRideStatus.value;
-      if (derivedRideStarted && !driverStartedRide.value) {
-        driverStartedRide.value = true;
-        _didFitDriverAndDrop = false;
-        _seedStaticMarkers(forceRecreate: false);
-        _refreshPulseCircles();
-        _updatePolylinesForStatus(
-          effectiveStatus,
-          driverPos: newPos,
-          force: true,
-        );
-      }
-      if (derivedRideCompleted) {
-        if (!driverStartedRide.value) {
-          driverStartedRide.value = true;
-        }
-        destinationReached.value = true;
-        nearDestination.value = true;
-        etaChipText.value = 'Arrived at destination';
-        _seedStaticMarkers(forceRecreate: false);
-        _refreshPulseCircles();
-        _clearActiveRoute();
-      }
+      // Phase/status already handled by _applyMonotonicPhase above. This is a
+      // positional duplicate (snapshot / stationary) -> do NOT animate the
+      // marker or rebuild the polyline/trim (task 3).
       return;
     }
     if (!_shouldAcceptTrackingPacket(
       receivedTsUtc: rawTs,
       position: newPos,
       simulated: isSimulated,
-      source: source,
+      source: effectiveSource,
+      seq: seq,
     )) {
       if (kDebugMode) {
         AppLogger.log.w(
-          'Ignoring stale ride $source ts=$rawTs lat=$lat lng=$lng',
+          'Ignoring stale ride $effectiveSource ts=$rawTs lat=$lat lng=$lng',
         );
       }
       return;
     }
-    if (isSimulated && _shouldIgnoreInconsistentSimulatorPacket(payload, newPos)) {
+    if (_shouldIgnoreInconsistentTrackingPacket(
+      payload,
+      newPos,
+      rawTs,
+      simulated: isSimulated,
+    )) {
       if (kDebugMode) {
         AppLogger.log.w(
-          'Ignoring inconsistent simulated $source '
+          'Ignoring inconsistent $source '
           'lat=$lat lng=$lng dropDistance=${payload['dropDistanceInMeters']} '
           'speed=${payload['speed']}',
         );
@@ -1392,8 +1792,48 @@ class OrderConfirmController extends GetxController
     if (!isSimulated && _isBackwardMicroJitter(payload, newPos)) {
       return;
     }
+
+    _noteAcceptedTrackingPacket(rawTs);
+
+    // Stationary freeze (server-truth speed). The driver device's own `speed`
+    // field is the ground truth for "am I moving". The motion engine's
+    // implied-speed guard derives speed from position-delta/dt, which GPS
+    // scatter fools: a 1-2m wander while parked reads as ~2 m/s and slips
+    // through, so the marker danced and the heading flipped (the "car shakes /
+    // jumps forward then back" bug at signals and while waiting). When the
+    // device reports it is essentially stopped and the step is tiny, hold the
+    // marker instead of propagating jitter to the map widget.
+    final double? srvSpeedMps = _toDouble(payload['speed']);
+    if (!isSimulated &&
+        srvSpeedMps != null &&
+        srvSpeedMps < 0.7 &&
+        _lastAcceptedDriverLocationPos != null) {
+      final stoppedMove = Geolocator.distanceBetween(
+        _lastAcceptedDriverLocationPos!.latitude,
+        _lastAcceptedDriverLocationPos!.longitude,
+        newPos.latitude,
+        newPos.longitude,
+      );
+      if (stoppedMove < 3.0) {
+        // Keep ordering monotonic and refresh ETA/labels, but do NOT move or
+        // rotate the marker. Anchor stays put so the next genuine move is
+        // measured from here, not from a jittered point.
+        _lastAcceptedDriverLocationTs = rawTs;
+        if (seq != null && seq > 0) {
+          _lastAcceptedDriverSeq = seq;
+        }
+        _markAcceptedTrackingSource(effectiveSource);
+        _updateRideMetrics(payload, packetPos: newPos);
+        return;
+      }
+    }
+
     _lastAcceptedDriverLocationTs =
         rawTs;
+    if (seq != null && seq > 0) {
+      _lastAcceptedDriverSeq = seq;
+    }
+    _markAcceptedTrackingSource(effectiveSource);
     _lastAcceptedDriverLocationPos = newPos;
     driverLocation.value = newPos;
 
@@ -1413,34 +1853,14 @@ class OrderConfirmController extends GetxController
         (payload['latestStatus'] ?? payload['status'] ?? '')
             .toString()
             .toUpperCase();
-    _updateRideMetrics(payload);
+    _updateRideMetrics(payload, packetPos: newPos);
+    // Phase transitions are owned by _applyMonotonicPhase (run at the top of
+    // this handler). These locals only decide the position-driven route re-fetch
+    // below — they no longer drive the mode switch.
     final derivedRideStarted = _isDropPhaseStatus(latestStatus);
     final derivedRideCompleted = _isCompletedStatus(latestStatus);
     final effectiveStatus =
         latestStatus.trim().isNotEmpty ? latestStatus : latestRideStatus.value;
-
-    if (derivedRideStarted && !driverStartedRide.value) {
-      driverStartedRide.value = true;
-      _didFitDriverAndDrop = false;
-      _seedStaticMarkers(forceRecreate: false);
-      _refreshPulseCircles();
-      _updatePolylinesForStatus(
-        effectiveStatus,
-        driverPos: newPos,
-        force: true,
-      );
-    }
-    if (derivedRideCompleted) {
-      if (!driverStartedRide.value) {
-        driverStartedRide.value = true;
-      }
-      destinationReached.value = true;
-      nearDestination.value = true;
-      etaChipText.value = 'Arrived at destination';
-      _seedStaticMarkers(forceRecreate: false);
-      _refreshPulseCircles();
-      _clearActiveRoute();
-    }
 
     if (_displayPos == null) {
       _displayPos = newPos;
@@ -1467,14 +1887,19 @@ class OrderConfirmController extends GetxController
       newPos,
       serverTs: rawTs,
       bearing: srvBearing,
-      allowDeadReckoning: false,
+      allowDeadReckoning: true,
     );
 
+    // Re-fetch only on a meaningful move (was 2.5m). At 2.5m nearly every
+    // packet re-fetched the route from a slightly different (jittery) origin,
+    // which replaced `activeRoutePoints` and reset the widget's forward-only
+    // trim index -> the line kept snapping back to full length and wobbling
+    // between road snaps. Phase changes still force an immediate refresh below.
     final shouldRefreshRoute =
         activeRoutePoints.isEmpty ||
         derivedRideStarted ||
         derivedRideCompleted ||
-        displayDeltaMeters > 2.5;
+        displayDeltaMeters > 20.0;
     if (shouldRefreshRoute) {
       _updatePolylinesForStatus(effectiveStatus, driverPos: newPos);
     }
@@ -1537,19 +1962,51 @@ class OrderConfirmController extends GetxController
         : '${km.toStringAsFixed(1)} km';
   }
 
-  void _updateRideMetrics(dynamic data) {
+  void _updateRideMetrics(dynamic data, {LatLng? packetPos}) {
     pickupDurationMin.value = _toInt(data['pickupDurationInMin']);
     dropDurationMin.value = _toInt(data['dropDurationInMin']);
     tripDurationMin.value = _toInt(data['tripDurationInMin']);
-    pickupDistanceMeters.value =
-        _toDouble(data['pickupDistanceInMeters']) ?? 0.0;
-    dropDistanceMeters.value = _toDouble(data['dropDistanceInMeters']) ?? 0.0;
     final incomingStatus =
         (data['latestStatus'] ?? data['status'] ?? '').toString().toUpperCase();
     if (incomingStatus.isNotEmpty) {
       latestRideStatus.value = incomingStatus;
     }
-    if (!driverStartedRide.value) {
+    final rideStartedLike =
+        driverStartedRide.value || _isDropPhaseStatus(incomingStatus);
+    final anchorPos = _displayPos ?? _emaPos ?? driverLocation.value;
+    final travelMoveMeters =
+        packetPos == null || anchorPos == null
+            ? 0.0
+            : Geolocator.distanceBetween(
+              anchorPos.latitude,
+              anchorPos.longitude,
+              packetPos.latitude,
+              packetPos.longitude,
+            );
+
+    var nextPickupMeters = _toDouble(data['pickupDistanceInMeters']) ?? 0.0;
+    var nextDropMeters = _toDouble(data['dropDistanceInMeters']) ?? 0.0;
+
+    if (rideStartedLike) {
+      nextPickupMeters = 0.0;
+      if (dropDistanceMeters.value > 0 &&
+          nextDropMeters > dropDistanceMeters.value + 220.0 &&
+          travelMoveMeters < 45.0) {
+        nextDropMeters = dropDistanceMeters.value;
+      }
+    } else {
+      nextDropMeters = 0.0;
+      if (pickupDistanceMeters.value > 0 &&
+          nextPickupMeters > pickupDistanceMeters.value + 180.0 &&
+          travelMoveMeters < 35.0) {
+        nextPickupMeters = pickupDistanceMeters.value;
+      }
+    }
+
+    pickupDistanceMeters.value = nextPickupMeters;
+    dropDistanceMeters.value = nextDropMeters;
+
+    if (!rideStartedLike) {
       final mins = pickupDurationMin.value;
       final meters = pickupDistanceMeters.value;
       // App-side arrival check (fires first; the `driver-arrived` socket event
@@ -2122,8 +2579,11 @@ class OrderConfirmController extends GetxController
     required LatLng destination,
   }) {
     final phase = toDrop ? 'toDrop' : 'toPickup';
+    // Origin is rounded to 4 dp (~11m) instead of 5 dp (~1m): a driver creeping
+    // 1-2m no longer produces a new cache key (and a fresh Directions call) on
+    // every packet. Destination stays at 5 dp since it is fixed per phase.
     return '$phase|'
-        '${origin.latitude.toStringAsFixed(5)}|${origin.longitude.toStringAsFixed(5)}|'
+        '${origin.latitude.toStringAsFixed(4)}|${origin.longitude.toStringAsFixed(4)}|'
         '${destination.latitude.toStringAsFixed(5)}|${destination.longitude.toStringAsFixed(5)}';
   }
 

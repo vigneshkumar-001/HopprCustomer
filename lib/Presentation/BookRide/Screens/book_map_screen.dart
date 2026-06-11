@@ -10,6 +10,7 @@ import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Core/Consents/app_logger.dart';
 import 'package:hopper/Core/Utility/app_buttons.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
+import 'package:hopper/Core/Utility/empty_state_view.dart';
 import 'package:hopper/Core/Utility/app_loader.dart';
 import 'package:hopper/Core/Utility/app_toasts.dart';
 
@@ -497,14 +498,12 @@ class _BookMapScreenState extends State<BookMapScreen> {
                                 child: CupertinoActivityIndicator(radius: 14),
                               );
                             }
-                            return const Center(
-                              child: Text(
-                                'No drivers in your location',
-                                style: TextStyle(
-                                  fontSize: 16,
-                                  color: Colors.grey,
-                                ),
-                              ),
+                            return EmptyStateView(
+                              imageSize: 120,
+                              image: AppImages.emptyNoDrivers,
+                              title: "No drivers nearby",
+                              subtitle:
+                                  "We couldn't find any drivers in your location right now.",
                             );
                           }
 

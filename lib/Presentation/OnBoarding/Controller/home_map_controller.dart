@@ -103,6 +103,7 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
   final Map<String, Timer> _moveTimers = {};
   final Map<String, DateTime> _lastSocketProcessedAt = {};
   Timer? _publishDebounce;
+  Timer? _staleDriverGcTimer;
 
   static const int _socketThrottleMs = 250;
   // Smoother nearby-driver animation (Uber/Ola-like).
@@ -150,6 +151,7 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _geocodeDebounce?.cancel();
     _publishDebounce?.cancel();
+    _staleDriverGcTimer?.cancel();
     _compassThrottle?.cancel();
     _compassSub?.cancel();
     _gateReadyWorker?.dispose();
@@ -752,6 +754,9 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
 
       _publishMarkersDebounced();
     });
+
+    // Safety net: expire markers whose driver has gone silent (missed removal).
+    _startStaleDriverGc();
   }
 
   Future<bool> _ensureLocationReady() async => gate.isReady.value;
@@ -1248,6 +1253,51 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
       markers.assignAll(_buildPublishedDriverMarkers());
       markersRevision.value++;
     });
+  }
+
+  // ---------------- stale-driver GC (safety net) ----------------
+  // A nearby-driver car marker must never get "stuck" if a `remove-nearby-driver`
+  // event is missed (e.g. during a socket reconnect / network blip). Every 15s we
+  // drop any driver we haven't heard from in >90s. 90s is comfortably above the
+  // live-driver heartbeat (~25s), so a genuinely live driver is never GC'd — only
+  // ones that have actually gone away. On reconnect the backend also re-sends a
+  // fresh nearby snapshot which reconciles the set; this GC just guarantees the
+  // cleanup happens even when that snapshot is delayed or missed.
+  static const Duration _staleDriverGcInterval = Duration(seconds: 15);
+  static const Duration _staleDriverTtl = Duration(seconds: 90);
+
+  void _startStaleDriverGc() {
+    _staleDriverGcTimer?.cancel();
+    _staleDriverGcTimer = Timer.periodic(
+      _staleDriverGcInterval,
+      (_) => _sweepStaleDrivers(),
+    );
+  }
+
+  void _sweepStaleDrivers() {
+    if (_driverMarkers.isEmpty) return;
+
+    // _lastSocketProcessedAt is stored in UTC (see the nearby-driver handlers).
+    final now = DateTime.now().toUtc();
+    // Collect first, then remove, so we don't mutate _driverMarkers while iterating.
+    final stale = <String>[];
+    for (final driverId in _driverMarkers.keys) {
+      final last = _lastSocketProcessedAt[driverId];
+      if (last != null && now.difference(last) > _staleDriverTtl) {
+        stale.add(driverId);
+      }
+    }
+    if (stale.isEmpty) return;
+
+    for (final driverId in stale) {
+      // Mirror the `remove-nearby-driver` handler exactly.
+      _moveTimers.remove(driverId)?.cancel();
+      _driverMarkers.remove(driverId);
+      _driverTypes.remove(driverId);
+      _lastPos.remove(driverId);
+      _lastSocketProcessedAt.remove(driverId);
+    }
+    _publishMarkersDebounced();
   }
 
   Set<Marker> _buildPublishedDriverMarkers() {

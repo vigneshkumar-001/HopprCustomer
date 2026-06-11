@@ -114,12 +114,18 @@ class RideTrackingMapState extends State<RideTrackingMap>
         _maybeTrimRoute(pos);
         _maybeFollowCamera(pos);
       },
-      playbackDelay: const Duration(milliseconds: 220),
-      minSeg: const Duration(milliseconds: 320),
-      maxSeg: const Duration(milliseconds: 2600),
+      // Buffer ~0.8 of a packet interval against the driver's steady ~1s feed:
+      // a small constant lag bought for near-zero stutter (Uber/Ola do the same).
+      playbackDelay: const Duration(milliseconds: 800),
+      // Clamp each segment to ~the real packet cadence so the marker keeps
+      // gliding until the next packet lands instead of racing then freezing.
+      minSeg: const Duration(milliseconds: 700),
+      maxSeg: const Duration(milliseconds: 1500),
       minMoveMeters: 1.5,
       requireBearingForDeadReckoning: true,
-      maxDeadReckonPacketGap: const Duration(seconds: 4),
+      // > the 1s feed with margin: a single missed packet coasts smoothly,
+      // but we stop projecting once the gap is clearly too large.
+      maxDeadReckonPacketGap: const Duration(milliseconds: 2500),
       stationarySpeedThresholdMps: 0.35,
       stationaryIgnoreUnderMeters: 1.8,
     );

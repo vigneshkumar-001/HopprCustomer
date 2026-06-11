@@ -2949,21 +2949,31 @@ class _SharedScreensState extends State<SharedScreens>
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const Icon(Icons.error_outline, color: Colors.redAccent, size: 80),
+          Image.asset(
+            AppImages.emptyNoDrivers,
+            width: 150,
+            height: 150,
+            fit: BoxFit.contain,
+          ),
           const SizedBox(height: 20),
           const Text(
-            "No Drivers Found",
+            "No drivers found",
             style: TextStyle(
-              fontSize: 22,
-              fontWeight: FontWeight.bold,
-              color: Colors.redAccent,
+              fontSize: 16,
+              fontWeight: FontWeight.w700,
+              color: Color(0xFF14213A),
             ),
           ),
           const SizedBox(height: 8),
           const Text(
             "We couldn't find any available drivers nearby.\nPlease try again in a few minutes",
             textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 16, color: Colors.grey),
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w400,
+              color: Color(0xFF667085),
+              height: 1.4,
+            ),
           ),
           const SizedBox(height: 30),
           AppButtons.button(

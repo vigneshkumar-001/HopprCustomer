@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Core/Utility/app_loader.dart';
+import 'package:hopper/Core/Utility/empty_state_view.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textFields.dart';
 import 'package:hopper/Presentation/wallet/controller/wallet_controller.dart';
 import 'package:get/get.dart';
@@ -120,20 +121,13 @@ class _WalletScreenState extends State<WalletScreen> {
                       historyError != null &&
                       walletController.transactions.isEmpty)
                     Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 40),
-                      child: Column(
-                        children: [
-                          Text(
-                            historyError,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(color: Colors.red),
-                          ),
-                          const SizedBox(height: 12),
-                          ElevatedButton(
-                            onPressed: walletController.refreshWallet,
-                            child: const Text('Retry'),
-                          ),
-                        ],
+                      padding: const EdgeInsets.symmetric(vertical: 24),
+                      child: EmptyStateView(
+                        image: AppImages.errorServer,
+                        title: "Something went wrong",
+                        subtitle:
+                            "We couldn't load your wallet history. Please try again.",
+                        onRetry: walletController.refreshWallet,
                       ),
                     ),
 
@@ -141,8 +135,13 @@ class _WalletScreenState extends State<WalletScreen> {
                       historyError == null &&
                       filtered.isEmpty)
                     Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 40),
-                      child: Center(child: Text("No transactions found.")),
+                      padding: const EdgeInsets.symmetric(vertical: 24),
+                      child: EmptyStateView(
+                        image: AppImages.emptyWallet,
+                        title: "No transactions yet",
+                        subtitle:
+                            "Your wallet top-ups, payments and refunds will appear here.",
+                      ),
                     ),
 
                   /// LIST ITEMS

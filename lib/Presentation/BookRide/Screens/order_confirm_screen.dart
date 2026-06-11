@@ -436,7 +436,10 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                           c.driverStartedRide.value
                               ? 'Ride in progress'
                               : 'Driver reaching pickup',
-                      onMapReady: (controller) => c.onMapCreated(controller),
+                      // The embedded ride-map widget manages its own camera.
+                      // Handing the same controller back to OrderConfirmController
+                      // made two different follow systems animate the map at once.
+                      onMapReady: null,
                       // Bottom sheet overlays the lower portion; keep map padding
                       // so Google logo/controls never overlap the sheet.
                       mapPadding: const EdgeInsets.only(bottom: 210),
@@ -1828,21 +1831,31 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const Icon(Icons.error_outline, color: Colors.redAccent, size: 80),
+          Image.asset(
+            AppImages.emptyNoDrivers,
+            width: 150,
+            height: 150,
+            fit: BoxFit.contain,
+          ),
           const SizedBox(height: 20),
           const Text(
-            "No Driver Found",
+            "No drivers found",
             style: TextStyle(
-              fontSize: 22,
-              fontWeight: FontWeight.bold,
-              color: Colors.redAccent,
+              fontSize: 16,
+              fontWeight: FontWeight.w700,
+              color: Color(0xFF14213A),
             ),
           ),
           const SizedBox(height: 8),
           const Text(
-            "We could not find any available drivers nearby.\nPlease try again in a few minutes.",
+            "We couldn't find any available drivers nearby.\nPlease try again in a few minutes.",
             textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 16, color: Colors.grey),
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w400,
+              color: Color(0xFF667085),
+              height: 1.4,
+            ),
           ),
           const SizedBox(height: 30),
           AppButtons.button(

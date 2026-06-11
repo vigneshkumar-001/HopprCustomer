@@ -11,6 +11,10 @@ class NotificationController extends GetxController {
   RxBool isLoading = false.obs;
   RxBool isMoreLoading = false.obs;
 
+  /// True when the last refresh failed (network / 500) so the screen can show
+  /// the server-error state with a "Try again" action.
+  RxBool hasError = false.obs;
+
   RxList<NotificationData> notificationData = <NotificationData>[].obs;
 
   int currentPage = 1;
@@ -26,6 +30,7 @@ class NotificationController extends GetxController {
     if (isFirstLoad) {
       currentPage = 1;
       notificationData.clear();
+      hasError.value = false;
       isLoading.value = true;
     } else {
       if (currentPage > totalPages) return;
@@ -38,7 +43,10 @@ class NotificationController extends GetxController {
       );
 
       results.fold(
-            (failure) => AppLogger.log.e("Error: $failure"),
+            (failure) {
+          AppLogger.log.e("Error: $failure");
+          if (isFirstLoad) hasError.value = true;
+        },
             (response) {
           totalPages = response.totalPages ?? 1;
 
@@ -54,6 +62,7 @@ class NotificationController extends GetxController {
       );
     } catch (e) {
       AppLogger.log.e("❌ Exception: $e");
+      if (isFirstLoad) hasError.value = true;
     } finally {
       isLoading.value = false;
       isMoreLoading.value = false;

@@ -3,6 +3,7 @@ import 'package:dotted_line/dotted_line.dart';
 import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Core/Utility/app_loader.dart';
+import 'package:hopper/Core/Utility/empty_state_view.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:hopper/Presentation/Drawer/controller/ride_history_controller.dart';
 import 'package:hopper/Presentation/Drawer/screens/ride_details_screen.dart';
@@ -65,10 +66,24 @@ class _RideAndPackageHistoryScreenState
           onRefresh: () => controller.getRideHistory(isFirstLoad: true),
           child: ListView(
             physics: const AlwaysScrollableScrollPhysics(),
-            children: const [
+            children: [
               SizedBox(
-                height: 300,
-                child: Center(child: Text("No Ride found")),
+                height: 360,
+                child: controller.hasError.value
+                    ? EmptyStateView(
+                        image: AppImages.errorServer,
+                        title: "Something went wrong",
+                        subtitle:
+                            "We couldn't load your rides. Please try again.",
+                        onRetry: () =>
+                            controller.getRideHistory(isFirstLoad: true),
+                      )
+                    : EmptyStateView(
+                        image: AppImages.emptyRides,
+                        title: "No rides yet",
+                        subtitle:
+                            "Your completed rides will appear here once you take your first trip.",
+                      ),
               ),
             ],
           ),
@@ -285,10 +300,24 @@ class _RideAndPackageHistoryScreenState
           onRefresh: () => controller.getRideHistory(isFirstLoad: true),
           child: ListView(
             physics: const AlwaysScrollableScrollPhysics(),
-            children: const [
+            children: [
               SizedBox(
-                height: 300,
-                child: Center(child: Text("No Ride found")),
+                height: 360,
+                child: controller.hasError.value
+                    ? EmptyStateView(
+                        image: AppImages.errorServer,
+                        title: "Something went wrong",
+                        subtitle:
+                            "We couldn't load your deliveries. Please try again.",
+                        onRetry: () =>
+                            controller.getRideHistory(isFirstLoad: true),
+                      )
+                    : EmptyStateView(
+                        image: AppImages.emptyRides,
+                        title: "No deliveries yet",
+                        subtitle:
+                            "Your package deliveries will appear here once you send your first parcel.",
+                      ),
               ),
             ],
           ),

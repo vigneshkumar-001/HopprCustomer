@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Core/Utility/app_loader.dart';
+import 'package:hopper/Core/Utility/empty_state_view.dart';
 import 'package:hopper/Presentation/Drawer/controller/notification_controller.dart';
 import 'package:hopper/Presentation/Drawer/models/notification_response.dart';
 import '../../Authentication/widgets/textFields.dart';
@@ -172,7 +173,24 @@ class _NotificationScreenState extends State<NotificationScreen>
       }
 
       if (notifications.isEmpty) {
-        return const Center(child: Text("No notifications"));
+        final overallEmpty =
+            notificationController.notificationData.isEmpty;
+        if (notificationController.hasError.value && overallEmpty) {
+          return EmptyStateView(
+            image: AppImages.errorServer,
+            title: "Something went wrong",
+            subtitle:
+                "We couldn't load your notifications. Please try again.",
+            onRetry: () =>
+                notificationController.getNotification(isFirstLoad: true),
+          );
+        }
+        return EmptyStateView(
+          image: AppImages.emptyNotifications,
+          title: "No notifications yet",
+          subtitle:
+              "Updates about your rides, payments and offers will appear here.",
+        );
       }
 
       return RefreshIndicator(

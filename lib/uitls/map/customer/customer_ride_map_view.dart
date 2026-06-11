@@ -77,6 +77,8 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   List<LatLng> _fullRoute = const <LatLng>[];
   List<LatLng> _remainingRoute = const <LatLng>[];
   int _lastTrimIndex = 0;
+  double? _lastTrimDistanceToTargetMeters;
+  int _trimPausedCount = 0;
   String _routeSig = '';
 
   Set<Polyline> _polylines = const <Polyline>{};
@@ -106,6 +108,9 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   DateTime _lastFitAt = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastFitKey = '';
   bool _pendingFit = false;
+  DateTime _phaseSwitchRawUntil = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _routeSnapSuspendedUntil = DateTime.fromMillisecondsSinceEpoch(0);
+  int _consecutiveSnapMisses = 0;
 
   double _currentZoom = MapUiConfig.initialZoom;
 
@@ -193,16 +198,29 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
         _maybeFollowCamera(snapped.position);
         _maybeCelebrateArrival(snapped.position);
       },
-      playbackDelay: const Duration(milliseconds: 220),
-      minSeg: const Duration(milliseconds: 320),
-      maxSeg: const Duration(milliseconds: 2600),
+      // Buffer ~0.8 of a packet interval against the driver's steady ~1s feed:
+      // a small constant lag bought for near-zero stutter (Uber/Ola do the same).
+      playbackDelay: const Duration(milliseconds: 800),
+      // Clamp each segment to ~the real packet cadence so the marker keeps
+      // gliding until the next packet lands instead of racing then freezing.
+      minSeg: const Duration(milliseconds: 700),
+      maxSeg: const Duration(milliseconds: 1500),
       // Lower gates so slow / stop-and-go traffic still moves the car instead of
       // freezing. Snap-to-route + the marker throttle still suppress jitter.
       minMoveMeters: 0.8,
       requireBearingForDeadReckoning: true,
-      maxDeadReckonPacketGap: const Duration(seconds: 4),
+      // > the 1s feed with margin: a single missed packet coasts smoothly,
+      // but we stop projecting once the gap is clearly too large.
+      maxDeadReckonPacketGap: const Duration(seconds: 5),
+      deadReckonStopAfter: const Duration(seconds: 5),
       stationarySpeedThresholdMps: 0.35,
       stationaryIgnoreUnderMeters: 1.0,
+      // A real car cannot spin: cap rotation at 120°/s (a 90° turn animates in
+      // ~0.75s) instead of the 540°/s default that let a single noisy heading
+      // flip the icon ~195° in one packet. Slower bearing EMA (0.30) further
+      // damps any residual jitter that slips past the stationary freeze.
+      maxTurnDegPerSec: 120.0,
+      bearingEmaAlpha: 0.30,
     );
 
     _loadMapStyle();
@@ -262,6 +280,20 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       _syncRoute(force: true);
       _syncMarkers(force: true);
       _rebuildPolylines();
+      _consecutiveSnapMisses = 0;
+      // Phase switch is the riskiest moment for customer tracking visuals:
+      // the driver has just transitioned from pickup flow to drop flow while the
+      // new route may still be fetching or may not yet match the first started
+      // packet. For a short warm-up, prefer raw GPS so we do not yank the car
+      // back onto the stale pickup leg or an old drop polyline.
+      final warmupUntil = DateTime.now().add(
+        widget.mode == RideMapMode.toDrop
+            ? const Duration(seconds: 4)
+            : const Duration(seconds: 2),
+      );
+      _phaseSwitchRawUntil = warmupUntil;
+      _routeSnapSuspendedUntil = warmupUntil;
+      _lastTrimDistanceToTargetMeters = null;
       // Drop the stale pickup-phase motion (queued poses + carried-over
       // bearing) so the car doesn't glide the wrong way into the drop leg. It
       // re-seeds at the current display pose and re-derives heading from the
@@ -339,12 +371,14 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       _fullRoute = const <LatLng>[];
       _remainingRoute = const <LatLng>[];
       _lastTrimIndex = 0;
+      _lastTrimDistanceToTargetMeters = null;
       _rebuildPolylines();
       return;
     }
     _fullRoute = List<LatLng>.unmodifiable(List<LatLng>.from(pts));
     _remainingRoute = _fullRoute;
     _lastTrimIndex = 0;
+    _lastTrimDistanceToTargetMeters = null;
     final livePos = _vehiclePos ?? widget.driverLocation;
     if (livePos != null) {
       final snapped = _snapAndBearing(livePos);
@@ -917,6 +951,16 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     // Pickup always used `_fullRoute` and was perfect; drop now matches it.
     final routeForSnap = _fullRoute;
     final fallbackBearing = rawBearing ?? _vehicleBearing;
+    final now = DateTime.now();
+
+    if (widget.mode == RideMapMode.toDrop &&
+        now.isBefore(_phaseSwitchRawUntil)) {
+      return _SnappedPose(position: raw, bearing: fallbackBearing);
+    }
+
+    if (now.isBefore(_routeSnapSuspendedUntil)) {
+      return _SnappedPose(position: raw, bearing: fallbackBearing);
+    }
 
     if (routeForSnap.length < 2) {
       return _SnappedPose(position: raw, bearing: fallbackBearing);
@@ -931,6 +975,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     // "parallel road lock" and makes the vehicle appear to cut across streets.
     if (nearest.distanceMeters >
         (toleranceMeters ?? MapUiConfig.snapToRouteToleranceMeters)) {
+      _noteSnapMiss(nearest.distanceMeters);
       return _SnappedPose(position: raw, bearing: fallbackBearing);
     }
 
@@ -950,6 +995,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     if (rawBearing != null &&
         bearingMismatch > 85.0 &&
         nearest.distanceMeters > 4.0) {
+      _noteSnapMiss(nearest.distanceMeters);
       return _SnappedPose(position: raw, bearing: fallbackBearing);
     }
 
@@ -973,8 +1019,11 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
             );
     if (nearest.distanceMeters > 6.0 &&
         snappedMoveFromCurrent > rawMoveFromCurrent + 14.0) {
+      _noteSnapMiss(nearest.distanceMeters);
       return _SnappedPose(position: raw, bearing: fallbackBearing);
     }
+
+    _consecutiveSnapMisses = 0;
 
     // Snap the heading toward the route tangent quickly so the vehicle points
     // where it is actually travelling (prevents the "sliding sideways" look).
@@ -992,6 +1041,22 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     );
 
     return _SnappedPose(position: resolved, bearing: smooth);
+  }
+
+  void _noteSnapMiss(double distanceMeters) {
+    _consecutiveSnapMisses++;
+    // Alternate-route / stale-route protection: if drop-phase GPS repeatedly
+    // disagrees with the current polyline, stop snapping for a short period and
+    // let the car follow raw fixes until the controller reroutes. This prevents
+    // the customer-side marker from moving in a jagged "rubber-band" pattern.
+    if (widget.mode != RideMapMode.toDrop) return;
+    if (_consecutiveSnapMisses < 2) return;
+    final hold =
+        distanceMeters > MapUiConfig.snapToRouteToleranceMeters + 18.0
+            ? const Duration(seconds: 10)
+            : const Duration(seconds: 6);
+    _routeSnapSuspendedUntil = DateTime.now().add(hold);
+    _consecutiveSnapMisses = 0;
   }
 
   LatLng _resolveDisplayPosition({
@@ -1119,18 +1184,35 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     }
     _lastPolylineTrimAt = now;
 
-    final idx = _nearestIndexInWindow(
-      vehiclePos,
-      _fullRoute,
-      lastIndex: _lastTrimIndex,
-      window: 34,
-      maxSnapMeters: MapUiConfig.snapToRouteToleranceMeters + 18.0,
-    );
-    if (idx == null) return;
+    final nearest = _nearestSnapCandidate(vehiclePos, _fullRoute);
+    if (nearest == null) return;
+    if (nearest.distanceMeters >
+        MapUiConfig.snapToRouteToleranceMeters + 18.0) {
+      return;
+    }
+    final idx = nearest.segmentIndex + (nearest.t >= 0.60 ? 1 : 0);
 
     // Don't bounce backwards unless very small (GPS noise).
     if (idx + 2 < _lastTrimIndex) return;
     if ((idx - _lastTrimIndex).abs() < 1) return;
+
+    final activeTarget =
+        widget.mode == RideMapMode.toDrop ? widget.drop : widget.pickup;
+    final currentGapToTarget = haversineDistanceMeters(vehiclePos, activeTarget);
+    final previousGapToTarget = _lastTrimDistanceToTargetMeters;
+    if (!force &&
+        previousGapToTarget != null &&
+        currentGapToTarget > previousGapToTarget + 26.0) {
+      _trimPausedCount += 1;
+      if (kDebugMode) {
+        AppLogger.log.d(
+          'ride map trim paused trim_paused_count=$_trimPausedCount '
+          'current_gap_m=${currentGapToTarget.toStringAsFixed(1)} '
+          'previous_gap_m=${previousGapToTarget.toStringAsFixed(1)}',
+        );
+      }
+      return;
+    }
 
     final maxTrimStart = (_fullRoute.length - 2).clamp(
       0,
@@ -1140,6 +1222,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     if (clamped <= _lastTrimIndex) return;
 
     _lastTrimIndex = clamped;
+    _lastTrimDistanceToTargetMeters = currentGapToTarget;
     _remainingRoute = List<LatLng>.unmodifiable(_fullRoute.sublist(clamped));
 
     _rebuildPolylines();
