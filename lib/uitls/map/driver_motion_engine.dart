@@ -269,7 +269,13 @@ class DriverMotionEngine {
     if (_poseQueue.isEmpty) return;
     if (_displayPos == null) return;
 
-    final from = _displayPos!;
+    // Animate from the CURRENT VISIBLE (rendered) position, not the previous
+    // segment's TARGET. Starting from `_displayPos` (the last target) while the
+    // visible marker (`_emaPos`) still trailed it behind made the marker JUMP
+    // forward to catch up at every segment boundary — the "jerk / zig-zag" on
+    // the curvy drop leg. Tween.begin = the rendered pose keeps motion smooth
+    // and continuous (no snap-back / no catch-up hop).
+    final from = _emaPos ?? _displayPos!;
     final toPose = _poseQueue.removeAt(0);
     final to = toPose.position;
 

@@ -77,6 +77,13 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   List<LatLng> _fullRoute = const <LatLng>[];
   List<LatLng> _remainingRoute = const <LatLng>[];
   int _lastTrimIndex = 0;
+  // Forward-only marker progress along the route (fractional `_fullRoute`
+  // index). The displayed marker must never step BACKWARD along the route on
+  // GPS jitter (the stop/start "front-and-back" on the drop leg) — only on a
+  // genuine reverse. Reset whenever the route/phase changes. Phase-symmetric:
+  // the pickup leg already advances monotonically, so this is a no-op there.
+  double _markerRouteProgress = -1.0;
+  static const double _kRealReverseMeters = 8.0;
   double? _lastTrimDistanceToTargetMeters;
   int _trimPausedCount = 0;
   String _routeSig = '';
@@ -181,22 +188,20 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     _motion = DriverMotionEngine(
       vsync: this,
       onUpdate: (pos, bearing) {
-        final snapped = _snapAndBearing(
-          pos,
-          rawBearing: bearing,
-          toleranceMeters: MapUiConfig.snapToRouteToleranceMeters + 10.0,
-        );
-        _queueVehicleMarker(snapped.position, snapped.bearing);
+        // Raw fixes are snapped ONCE, on ingest (with the forward-only progress
+        // guard), so the engine already interpolates between on-route targets.
+        // Re-snapping the interpolated pose EVERY FRAME shifted the snap target
+        // frame-to-frame and produced the lateral "zig-zag" on the drop leg.
+        // Render the interpolated pose directly; `bearing` is the route-aligned
+        // heading carried from ingest (stable, no per-frame GPS recompute).
+        _queueVehicleMarker(pos, bearing);
       },
       onFrameSideEffects: (pos) {
-        final snapped = _snapAndBearing(
-          pos,
-          rawBearing: _vehicleBearing,
-          toleranceMeters: MapUiConfig.snapToRouteToleranceMeters + 10.0,
-        );
-        _maybeTrimRoute(snapped.position);
-        _maybeFollowCamera(snapped.position);
-        _maybeCelebrateArrival(snapped.position);
+        // Trim / camera / arrival each do their own route projection off the
+        // rendered pose — no per-frame re-snap of the marker itself.
+        _maybeTrimRoute(pos);
+        _maybeFollowCamera(pos);
+        _maybeCelebrateArrival(pos);
       },
       // Buffer ~0.8 of a packet interval against the driver's steady ~1s feed:
       // a small constant lag bought for near-zero stutter (Uber/Ola do the same).
@@ -367,6 +372,10 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     if (!force && sig == _routeSig) return;
 
     _routeSig = sig;
+    // New route (or phase switch -> new leg): the `_fullRoute` index space
+    // changes, so re-baseline forward-progress. The next accepted fix sets the
+    // floor afresh instead of being judged "backward" against the old route.
+    _markerRouteProgress = -1.0;
     if (!_routeMatchesCurrentMode(pts)) {
       _fullRoute = const <LatLng>[];
       _remainingRoute = const <LatLng>[];
@@ -953,6 +962,17 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     final fallbackBearing = rawBearing ?? _vehicleBearing;
     final now = DateTime.now();
 
+    // Glue the marker to the route harder during the DROP leg. That route is the
+    // actual trip path and the controller keeps it fresh with a frequent
+    // off-route reroute (24m / 10s), so a wider snap tolerance keeps the car ON
+    // the line instead of darting out to raw GPS — the "slide / front-and-back"
+    // jitter — for the normal lane offset + route-simplification error seen on a
+    // long drop route. Pickup keeps its tighter tolerance (already perfect).
+    final double baseTol =
+        toleranceMeters ?? MapUiConfig.snapToRouteToleranceMeters;
+    final double effectiveTol =
+        widget.mode == RideMapMode.toDrop ? baseTol + 16.0 : baseTol;
+
     if (widget.mode == RideMapMode.toDrop &&
         now.isBefore(_phaseSwitchRawUntil)) {
       return _SnappedPose(position: raw, bearing: fallbackBearing);
@@ -973,8 +993,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
 
     // If we're too far from the route, don't snap. Snapping aggressively causes
     // "parallel road lock" and makes the vehicle appear to cut across streets.
-    if (nearest.distanceMeters >
-        (toleranceMeters ?? MapUiConfig.snapToRouteToleranceMeters)) {
+    if (nearest.distanceMeters > effectiveTol) {
       _noteSnapMiss(nearest.distanceMeters);
       return _SnappedPose(position: raw, bearing: fallbackBearing);
     }
@@ -1023,6 +1042,38 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       return _SnappedPose(position: raw, bearing: fallbackBearing);
     }
 
+    // Forward-progress guard (req #13: no backward jump unless a REAL reverse).
+    // A fix that snaps to a route point BEHIND the marker's current progress is
+    // GPS jitter — most visible at a stop/start, where it produced the drop-leg
+    // "front-and-back". Hold the marker (keep position + heading) rather than
+    // stepping it back. Only a raw move large enough to be a genuine reverse /
+    // U-turn is allowed to regress. No-op on pickup (already monotonic forward).
+    final double candProgress = nearest.segmentIndex + nearest.t;
+    final bool wouldRegress =
+        _markerRouteProgress >= 0.0 &&
+        candProgress < _markerRouteProgress - 0.25;
+    if (wouldRegress && rawMoveFromCurrent < _kRealReverseMeters) {
+      if (kDebugMode) {
+        AppLogger.log.d(
+          'ride map marker hold (backward jitter) '
+          'mode=${widget.mode} candIdx=${candProgress.toStringAsFixed(1)} '
+          'markerIdx=${_markerRouteProgress.toStringAsFixed(1)} '
+          'rawMove=${rawMoveFromCurrent.toStringAsFixed(1)}',
+        );
+      }
+      return _SnappedPose(
+        position: _vehiclePos ?? raw,
+        bearing: _vehicleBearing,
+      );
+    }
+    // Accept: a forward fix advances the floor; a genuine reverse lowers it.
+    _markerRouteProgress =
+        wouldRegress
+            ? candProgress
+            : (candProgress > _markerRouteProgress
+                ? candProgress
+                : _markerRouteProgress);
+
     _consecutiveSnapMisses = 0;
 
     // Snap the heading toward the route tangent quickly so the vehicle points
@@ -1036,8 +1087,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     final resolved = _resolveDisplayPosition(
       raw: raw,
       snapped: nearest.point,
-      maxSnapMeters:
-          (toleranceMeters ?? MapUiConfig.snapToRouteToleranceMeters),
+      maxSnapMeters: effectiveTol,
     );
 
     return _SnappedPose(position: resolved, bearing: smooth);
@@ -1045,17 +1095,20 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
 
   void _noteSnapMiss(double distanceMeters) {
     _consecutiveSnapMisses++;
-    // Alternate-route / stale-route protection: if drop-phase GPS repeatedly
-    // disagrees with the current polyline, stop snapping for a short period and
-    // let the car follow raw fixes until the controller reroutes. This prevents
-    // the customer-side marker from moving in a jagged "rubber-band" pattern.
+    // Alternate-route protection ONLY. This used to suspend snapping for 6-10s
+    // after just TWO misses — so during the DROP leg every normal lane offset /
+    // route-simplification gap dropped the marker onto raw GPS for seconds at a
+    // time, which is exactly the "slide / shake / front-and-back" the customer
+    // reported (the pickup leg never reaches this path, which is why pickup looks
+    // perfect). Now we only stop snapping when the driver is CLEARLY on a
+    // different road (far off) for MANY consecutive fixes, and only briefly; the
+    // controller's off-route reroute then refreshes the line and snapping
+    // resumes. Normal offsets stay glued to the route via the wider drop
+    // tolerance in `_snapAndBearing`.
     if (widget.mode != RideMapMode.toDrop) return;
-    if (_consecutiveSnapMisses < 2) return;
-    final hold =
-        distanceMeters > MapUiConfig.snapToRouteToleranceMeters + 18.0
-            ? const Duration(seconds: 10)
-            : const Duration(seconds: 6);
-    _routeSnapSuspendedUntil = DateTime.now().add(hold);
+    if (_consecutiveSnapMisses < 5) return;
+    if (distanceMeters <= MapUiConfig.snapToRouteToleranceMeters + 60.0) return;
+    _routeSnapSuspendedUntil = DateTime.now().add(const Duration(seconds: 3));
     _consecutiveSnapMisses = 0;
   }
 

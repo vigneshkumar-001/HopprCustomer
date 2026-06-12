@@ -384,6 +384,7 @@ class OrderConfirmController extends GetxController
   int _duplicateDroppedCount = 0;
   int _staleDroppedCount = 0;
   DateTime _lastAcceptedUpdateLocationAt = DateTime.fromMillisecondsSinceEpoch(0);
+  String? _lastAcceptedUpdateLocationBookingId;
   static const Duration _heartbeatLowPriorityWindow = Duration(seconds: 4);
 
   // Tiered live-tracking freshness (AC#1). Measured from the last ACCEPTED
@@ -1224,11 +1225,27 @@ class OrderConfirmController extends GetxController
       _seedStaticMarkers(forceRecreate: false);
       _refreshPulseCircles();
 
-      // redraw driver->drop immediately (once). Fall back to the last known
-      // driver location so the drop route still fetches even if the motion
-      // engine hasn't produced a smoothed position yet.
+      // redraw driver->drop immediately (once). Anchor the drop route at the
+      // FRESHEST RAW driver fix, not the smoothed engine position.
+      //
+      // BUG (booking-474342): the drop route was being fetched from `_emaPos`
+      // (the controller's smoothed motion-engine output). That smoothed value
+      // can lag — or freeze — several fixes behind the real position, so at
+      // ride-start it still held the pickup/accept-time location (~the spot the
+      // driver accepted from). The result: a driver->drop polyline drawn from a
+      // stale point hundreds of metres off the driver's true position, which
+      // then made the car fall outside the snap-to-route tolerance for ~30s
+      // (constant "trim paused" + raw-GPS jitter / shake / backward drift) until
+      // the next live packet re-routed from the real position.
+      //
+      // `_lastAcceptedDriverLocationPos` is the last accepted *raw* GPS fix and
+      // is always at least as fresh as `_emaPos`; prefer it, then the exposed
+      // raw `driverLocation.value`, and only fall back to the smoothed pose.
       if (status && customerToLatLng != null) {
-        final polyOrigin = _emaPos ?? _displayPos ?? driverLocation.value;
+        final polyOrigin = _lastAcceptedDriverLocationPos ??
+            driverLocation.value ??
+            _emaPos ??
+            _displayPos;
         if (polyOrigin != null) {
           _maybeRerouteFromDriver(polyOrigin, force: true);
         }
@@ -1589,9 +1606,15 @@ class OrderConfirmController extends GetxController
         incomingSpeed < 12.0 &&
         incomingAccuracy > 20.0;
 
+    if (!rideStartedLike) {
+      // Pre-OTP / pickup phase: destination-facing fields such as
+      // `dropDistanceInMeters` are not reliable for motion rejection and may be
+      // zero even on perfectly valid packets. Only drop blatant teleports here.
+      return !simulated && suspiciousTeleport;
+    }
+
     return suspiciousDistanceReset ||
         suspiciousNearDropReset ||
-        suspiciousPickupReset ||
         suspiciousBackwardDestinationJump ||
         (!simulated && suspiciousTeleport);
   }
@@ -1645,9 +1668,16 @@ class OrderConfirmController extends GetxController
     return source == 'driver-heartbeat';
   }
 
-  void _markAcceptedTrackingSource(String source) {
+  void _markAcceptedTrackingSource(
+    String source, {
+    required Map<String, dynamic> payload,
+  }) {
     if (source == 'updateLocation') {
       _lastAcceptedUpdateLocationAt = DateTime.now();
+      _lastAcceptedUpdateLocationBookingId =
+          (payload['bookingId'] ?? payload['bookingID'] ?? '')
+              .toString()
+              .trim();
     }
   }
 
@@ -1708,6 +1738,20 @@ class OrderConfirmController extends GetxController
       fallbackSource: source,
     );
     final isHeartbeatSource = _isLowPriorityHeartbeatSource(effectiveSource);
+    final packetBookingId =
+        (payload['bookingId'] ?? payload['bookingID'] ?? '').toString().trim();
+    final isActiveBookingPacket = packetBookingId.isNotEmpty;
+    if (isHeartbeatSource && isActiveBookingPacket) {
+      _updateRideMetrics(payload, packetPos: newPos);
+      if (kDebugMode) {
+        AppLogger.log.d(
+          'Ignoring active-booking heartbeat '
+          'bookingId=${packetBookingId.isEmpty ? "" : "***${packetBookingId.substring(packetBookingId.length > 4 ? packetBookingId.length - 4 : 0)}"} '
+          'hasAcceptedUpdate=${_lastAcceptedUpdateLocationBookingId == packetBookingId}',
+        );
+      }
+      return;
+    }
     if (isHeartbeatSource &&
         _lastAcceptedUpdateLocationAt.millisecondsSinceEpoch > 0 &&
         DateTime.now().difference(_lastAcceptedUpdateLocationAt) <
@@ -1822,7 +1866,7 @@ class OrderConfirmController extends GetxController
         if (seq != null && seq > 0) {
           _lastAcceptedDriverSeq = seq;
         }
-        _markAcceptedTrackingSource(effectiveSource);
+        _markAcceptedTrackingSource(effectiveSource, payload: payload);
         _updateRideMetrics(payload, packetPos: newPos);
         return;
       }
@@ -1833,7 +1877,7 @@ class OrderConfirmController extends GetxController
     if (seq != null && seq > 0) {
       _lastAcceptedDriverSeq = seq;
     }
-    _markAcceptedTrackingSource(effectiveSource);
+    _markAcceptedTrackingSource(effectiveSource, payload: payload);
     _lastAcceptedDriverLocationPos = newPos;
     driverLocation.value = newPos;
 
