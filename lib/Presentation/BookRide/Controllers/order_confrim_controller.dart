@@ -377,6 +377,16 @@ class OrderConfirmController extends GetxController
     isUtc: true,
   );
   LatLng? _lastAcceptedDriverLocationPos;
+  // Backend monotonic drop distance captured at the moment the marker anchor
+  // (`_lastAcceptedDriverLocationPos`) was last MOVED. The stop-hold's
+  // anti-freeze override must measure real forward progress against THIS fixed
+  // value — not the live `dropDistanceMeters.value`, which `_updateRideMetrics`
+  // overwrites on every held packet, so comparing against it required a 6m drop
+  // in a SINGLE 1s step. A driver creeping the last ~100m at <2.5km/h ("near
+  // destination") never produces that, so the marker froze until the 25m
+  // straight-line cap released it = the freeze-then-jump customers saw on the
+  // drop leg. Anchored, cumulative sub-threshold creep accumulates and releases.
+  double? _stopHoldAnchorDropMeters;
   int _lastAcceptedDriverSeq = -1;
   DateTime _receiveMetricsWindowStartedAt = DateTime.now().toUtc();
   int _receiveCountWindow = 0;
@@ -1839,14 +1849,19 @@ class OrderConfirmController extends GetxController
 
     _noteAcceptedTrackingPacket(rawTs);
 
-    // Stationary freeze (server-truth speed). The driver device's own `speed`
-    // field is the ground truth for "am I moving". The motion engine's
-    // implied-speed guard derives speed from position-delta/dt, which GPS
-    // scatter fools: a 1-2m wander while parked reads as ~2 m/s and slips
-    // through, so the marker danced and the heading flipped (the "car shakes /
-    // jumps forward then back" bug at signals and while waiting). When the
-    // device reports it is essentially stopped and the step is tiny, hold the
-    // marker instead of propagating jitter to the map widget.
+    // Stationary freeze (server-truth speed) — the Uber/Ola "rock-solid at a red
+    // light" behaviour. The driver device's own `speed` field is the ground truth
+    // for "am I moving". The motion engine's implied-speed guard derives speed
+    // from position-delta/dt, which GPS scatter fools: a 5-20m wander while parked
+    // reads as several m/s and slips through, so the marker danced / jumped
+    // forward then back (the "car shakes at signals / front-and-back" bug). When
+    // the device reports it is essentially stopped, ANY position change up to a
+    // generous cap is GPS jitter, not real travel — hold the marker (any
+    // direction) instead of propagating it to the map widget. The cap (20m) is
+    // above normal parked GPS scatter yet small enough that if `speed` were ever
+    // wrongly 0 while moving, the marker still catches up within one short hop.
+    // The 3m cap before this let 5-20m stop jitter through — the actual cause of
+    // the drop-leg jerk customers saw at signals.
     final double? srvSpeedMps = _toDouble(payload['speed']);
     if (!isSimulated &&
         srvSpeedMps != null &&
@@ -1858,7 +1873,32 @@ class OrderConfirmController extends GetxController
         newPos.latitude,
         newPos.longitude,
       );
-      if (stoppedMove < 3.0) {
+      // Real-progress override (anti-freeze). A driver creeping in a jam can
+      // momentarily report speed < 0.7 yet still be moving for real. The
+      // backend's MONOTONIC drop distance is the ground truth: pure GPS jitter
+      // never shrinks it (the backend holds it flat on a sub-threshold move),
+      // so a meaningful drop-distance decrease means genuine forward progress —
+      // never hold in that case, or the marker would freeze during slow real
+      // movement. Same backend signal `_isBackwardMicroJitter` already trusts.
+      //
+      // CRITICAL: compare against the drop distance captured when the anchor was
+      // last MOVED (`_stopHoldAnchorDropMeters`), NOT the live
+      // `dropDistanceMeters.value`. `_updateRideMetrics` overwrites the live
+      // value on every HELD packet too, so comparing against it demanded a 6m
+      // drop in one 1s step — slow creep (<0.7m/step) never reached it and the
+      // marker froze for up to 25m before the straight-line cap released it. The
+      // anchored value stays fixed while held, so cumulative creep accumulates
+      // and releases the moment real progress passes 6m. Jitter still can't move
+      // it (backend keeps the monotonic drop flat on sub-threshold wander).
+      final incomingDrop = _toDouble(payload['dropDistanceInMeters']);
+      final anchorDrop = _stopHoldAnchorDropMeters ?? dropDistanceMeters.value;
+      final realForwardProgress = driverStartedRide.value &&
+          incomingDrop != null &&
+          incomingDrop < anchorDrop - 6.0;
+      // Hold up to 25m of stop jitter (covers dense urban-canyon GPS scatter),
+      // matched to the widget's reverse backstop. Above this it is no longer
+      // plausibly jitter, so let it through as a safety net.
+      if (stoppedMove < 25.0 && !realForwardProgress) {
         // Keep ordering monotonic and refresh ETA/labels, but do NOT move or
         // rotate the marker. Anchor stays put so the next genuine move is
         // measured from here, not from a jittered point.
@@ -1877,8 +1917,30 @@ class OrderConfirmController extends GetxController
     if (seq != null && seq > 0) {
       _lastAcceptedDriverSeq = seq;
     }
+    // [track-gap] DIAGNOSTIC (hop 4/4: server → customer). Fires only when the
+    // customer resumes ACCEPTING real location packets after an anomalous
+    // silence (>3s) — i.e. the exact moment the marker un-freezes and jumps
+    // ahead. Correlate by timestamp with the driver/server [track-gap] logs:
+    //   • driver-emit gap too  -> driver stopped sending (device/FGS/handoff).
+    //   • server-inbound gap    -> network driver→server dropped.
+    //   • server-emit gap only  -> server suppressed/throttled its own forward.
+    //   • only this one fires    -> network server→customer (or seq-gate drops).
+    if (_lastAcceptedUpdateLocationAt.millisecondsSinceEpoch > 0) {
+      final recvGapMs =
+          DateTime.now().difference(_lastAcceptedUpdateLocationAt).inMilliseconds;
+      if (recvGapMs > 3000) {
+        AppLogger.log.w(
+          '[track-gap] hop=customer-recv gap_ms=$recvGapMs seq=${seq ?? "na"} '
+          'source=$effectiveSource booking=$bookingId',
+        );
+      }
+    }
     _markAcceptedTrackingSource(effectiveSource, payload: payload);
     _lastAcceptedDriverLocationPos = newPos;
+    // Re-baseline the stop-hold anti-freeze reference to THIS accepted (moved)
+    // point's backend drop distance. Subsequent held packets measure cumulative
+    // real progress against this fixed value, not the live (per-packet) one.
+    _stopHoldAnchorDropMeters = _toDouble(payload['dropDistanceInMeters']);
     driverLocation.value = newPos;
 
     final srvBearing = _toDouble(

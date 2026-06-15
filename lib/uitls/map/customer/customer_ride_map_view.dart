@@ -83,7 +83,28 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   // genuine reverse. Reset whenever the route/phase changes. Phase-symmetric:
   // the pickup leg already advances monotonically, so this is a no-op there.
   double _markerRouteProgress = -1.0;
-  static const double _kRealReverseMeters = 8.0;
+  // A snapped fix that lands BEHIND the marker's route progress is only treated as
+  // a genuine reverse (and allowed to move the marker back) when the raw GPS moved
+  // at least this far. At a stop/signal the driver reports speed 0 but GPS still
+  // jitters 5-20m; the old 8m threshold mistook that jitter for a reverse and
+  // jumped the car backward — the drop-leg "front-and-back" at signals. 25m is
+  // above normal stop jitter yet well below a real reroute (which redraws the
+  // route and resets `_markerRouteProgress` anyway), so genuine reverses still
+  // register. Below this the marker HOLDS its forward position (no backward jump).
+  static const double _kRealReverseMeters = 25.0;
+  // The backward-jitter hold above must be BOUNDED. A sustained "behind" snap
+  // (parallel-road lock, GPS drift, a route that doesn't match the leg) used to
+  // freeze the marker until a >=25m reverse accumulated, then snap it back: the
+  // reported "ride moves, then freezes, then jumps" (most visible on a second
+  // ride whose geometry/noise differs). After holding this long we give up the
+  // hold and let the marker follow the real fix (smooth catch-up). Brief jitter
+  // (under this window) is still absorbed, so the stop/signal smoothing is kept.
+  static const Duration _kMaxMarkerHold = Duration(milliseconds: 2500);
+  // Wall-clock when the current consecutive backward-jitter hold began (null =
+  // not holding). Cleared on every accepted/forward fix.
+  DateTime? _holdStartedAt;
+  // Throttle for the hold log so it is visible in release without flooding.
+  DateTime? _lastHoldLogAt;
   double? _lastTrimDistanceToTargetMeters;
   int _trimPausedCount = 0;
   String _routeSig = '';
@@ -1052,21 +1073,79 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     final bool wouldRegress =
         _markerRouteProgress >= 0.0 &&
         candProgress < _markerRouteProgress - 0.25;
+
+    // Is the RAW fix genuinely advancing toward the destination? A snapped index
+    // BEHIND progress while the raw GPS still moved meaningfully CLOSER to the
+    // drop point is a snap MISLOCK (parallel road / curve / wide drop tolerance),
+    // NOT a reverse — the driver is moving forward. This is the "freezes then
+    // jumps THROUGHOUT the drop": the guard kept holding a moving car because the
+    // snap landed behind, then released into a jump. When the raw fix clearly
+    // advances toward the destination we must NOT hold; show the real forward GPS
+    // and keep the monotonic floor (never step the index back). Only true
+    // stationary jitter (raw not advancing) is held below.
+    final LatLng destPoint = routeForSnap[routeForSnap.length - 1];
+    final double rawToDest = Geolocator.distanceBetween(
+      raw.latitude,
+      raw.longitude,
+      destPoint.latitude,
+      destPoint.longitude,
+    );
+    final double markerToDest = _vehiclePos == null
+        ? double.infinity
+        : Geolocator.distanceBetween(
+            _vehiclePos!.latitude,
+            _vehiclePos!.longitude,
+            destPoint.latitude,
+            destPoint.longitude,
+          );
+    // > 4m of straight-line gain toward the destination in one fix = real travel
+    // (a stationary driver's GPS scatter does not consistently close on the dest).
+    final bool rawAdvancingToDest =
+        _vehiclePos != null && (markerToDest - rawToDest) > 4.0;
+
+    if (wouldRegress && rawAdvancingToDest) {
+      // Forward driving with a behind-snap: follow raw GPS (device bearing),
+      // clear any hold, and KEEP the progress floor monotonic (do not lower it).
+      _holdStartedAt = null;
+      _consecutiveSnapMisses = 0;
+      return _SnappedPose(position: raw, bearing: fallbackBearing);
+    }
+
     if (wouldRegress && rawMoveFromCurrent < _kRealReverseMeters) {
-      if (kDebugMode) {
-        AppLogger.log.d(
-          'ride map marker hold (backward jitter) '
-          'mode=${widget.mode} candIdx=${candProgress.toStringAsFixed(1)} '
-          'markerIdx=${_markerRouteProgress.toStringAsFixed(1)} '
-          'rawMove=${rawMoveFromCurrent.toStringAsFixed(1)}',
+      // Backward jitter: hold the marker — but only for a BOUNDED window. Past
+      // _kMaxMarkerHold we stop holding and fall through to accept the fix so the
+      // car resumes following real GPS (smooth catch-up) instead of freezing
+      // until a >=25m reverse jumps it back.
+      _holdStartedAt ??= now;
+      final heldFor = now.difference(_holdStartedAt!);
+      if (heldFor < _kMaxMarkerHold) {
+        // Throttled to ~1/s so it shows in release logs without flooding.
+        if (_lastHoldLogAt == null ||
+            now.difference(_lastHoldLogAt!) >= const Duration(seconds: 1)) {
+          _lastHoldLogAt = now;
+          AppLogger.log.w(
+            '[track-jerk] marker hold (backward jitter) '
+            'mode=${widget.mode} heldMs=${heldFor.inMilliseconds} '
+            'candIdx=${candProgress.toStringAsFixed(1)} '
+            'markerIdx=${_markerRouteProgress.toStringAsFixed(1)} '
+            'rawMove=${rawMoveFromCurrent.toStringAsFixed(1)}',
+          );
+        }
+        return _SnappedPose(
+          position: _vehiclePos ?? raw,
+          bearing: _vehicleBearing,
         );
       }
-      return _SnappedPose(
-        position: _vehiclePos ?? raw,
-        bearing: _vehicleBearing,
+      // Held too long — release and re-baseline below so the marker catches up
+      // smoothly rather than waiting for (and then snapping on) a real reverse.
+      AppLogger.log.w(
+        '[track-jerk] marker hold RELEASED after ${heldFor.inMilliseconds}ms '
+        '(catch-up) mode=${widget.mode}',
       );
     }
-    // Accept: a forward fix advances the floor; a genuine reverse lowers it.
+    // Accept: a forward fix advances the floor; a genuine reverse (or a released
+    // hold) lowers it. The marker is moving again, so clear the hold timer.
+    _holdStartedAt = null;
     _markerRouteProgress =
         wouldRegress
             ? candProgress

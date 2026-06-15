@@ -80,7 +80,14 @@ class RideTrackingMapState extends State<RideTrackingMap>
   LatLng? _pendingMarkerPos;
   double? _pendingMarkerBearing;
   DateTime _lastMarkerCommitAt = DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _markerMinInterval = Duration(milliseconds: 70);
+  // The motion engine interpolates at ~30fps (its _minUpdateInterval = 33ms).
+  // This widget throttle was 70ms (~14fps), DOWNSAMPLING that smooth glide to a
+  // visible stutter. Set just under the engine's frame interval so every engine
+  // frame is rendered (no aliasing) → the marker moves at the full ~30fps the
+  // engine produces. build() is light (GoogleMap diffs only the moved marker),
+  // so the extra commits are cheap. If a very low-end device janks, raise toward
+  // ~45ms; do not go back above the engine's 33ms or stutter returns.
+  static const Duration _markerMinInterval = Duration(milliseconds: 30);
 
   DateTime _lastPolylineTrimAt = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _polyTrimInterval = Duration(milliseconds: 180);
@@ -123,9 +130,13 @@ class RideTrackingMapState extends State<RideTrackingMap>
       maxSeg: const Duration(milliseconds: 1500),
       minMoveMeters: 1.5,
       requireBearingForDeadReckoning: true,
-      // > the 1s feed with margin: a single missed packet coasts smoothly,
-      // but we stop projecting once the gap is clearly too large.
-      maxDeadReckonPacketGap: const Duration(milliseconds: 2500),
+      // > the 1s feed with margin: a single missed packet coasts smoothly, but
+      // we stop projecting once the gap is clearly too large. Widened 2.5s→4.5s
+      // to coast through the driver's foreground→background socket handoff when
+      // they enter Google Maps navigation (that gap was freezing the marker then
+      // jumping). The steady 1s feed is unaffected — packets always land first;
+      // this only extends coasting during genuine multi-second gaps.
+      maxDeadReckonPacketGap: const Duration(milliseconds: 4500),
       stationarySpeedThresholdMps: 0.35,
       stationaryIgnoreUnderMeters: 1.8,
     );
