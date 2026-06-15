@@ -9,6 +9,40 @@ String sanitizePhoneNumber(String rawNumber) {
   return hasPlus ? '+$digitsOnly' : digitsOnly;
 }
 
+/// Opens the given Android app's Play Store page. Tries the Play Store app
+/// first (`market://`) then falls back to the https store URL in the browser.
+/// Never throws — returns false if nothing could be launched.
+Future<bool> launchPlayStore(String packageName) async {
+  final pkg = packageName.trim();
+  if (pkg.isEmpty) return false;
+
+  final candidates = <Uri>[
+    Uri.parse('market://details?id=$pkg'),
+    Uri.parse('https://play.google.com/store/apps/details?id=$pkg'),
+  ];
+
+  for (final uri in candidates) {
+    try {
+      final okExternal = await launchUrl(
+        uri,
+        mode: LaunchMode.externalApplication,
+      );
+      if (okExternal) return true;
+    } catch (_) {}
+
+    try {
+      final okDefault = await launchUrl(uri, mode: LaunchMode.platformDefault);
+      if (okDefault) return true;
+    } catch (_) {}
+
+    if (kDebugMode) {
+      debugPrint('Play Store launch fallback failed for $uri');
+    }
+  }
+
+  return false;
+}
+
 Future<bool> launchPhoneDialer(String rawNumber) async {
   final normalized = sanitizePhoneNumber(rawNumber);
   if (normalized.isEmpty) return false;

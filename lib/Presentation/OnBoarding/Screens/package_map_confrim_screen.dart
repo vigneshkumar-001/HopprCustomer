@@ -584,7 +584,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   Future<void> _loadPickupDropIcons() async {
     try {
       _pickupPinIcon = await CompactMarkerIcons.assetPin(
-        assetPath: AppImages.pinLocation,
+        assetPath: AppImages.pin,
+        tint: const Color(0xFF000000),
         widthDp: MapUiDefaults.pickupDropPinWidthDp,
       );
     } catch (_) {
@@ -592,7 +593,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     }
     try {
       _dropPinIcon = await CompactMarkerIcons.assetPin(
-        assetPath: AppImages.rectangleDest,
+        assetPath: AppImages.pin,
+        tint: const Color(0xFF15803D),
         widthDp: MapUiDefaults.pickupDropPinWidthDp,
       );
     } catch (_) {
@@ -601,7 +603,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     try {
       _pickupWaitingLabelIcon = await CompactMarkerIcons.labeledPin(
         label: MapUiDefaults.placeLabel(PickupAddress, fallback: 'Pickup'),
-        assetPath: AppImages.pinLocation,
+        assetPath: AppImages.pin,
+        tint: const Color(0xFF000000),
         bubbleWidthDp: MapUiDefaults.pickupDropBubbleWidthDp,
         bubbleHeightDp: MapUiDefaults.pickupDropBubbleHeightDp,
         pinWidthDp: MapUiDefaults.pickupDropPinWidthDp,
@@ -614,7 +617,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     try {
       _pickupLabelIcon = await CompactMarkerIcons.labeledPin(
         label: MapUiDefaults.placeLabel(PickupAddress, fallback: 'Pickup'),
-        assetPath: AppImages.pinLocation,
+        assetPath: AppImages.pin,
+        tint: const Color(0xFF000000),
         bubbleWidthDp: MapUiDefaults.pickupDropBubbleWidthDp,
         bubbleHeightDp: MapUiDefaults.pickupDropBubbleHeightDp,
         pinWidthDp: MapUiDefaults.pickupDropPinWidthDp,
@@ -627,7 +631,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     try {
       _dropLabelIcon = await CompactMarkerIcons.labeledPin(
         label: MapUiDefaults.placeLabel(DropAddress, fallback: 'Drop'),
-        assetPath: AppImages.rectangleDest,
+        assetPath: AppImages.pin,
+        tint: const Color(0xFF15803D),
         bubbleWidthDp: MapUiDefaults.pickupDropBubbleWidthDp,
         bubbleHeightDp: MapUiDefaults.pickupDropBubbleHeightDp,
         pinWidthDp: MapUiDefaults.pickupDropPinWidthDp,

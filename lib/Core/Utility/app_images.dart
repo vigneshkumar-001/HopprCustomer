@@ -1,6 +1,8 @@
 class AppImages {
   static String splashLogo = "assets/images/splash_logo.png";
   static String hopprLogo = "assets/images/Hoppr-logo.jpg";
+  static String becomeCaptain = "assets/images/becomeCaptain.png";
+  static String pin = "assets/images/pin.png";
   static String backImage = "assets/images/backImage.png";
   static String location = "assets/images/location.png";
   static String hopprPackage = "assets/images/hopprPackage.png";
@@ -100,6 +102,8 @@ class AppImages {
 
   // Empty-state illustrations (image + text on empty / error screens).
   static String emptyRides = "assets/images/empty_rides.png";
+  static String emptyDeliveries = "assets/images/empty_deliveries.png";
+  static String emptySupport = "assets/images/empty_support.png";
   static String emptyWallet = "assets/images/empty_wallet.png";
   static String emptyEarnings = "assets/images/empty_earnings.png";
   static String emptyNotifications = "assets/images/empty_notifications.png";

@@ -772,7 +772,8 @@ class OrderConfirmController extends GetxController
     // Compact pickup/drop pins (assets).
     try {
       pickupPinIcon = await CompactMarkerIcons.assetPin(
-        assetPath: AppImages.pinLocation,
+        assetPath: AppImages.pin,
+        tint: const Color(0xFF000000),
         widthDp: MapUiDefaults.pickupDropPinWidthDp,
         dpr: dpr,
       );
@@ -781,7 +782,8 @@ class OrderConfirmController extends GetxController
     }
     try {
       dropPinIcon = await CompactMarkerIcons.assetPin(
-        assetPath: AppImages.rectangleDest,
+        assetPath: AppImages.pin,
+        tint: const Color(0xFF15803D),
         widthDp: MapUiDefaults.pickupDropPinWidthDp,
         dpr: dpr,
       );
@@ -791,7 +793,8 @@ class OrderConfirmController extends GetxController
     try {
       pickupWaitingLabelIcon = await CompactMarkerIcons.labeledPin(
         label: MapUiDefaults.placeLabel(pickupAddress, fallback: 'Pickup'),
-        assetPath: AppImages.pinLocation,
+        assetPath: AppImages.pin,
+        tint: const Color(0xFF000000),
         bubbleWidthDp: MapUiDefaults.pickupDropBubbleWidthDp,
         bubbleHeightDp: MapUiDefaults.pickupDropBubbleHeightDp,
         pinWidthDp: MapUiDefaults.pickupDropPinWidthDp,
@@ -805,7 +808,8 @@ class OrderConfirmController extends GetxController
     try {
       pickupLabelIcon = await CompactMarkerIcons.labeledPin(
         label: MapUiDefaults.placeLabel(pickupAddress, fallback: 'Pickup'),
-        assetPath: AppImages.pinLocation,
+        assetPath: AppImages.pin,
+        tint: const Color(0xFF000000),
         bubbleWidthDp: MapUiDefaults.pickupDropBubbleWidthDp,
         bubbleHeightDp: MapUiDefaults.pickupDropBubbleHeightDp,
         pinWidthDp: MapUiDefaults.pickupDropPinWidthDp,
@@ -819,7 +823,8 @@ class OrderConfirmController extends GetxController
     try {
       dropLabelIcon = await CompactMarkerIcons.labeledPin(
         label: MapUiDefaults.placeLabel(destinationAddress, fallback: 'Drop'),
-        assetPath: AppImages.rectangleDest,
+        assetPath: AppImages.pin,
+        tint: const Color(0xFF15803D),
         bubbleWidthDp: MapUiDefaults.pickupDropBubbleWidthDp,
         bubbleHeightDp: MapUiDefaults.pickupDropBubbleHeightDp,
         pinWidthDp: MapUiDefaults.pickupDropPinWidthDp,

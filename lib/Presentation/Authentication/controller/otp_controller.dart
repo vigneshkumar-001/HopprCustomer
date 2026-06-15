@@ -46,6 +46,13 @@ class OtpController extends GetxController {
           final prefs = await SharedPreferences.getInstance();
           await prefs.setString('token', response.data.token);
           await prefs.setString('customer_Id', response.data.customer.id);
+          // New-user / profile-completion flags decide whether the post-OTP
+          // "One last step" details screen is shown.
+          await prefs.setBool('isNewUser', response.data.isNewUser);
+          await prefs.setBool(
+            'isProfileCompleted',
+            response.data.isProfileCompleted,
+          );
 
           accessToken = response.data.token;
           customerId = response.data.customer.id;

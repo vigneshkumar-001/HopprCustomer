@@ -588,7 +588,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
         polylineId: const PolylineId('active_route'),
         points: drawn,
         color: isPickup ? Colors.grey.shade600 : const Color(0xFF111111),
-        width: isPickup ? 4 : 5,
+        width: isPickup ? 4 : 6,
         zIndex: 1,
         startCap: Cap.roundCap,
         endCap: Cap.roundCap,
@@ -621,13 +621,18 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
 
     if (target != null && !_arrivedForCurrentMode()) {
       final t = (math.sin(_pulsePhase) + 1) / 2; // 0..1
+      // Pulse colour matches the pin: drop = green, pickup = black.
+      final pulseColor =
+          widget.mode == RideMapMode.toDrop
+              ? const Color(0xFF15803D)
+              : Colors.black;
       set.add(
         Circle(
           circleId: const CircleId('target_pulse'),
           center: target,
           radius: 18.0 + 42.0 * t,
-          fillColor: Colors.black.withValues(alpha: 0.08 * (1 - t)),
-          strokeColor: Colors.black.withValues(alpha: 0.30 * (1 - t)),
+          fillColor: pulseColor.withValues(alpha: 0.10 * (1 - t)),
+          strokeColor: pulseColor.withValues(alpha: 0.35 * (1 - t)),
           strokeWidth: 2,
           zIndex: 0,
         ),
@@ -968,6 +973,23 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     if (mounted) setState(() {});
   }
 
+  /// Point on [route] at a fractional index (segmentIndex + t). Used to render
+  /// the marker exactly on the route at its monotonic forward progress.
+  LatLng _pointAtRouteProgress(List<LatLng> route, double progress) {
+    if (route.isEmpty) return _vehiclePos ?? widget.driverLocation ?? widget.pickup;
+    if (progress <= 0) return route.first;
+    final maxIdx = route.length - 1;
+    if (progress >= maxIdx) return route.last;
+    final i = progress.floor();
+    final t = progress - i;
+    final a = route[i];
+    final b = route[i + 1];
+    return LatLng(
+      a.latitude + (b.latitude - a.latitude) * t,
+      a.longitude + (b.longitude - a.longitude) * t,
+    );
+  }
+
   _SnappedPose _snapAndBearing(
     LatLng raw, {
     double? rawBearing,
@@ -1104,11 +1126,19 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
         _vehiclePos != null && (markerToDest - rawToDest) > 4.0;
 
     if (wouldRegress && rawAdvancingToDest) {
-      // Forward driving with a behind-snap: follow raw GPS (device bearing),
-      // clear any hold, and KEEP the progress floor monotonic (do not lower it).
+      // Forward driving but the snap mislocked BEHIND (curve / parallel road /
+      // wide drop tolerance). Following raw GPS here was the drop-leg
+      // "front and back" — raw jitter wobbles the marker. Instead keep it glued
+      // to the route at its furthest-forward point (forward-only, on-route) with
+      // the route-tangent heading. It resumes advancing the instant the snap
+      // passes the mislock — so the car only ever moves forward, never back.
       _holdStartedAt = null;
       _consecutiveSnapMisses = 0;
-      return _SnappedPose(position: raw, bearing: fallbackBearing);
+      final forwardPoint = _pointAtRouteProgress(
+        routeForSnap,
+        _markerRouteProgress,
+      );
+      return _SnappedPose(position: forwardPoint, bearing: routeBearing);
     }
 
     if (wouldRegress && rawMoveFromCurrent < _kRealReverseMeters) {

@@ -82,7 +82,9 @@ class MapUiDefaults {
   static Set<Polyline> routePolylines(
     List<LatLng> points, {
     required String id,
-    bool outline = true,
+    // Clean solid-black route (no white halo) that runs straight into the pin,
+    // matching the reference. Pass `outline: true` to restore the halo.
+    bool outline = false,
   }) {
     if (points.length < 2) return const <Polyline>{};
 

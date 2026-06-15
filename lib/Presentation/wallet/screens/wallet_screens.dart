@@ -3,6 +3,7 @@ import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Core/Utility/app_loader.dart';
 import 'package:hopper/Core/Utility/empty_state_view.dart';
+import 'package:hopper/Core/Utility/skeleton_loaders.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textFields.dart';
 import 'package:hopper/Presentation/wallet/controller/wallet_controller.dart';
 import 'package:get/get.dart';
@@ -112,10 +113,7 @@ class _WalletScreenState extends State<WalletScreen> {
 
                   if (walletController.isLoading.value &&
                       walletController.transactions.isEmpty)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 40),
-                      child: Center(child: AppLoader.circularLoader()),
-                    ),
+                    SkeletonLoaders.walletHistory(),
 
                   if (!walletController.isLoading.value &&
                       historyError != null &&

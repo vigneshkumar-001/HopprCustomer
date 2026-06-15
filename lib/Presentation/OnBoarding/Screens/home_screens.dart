@@ -10,6 +10,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Core/Consents/app_texts.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
+import 'package:hopper/Core/Utility/skeleton_loaders.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:hopper/Presentation/BookRide/Models/active_booking_response.dart';
 import 'package:hopper/Presentation/BookRide/Screens/book_map_screen.dart';
@@ -1819,6 +1820,8 @@ class _HomeBottomSheet extends StatelessWidget {
                       banners: banners,
                       onBannerTap: (b) => _handleBannerTap(context, b),
                     ),
+                  ] else if (bannersLoading) ...[
+                    SkeletonLoaders.homeBanner(),
                   ],
 
                   // const SizedBox(height: 20),
@@ -1982,7 +1985,6 @@ class _HomeLoadingViewState extends State<_HomeLoadingView>
     with SingleTickerProviderStateMixin {
   late final AnimationController _c;
 
-  static const Color _brand = Color(0xFF2563EB);
   static const Color _mapTone = Color(0xFFF1F4F9);
   static const Color _skeleton = Color(0xFFE9ECF2);
   static const Color _skeletonHi = Color(0xFFF7F9FC);
@@ -2009,61 +2011,8 @@ class _HomeLoadingViewState extends State<_HomeLoadingView>
       child: Stack(
         fit: StackFit.expand,
         children: [
-          // GPS-style radar pulse + pin, centred in the map area.
-          Align(
-            alignment: const Alignment(0, -0.18),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SizedBox(
-                  height: 132,
-                  width: 132,
-                  child: AnimatedBuilder(
-                    animation: _c,
-                    builder: (_, __) {
-                      return Stack(
-                        alignment: Alignment.center,
-                        children: [
-                          _ring(_c.value),
-                          _ring((_c.value + 0.5) % 1.0),
-                          Container(
-                            height: 52,
-                            width: 52,
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              shape: BoxShape.circle,
-                              boxShadow: [
-                                BoxShadow(
-                                  color: _brand.withOpacity(0.28),
-                                  blurRadius: 18,
-                                  offset: const Offset(0, 7),
-                                ),
-                              ],
-                            ),
-                            child: const Icon(
-                              Icons.location_on_rounded,
-                              color: _brand,
-                              size: 28,
-                            ),
-                          ),
-                        ],
-                      );
-                    },
-                  ),
-                ),
-                const SizedBox(height: 20),
-                Text(
-                  'Finding your location…',
-                  style: TextStyle(
-                    color: Colors.grey.shade700,
-                    fontSize: 14.5,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 0.2,
-                  ),
-                ),
-              ],
-            ),
-          ),
+          // Full-screen map placeholder shimmer (fills behind the sheet).
+          _mapShimmer(),
 
           // Skeleton of the real bottom sheet so the reveal feels continuous.
           Align(
@@ -2094,17 +2043,18 @@ class _HomeLoadingViewState extends State<_HomeLoadingView>
                     ),
                   ),
                   const SizedBox(height: 20),
-                  Row(
-                    children: [
-                      Expanded(child: _bar(height: 66, radius: 16)),
-                      const SizedBox(width: 12),
-                      Expanded(child: _bar(height: 66, radius: 16)),
-                    ],
-                  ),
-                  const SizedBox(height: 14),
-                  _bar(height: 54, radius: 14),
+                  // Pickup + destination fields
+                  _bar(height: 52, radius: 14),
                   const SizedBox(height: 12),
-                  _bar(height: 54, radius: 14, widthFactor: 0.7),
+                  _bar(height: 52, radius: 14),
+                  const SizedBox(height: 18),
+                  // Recent / popular destination rows (icon + label)
+                  _skeletonRow(),
+                  const SizedBox(height: 14),
+                  _skeletonRow(),
+                  const SizedBox(height: 20),
+                  // Promo banner placeholder ("down image")
+                  _bar(height: 120, radius: 16),
                 ],
               ),
             ),
@@ -2114,19 +2064,45 @@ class _HomeLoadingViewState extends State<_HomeLoadingView>
     );
   }
 
-  // One expanding + fading radar ring; [t] is 0..1 progress.
-  Widget _ring(double t) {
-    final size = 44 + t * 86;
-    return Opacity(
-      opacity: ((1 - t) * 0.55).clamp(0.0, 1.0),
-      child: Container(
-        height: size,
-        width: size,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          border: Border.all(color: _brand.withOpacity(0.55), width: 2),
+  // Full-bleed shimmering block for the map area.
+  Widget _mapShimmer() {
+    return AnimatedBuilder(
+      animation: _c,
+      builder: (_, __) {
+        final v = _c.value;
+        return Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: const [_skeleton, _skeletonHi, _skeleton],
+              stops: [
+                (v - 0.3).clamp(0.0, 1.0),
+                v.clamp(0.0, 1.0),
+                (v + 0.3).clamp(0.0, 1.0),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  // A recent-destination row skeleton: square icon tile + a text bar.
+  Widget _skeletonRow() {
+    return Row(
+      children: [
+        Container(
+          height: 42,
+          width: 42,
+          decoration: BoxDecoration(
+            color: _skeleton,
+            borderRadius: BorderRadius.circular(13),
+          ),
         ),
-      ),
+        const SizedBox(width: 12),
+        Expanded(child: _bar(height: 14, radius: 7, widthFactor: 0.8)),
+      ],
     );
   }
 
@@ -2188,10 +2164,48 @@ class _HomeBannerCarouselState extends State<_HomeBannerCarousel> {
   int _index = 0;
   Timer? _auto;
 
+  // Real banner aspect ratio (width/height), read from the actual image so the
+  // card fits it exactly — no crop ("missing content") and no empty bands,
+  // identical on every device. Falls back to 2.0 until the image resolves.
+  double _bannerRatio = 2.0;
+
   @override
   void initState() {
     super.initState();
     _startAuto();
+    _resolveBannerRatio();
+  }
+
+  @override
+  void didUpdateWidget(covariant _HomeBannerCarousel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final oldUrl =
+        oldWidget.banners.isNotEmpty ? oldWidget.banners.first.imageUrl : '';
+    final newUrl =
+        widget.banners.isNotEmpty ? widget.banners.first.imageUrl : '';
+    if (oldUrl != newUrl) _resolveBannerRatio();
+  }
+
+  void _resolveBannerRatio() {
+    if (widget.banners.isEmpty) return;
+    final provider = CachedNetworkImageProvider(widget.banners.first.imageUrl);
+    final stream = provider.resolve(const ImageConfiguration());
+    late final ImageStreamListener listener;
+    listener = ImageStreamListener(
+      (info, _) {
+        final w = info.image.width.toDouble();
+        final h = info.image.height.toDouble();
+        if (mounted && h > 0) {
+          final r = (w / h).clamp(1.2, 3.2);
+          if ((r - _bannerRatio).abs() > 0.001) {
+            setState(() => _bannerRatio = r);
+          }
+        }
+        stream.removeListener(listener);
+      },
+      onError: (_, __) => stream.removeListener(listener),
+    );
+    stream.addListener(listener);
   }
 
   void _startAuto() {
@@ -2220,9 +2234,11 @@ class _HomeBannerCarouselState extends State<_HomeBannerCarousel> {
     final banners = widget.banners;
     return Column(
       children: [
-        // Larger banner image card.
-        SizedBox(
-          height: 160,
+        // Banner card sized by a FIXED ASPECT RATIO (not a fixed pixel height)
+        // so it looks identical on every device — a fixed height cropped the
+        // image differently per screen width ("half image" on some devices).
+        AspectRatio(
+          aspectRatio: _bannerRatio,
           child: PageView.builder(
             controller: _pc,
             itemCount: banners.length,

@@ -114,10 +114,11 @@ class CompactMarkerIcons {
   static Future<BitmapDescriptor> assetPin({
     required String assetPath,
     double widthDp = 22,
+    Color? tint,
     double? dpr,
   }) async {
     final resolvedDpr = (dpr ?? ui.window.devicePixelRatio).clamp(1.0, 4.0);
-    final key = 'asset|$assetPath|$widthDp|$resolvedDpr';
+    final key = 'asset|$assetPath|$widthDp|${tint?.value}|$resolvedDpr';
     final cached = _cache[key];
     if (cached != null) return cached;
 
@@ -128,7 +129,29 @@ class CompactMarkerIcons {
       targetWidth: targetPx,
     );
     final frame = await codec.getNextFrame();
-    final bytes = await frame.image.toByteData(format: ui.ImageByteFormat.png);
+    final img = frame.image;
+    final iw = img.width;
+    final ih = img.height;
+
+    // Draw through a canvas so an optional tint (srcIn) can recolor a solid
+    // silhouette pin — pickup vs drop in different colours from one asset.
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(
+      recorder,
+      Rect.fromLTWH(0, 0, iw.toDouble(), ih.toDouble()),
+    );
+    canvas.drawImageRect(
+      img,
+      Rect.fromLTWH(0, 0, iw.toDouble(), ih.toDouble()),
+      Rect.fromLTWH(0, 0, iw.toDouble(), ih.toDouble()),
+      Paint()
+        ..isAntiAlias = true
+        ..filterQuality = FilterQuality.high
+        ..colorFilter =
+            tint != null ? ColorFilter.mode(tint, BlendMode.srcIn) : null,
+    );
+    final rendered = await recorder.endRecording().toImage(iw, ih);
+    final bytes = await rendered.toByteData(format: ui.ImageByteFormat.png);
     final icon = BitmapDescriptor.fromBytes(bytes!.buffer.asUint8List());
     _cache[key] = icon;
     return icon;
@@ -142,11 +165,12 @@ class CompactMarkerIcons {
     double pinWidthDp = 22,
     double fontSizeDp = 13,
     TextAlign textAlign = TextAlign.center,
+    Color? tint,
     double? dpr,
   }) async {
     final resolvedDpr = (dpr ?? ui.window.devicePixelRatio).clamp(1.0, 4.0);
     final key =
-        'label|$label|$assetPath|$bubbleWidthDp|$bubbleHeightDp|$pinWidthDp|$fontSizeDp|$resolvedDpr';
+        'label|$label|$assetPath|$bubbleWidthDp|$bubbleHeightDp|$pinWidthDp|$fontSizeDp|${tint?.value}|$resolvedDpr';
     final cached = _cache[key];
     if (cached != null) return cached;
 
@@ -242,7 +266,10 @@ class CompactMarkerIcons {
       img,
       Rect.fromLTWH(0, 0, img.width.toDouble(), img.height.toDouble()),
       dst,
-      Paint()..filterQuality = FilterQuality.high,
+      Paint()
+        ..filterQuality = FilterQuality.high
+        ..colorFilter =
+            tint != null ? ColorFilter.mode(tint, BlendMode.srcIn) : null,
     );
 
     final picture = recorder.endRecording();

@@ -4,6 +4,7 @@ import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Core/Utility/app_loader.dart';
 import 'package:hopper/Core/Utility/empty_state_view.dart';
+import 'package:hopper/Core/Utility/skeleton_loaders.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:hopper/Presentation/Drawer/controller/ride_history_controller.dart';
 import 'package:hopper/Presentation/Drawer/screens/ride_details_screen.dart';
@@ -60,7 +61,7 @@ class _RideAndPackageHistoryScreenState
       final data = controller.rideHistoryList;
 
       if (controller.isLoading.value) {
-        return Center(child: AppLoader.circularLoader());
+        return SkeletonLoaders.rideHistory();
       } else if (data.isEmpty) {
         return RefreshIndicator(
           onRefresh: () => controller.getRideHistory(isFirstLoad: true),
@@ -122,12 +123,6 @@ class _RideAndPackageHistoryScreenState
                     : const Color(0xFF12B76A); // fresh emerald
             final statusIcon =
                 isCancelled ? Icons.close_rounded : Icons.check_rounded;
-            final subtitle =
-                [
-                  if (driverName.isNotEmpty) driverName,
-                  if (formatRideDateShort(ride.createdAt).isNotEmpty)
-                    formatRideDateShort(ride.createdAt),
-                ].join('  •  ');
 
             return TweenAnimationBuilder<double>(
               key: ValueKey(ride.id ?? ride.bookingId ?? index),
@@ -170,109 +165,142 @@ class _RideAndPackageHistoryScreenState
                         );
                       },
                       child: Padding(
-                        padding: const EdgeInsets.all(14),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.center,
+                        padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            // Vehicle photo in a soft tinted thumbnail
-                            Container(
-                              width: 70,
-                              height: 60,
-                              alignment: Alignment.center,
-                              padding: const EdgeInsets.all(6),
-                              decoration: BoxDecoration(
-                                color: AppColors.containerColor1,
-                                borderRadius: BorderRadius.circular(14),
-                              ),
-                              child: Image.asset(
-                                vehicleAssetForType(ride.driver?.carType),
-                                fit: BoxFit.contain,
-                              ),
-                            ),
-                            const SizedBox(width: 13),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  // Drop location + amount
-                                  Row(
+                            // Top: thumbnail + drop address / driver + amount
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                // Vehicle photo in a soft tinted thumbnail
+                                Container(
+                                  width: 64,
+                                  height: 64,
+                                  alignment: Alignment.center,
+                                  padding: const EdgeInsets.all(8),
+                                  decoration: BoxDecoration(
+                                    color: AppColors.containerColor1,
+                                    borderRadius: BorderRadius.circular(16),
+                                  ),
+                                  child: Image.asset(
+                                    vehicleAssetForType(ride.driver?.carType),
+                                    fit: BoxFit.contain,
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
                                     crossAxisAlignment:
                                         CrossAxisAlignment.start,
                                     children: [
-                                      Expanded(
-                                        child: Text(
-                                          ride.dropAddress ?? '',
-                                          maxLines: 2,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: const TextStyle(
-                                            fontSize: 15,
-                                            fontWeight: FontWeight.w700,
-                                            height: 1.2,
-                                          ),
+                                      Text(
+                                        ride.dropAddress ?? '',
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                          fontSize: 15,
+                                          fontWeight: FontWeight.w700,
+                                          height: 1.25,
                                         ),
                                       ),
-                                      const SizedBox(width: 8),
-                                      CustomTextFields.textWithImage(
-                                        text: (ride.amount ?? '').toString(),
-                                        fontSize: 14.5,
-                                        imageColors: AppColors.commonBlack,
-                                        colors: AppColors.commonBlack,
-                                        fontWeight: FontWeight.w800,
-                                        imageSize: 15,
-                                        imagePath: AppImages.nBlackCurrency,
-                                      ),
+                                      if (driverName.isNotEmpty) ...[
+                                        const SizedBox(height: 5),
+                                        Row(
+                                          children: [
+                                            Icon(
+                                              Icons.person_outline_rounded,
+                                              size: 14,
+                                              color: AppColors.textColor,
+                                            ),
+                                            const SizedBox(width: 4),
+                                            Expanded(
+                                              child: Text(
+                                                driverName,
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: TextStyle(
+                                                  fontSize: 12.5,
+                                                  color: AppColors.textColor,
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ],
                                     ],
                                   ),
-                                  const SizedBox(height: 5),
-                                  // Driver name • date
-                                  if (subtitle.isNotEmpty)
-                                    Text(
-                                      subtitle,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        color: AppColors.textColor,
-                                      ),
+                                ),
+                                const SizedBox(width: 8),
+                                CustomTextFields.textWithImage(
+                                  text: (ride.amount ?? '').toString(),
+                                  fontSize: 16,
+                                  imageColors: AppColors.commonBlack,
+                                  colors: AppColors.commonBlack,
+                                  fontWeight: FontWeight.w800,
+                                  imageSize: 16,
+                                  imagePath: AppImages.nBlackCurrency,
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            Divider(
+                              height: 1,
+                              thickness: 1,
+                              color: Colors.black.withOpacity(0.05),
+                            ),
+                            const SizedBox(height: 10),
+                            // Footer: date + status pill
+                            Row(
+                              children: [
+                                Icon(
+                                  Icons.schedule_rounded,
+                                  size: 14,
+                                  color: Colors.grey.shade500,
+                                ),
+                                const SizedBox(width: 5),
+                                Expanded(
+                                  child: Text(
+                                    formatRideDateShort(ride.createdAt),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.grey.shade600,
                                     ),
-                                  const SizedBox(height: 9),
-                                  // Status — filled check badge + bold text
-                                  Row(
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 5,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: statusClr.withOpacity(0.12),
+                                    borderRadius: BorderRadius.circular(20),
+                                  ),
+                                  child: Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
-                                      Container(
-                                        width: 17,
-                                        height: 17,
-                                        alignment: Alignment.center,
-                                        decoration: BoxDecoration(
-                                          color: statusClr,
-                                          shape: BoxShape.circle,
-                                        ),
-                                        child: Icon(
-                                          statusIcon,
-                                          size: 11,
-                                          color: Colors.white,
-                                        ),
+                                      Icon(
+                                        statusIcon,
+                                        size: 13,
+                                        color: statusClr,
                                       ),
-                                      const SizedBox(width: 6),
+                                      const SizedBox(width: 4),
                                       Text(
                                         statusLabel,
                                         style: TextStyle(
                                           color: statusClr,
                                           fontWeight: FontWeight.w700,
-                                          fontSize: 12.5,
+                                          fontSize: 12,
                                         ),
                                       ),
                                     ],
                                   ),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(width: 2),
-                            Icon(
-                              Icons.chevron_right,
-                              color: Colors.grey.shade400,
-                              size: 22,
+                                ),
+                              ],
                             ),
                           ],
                         ),
@@ -294,7 +322,7 @@ class _RideAndPackageHistoryScreenState
       final parcels = controller.parcelHistoryList;
 
       if (controller.isLoading.value) {
-        return Center(child: AppLoader.circularLoader());
+        return SkeletonLoaders.parcelHistory();
       } else if (parcels.isEmpty) {
         return RefreshIndicator(
           onRefresh: () => controller.getRideHistory(isFirstLoad: true),
@@ -313,7 +341,7 @@ class _RideAndPackageHistoryScreenState
                             controller.getRideHistory(isFirstLoad: true),
                       )
                     : EmptyStateView(
-                        image: AppImages.emptyRides,
+                        image: AppImages.emptyDeliveries,
                         title: "No deliveries yet",
                         subtitle:
                             "Your package deliveries will appear here once you send your first parcel.",

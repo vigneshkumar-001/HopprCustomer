@@ -334,11 +334,18 @@ class DriverSearchController extends GetxController {
         (failure) {
           isCancelLoading.value = false;
           AppLogger.log.e(failure.message);
-          AppToasts.showError(
-            context,
-            failure.message,
-            title: 'Cancellation Failed',
-          );
+          // "Already completed" / "Already cancelled" aren't real cancel
+          // failures — the ride just reached a terminal state before the cancel
+          // landed. Skip the scary error toast; the caller routes the user.
+          final m = failure.message.toLowerCase();
+          final terminal = m.contains('complet') || m.contains('already');
+          if (!terminal) {
+            AppToasts.showError(
+              context,
+              failure.message,
+              title: 'Cancellation Failed',
+            );
+          }
           return failure.message;
         },
         (response) {

@@ -17,19 +17,32 @@ class OtpResponse {
 class Data {
   final String token;
   final Customer customer;
+  final bool isNewUser;
+  final bool isProfileCompleted;
 
-  Data({required this.token, required this.customer});
+  Data({
+    required this.token,
+    required this.customer,
+    this.isNewUser = false,
+    // Default true so a missing flag never traps an existing user on the
+    // details screen.
+    this.isProfileCompleted = true,
+  });
 
   factory Data.fromJson(Map<String, dynamic> json) {
     return Data(
       token: json['token'],
       customer: Customer.fromJson(json['customer']),
+      isNewUser: json['isNewUser'] == true,
+      isProfileCompleted: json['isProfileCompleted'] == true,
     );
   }
 
   Map<String, dynamic> toJson() => {
     "token": token,
     "customer": customer.toJson(),
+    "isNewUser": isNewUser,
+    "isProfileCompleted": isProfileCompleted,
   };
 }
 

@@ -313,7 +313,26 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
     if (!mounted) return res;
 
     final ok = (res ?? '').trim().isEmpty;
-    if (!ok) return res;
+    if (!ok) {
+      final m = (res ?? '').toLowerCase();
+      // Ride finished before the cancel landed -> it can't be cancelled; send
+      // the customer to payment/completion instead of leaving them stuck.
+      if (m.contains('complet')) {
+        AppToasts.showInfoGlobal(
+          'This ride is already completed.',
+          title: 'Ride completed',
+        );
+        c.destinationReached.value = true; // triggers the payment navigation
+        return '';
+      }
+      // Server says it's already cancelled -> reflect the cancelled state.
+      if (m.contains('cancel')) {
+        c.cancelReason.value = selectedReason;
+        c.isTripCancelled.value = true;
+        return '';
+      }
+      return res;
+    }
 
     c.cancelReason.value = selectedReason;
     c.isTripCancelled.value = true;
@@ -626,7 +645,9 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
               c.driverSearchController.carBooking.value?.bookingId ??
               c.bookingId;
           if (!mounted) return;
-          Get.off(
+          // Clear the whole booking stack (search / confirm-booking / tracking)
+          // so back from Payment can never land on confirm-booking again.
+          Get.offAll(
             () => PaymentScreen(
               bookingId: id,
               amount: c.amount.value,

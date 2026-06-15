@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:get/get.dart';
 import 'package:hopper/Core/Consents/app_colors.dart';
+import 'package:hopper/Core/Utility/app_images.dart';
+import 'package:hopper/Core/Utility/empty_state_view.dart';
+import 'package:hopper/Core/Utility/skeleton_loaders.dart';
 import 'package:hopper/Presentation/CustomerSupport/controller/customer_support_controller.dart';
 import 'package:hopper/Presentation/CustomerSupport/models/customer_support_models.dart';
 import 'package:hopper/Presentation/CustomerSupport/screens/create_customer_support_screen.dart';
@@ -73,40 +76,25 @@ class _CustomerSupportListScreenState extends State<CustomerSupportListScreen> {
             Expanded(
               child: Obx(() {
                 if (c.isLoading.value && c.tickets.isEmpty) {
-                  return const Center(
-                    child: CupertinoActivityIndicator(radius: 14),
-                  );
+                  return SkeletonLoaders.support();
                 }
 
                 if (c.error.value.isNotEmpty && c.tickets.isEmpty) {
-                  return Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(20),
-                      child: Text(
-                        c.error.value,
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          color: Color(0xFF667085),
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
+                  return EmptyStateView(
+                    image: AppImages.errorServer,
+                    title: "Something went wrong",
+                    subtitle:
+                        "We couldn't load your support tickets. Please try again.",
+                    onRetry: c.refreshTickets,
                   );
                 }
 
                 if (c.tickets.isEmpty) {
-                  return const Center(
-                    child: Padding(
-                      padding: EdgeInsets.all(24),
-                      child: Text(
-                        'No tickets yet',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          color: Color(0xFF667085),
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
+                  return EmptyStateView(
+                    image: AppImages.emptySupport,
+                    title: "No support tickets yet",
+                    subtitle:
+                        "Raised tickets and your chats with support will appear here.",
                   );
                 }
 

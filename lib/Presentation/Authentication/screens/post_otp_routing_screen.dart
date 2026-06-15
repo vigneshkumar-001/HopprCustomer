@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:hopper/Core/Utility/app_loader.dart';
 import 'package:hopper/Presentation/Authentication/controller/location_gate_controller.dart';
+import 'package:hopper/Presentation/Authentication/screens/one_last_step_screen.dart';
 import 'package:hopper/Presentation/Authentication/screens/permission_screens.dart';
 import 'package:hopper/Presentation/OnBoarding/Widgets/custom_bottomnavigation.dart';
 
@@ -34,11 +36,25 @@ class _PostOtpRoutingScreenState extends State<PostOtpRoutingScreen> {
   Future<void> _resolveNext() async {
     if (_navigated || !mounted) return;
 
-    final gate = Get.find<LocationGateController>();
-    await gate.checkNow();
-    if (!mounted || _navigated) return;
+    // New user OR profile not completed -> collect Name / DOB / Gender first.
+    final prefs = await SharedPreferences.getInstance();
+    final isNewUser = prefs.getBool('isNewUser') ?? false;
+    final isProfileCompleted = prefs.getBool('isProfileCompleted') ?? true;
+    final needDetails = isNewUser || !isProfileCompleted;
 
     await _hideKeyboard();
+    if (!mounted || _navigated) return;
+
+    if (needDetails) {
+      _navigated = true;
+      await Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (_) => const OneLastStepScreen()),
+      );
+      return;
+    }
+
+    final gate = Get.find<LocationGateController>();
+    await gate.checkNow();
     if (!mounted || _navigated) return;
 
     final Widget next =

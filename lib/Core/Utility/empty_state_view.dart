@@ -22,7 +22,7 @@ class EmptyStateView extends StatelessWidget {
   /// Label for the retry pill.
   final String retryText;
 
-  /// Illustration width/height (defaults to 150).
+  /// Illustration width/height (defaults to 200).
   final double imageSize;
 
   const EmptyStateView({
@@ -32,7 +32,7 @@ class EmptyStateView extends StatelessWidget {
     this.subtitle,
     this.onRetry,
     this.retryText = 'Try again',
-    this.imageSize = 150,
+    this.imageSize = 200,
   });
 
   @override
@@ -49,6 +49,8 @@ class EmptyStateView extends StatelessWidget {
               width: imageSize,
               height: imageSize,
               fit: BoxFit.contain,
+              // Never crash an empty/error screen if the asset is missing.
+              errorBuilder: (_, __, ___) => SizedBox(height: imageSize),
             ),
             const SizedBox(height: 20),
             Text(

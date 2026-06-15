@@ -12,6 +12,7 @@ import 'package:hopper/Core/Utility/app_buttons.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Core/Utility/empty_state_view.dart';
 import 'package:hopper/Core/Utility/app_loader.dart';
+import 'package:hopper/Core/Utility/skeleton_loaders.dart';
 import 'package:hopper/Core/Utility/app_toasts.dart';
 
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
@@ -58,12 +59,6 @@ class _BookMapScreenState extends State<BookMapScreen> {
   @override
   void initState() {
     super.initState();
-
-    // Reset any previous selection from another booking flow.
-    driverController.selectedCarType.value = '';
-    driverController.selectedSharedDriver.value = null;
-    driverController.estimatedTime.value = '';
-    driverController.markerAdded.value = false;
 
     _startController.text = widget.pickupAddress;
     _destController.text = widget.destinationAddress;
@@ -112,6 +107,14 @@ class _BookMapScreenState extends State<BookMapScreen> {
     AppLogger.log.i("distance meters: $distance");
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
+      // Reset any previous selection from another booking flow. Deferred to
+      // post-frame so setting these Rx values never notifies an Obx during
+      // the build phase (that caused a "setState during build" crash).
+      driverController.selectedCarType.value = '';
+      driverController.selectedSharedDriver.value = null;
+      driverController.estimatedTime.value = '';
+      driverController.markerAdded.value = false;
+
       await mapC.initPositions(
         pickup: resolvedPickup,
         destination: resolvedDestination,
@@ -189,6 +192,7 @@ class _BookMapScreenState extends State<BookMapScreen> {
 
                             polylines: mapC.polylines.toSet(),
                             markers: mapC.markers.toSet(),
+                            circles: mapC.circles.toSet(),
 
                             gestureRecognizers: {
                               Factory<OneSequenceGestureRecognizer>(
@@ -466,9 +470,7 @@ class _BookMapScreenState extends State<BookMapScreen> {
 
                         Obx(() {
                           if (driverController.isGetLoading.value) {
-                            return const Center(
-                              child: CupertinoActivityIndicator(radius: 14),
-                            );
+                            return SkeletonLoaders.bookRideCars();
                           }
 
                           final bool rideOnly = mapC.isRideOnly.value;
@@ -494,9 +496,7 @@ class _BookMapScreenState extends State<BookMapScreen> {
                                   mapC.destinationPosition == null) {
                                 return const SizedBox.shrink();
                               }
-                              return const Center(
-                                child: CupertinoActivityIndicator(radius: 14),
-                              );
+                              return SkeletonLoaders.bookRideCars();
                             }
                             return EmptyStateView(
                               imageSize: 120,

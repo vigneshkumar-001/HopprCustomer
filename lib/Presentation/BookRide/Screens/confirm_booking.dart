@@ -525,31 +525,54 @@ class _ConfirmBookingState extends State<ConfirmBooking> {
     required String pickupAddress,
     required String dropAddress,
   }) {
+    const green = Color(0xFF15803D);
+    const greenSoft = Color(0xFFE8F7EE);
+    const dropRed = Color(0xFFE53935);
     return Container(
       width: double.infinity,
       decoration: BoxDecoration(
-        color: AppColors.containerColor,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: AppColors.commonBlack.withOpacity(0.06)),
+        color: AppColors.commonWhite,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: green.withOpacity(0.12)),
+        boxShadow: [
+          BoxShadow(
+            color: green.withOpacity(0.07),
+            blurRadius: 18,
+            offset: const Offset(0, 8),
+          ),
+        ],
       ),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Bright header strip: vehicle + ride type + total fare.
+          Container(
+            width: double.infinity,
+            decoration: const BoxDecoration(
+              color: greenSoft,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+            ),
+            padding: const EdgeInsets.all(16),
+            child: Row(
               children: [
                 Container(
-                  height: 42,
-                  width: 42,
+                  height: 46,
+                  width: 46,
+                  alignment: Alignment.center,
                   decoration: BoxDecoration(
                     color: AppColors.commonWhite,
-                    borderRadius: BorderRadius.circular(12),
+                    borderRadius: BorderRadius.circular(14),
+                    boxShadow: [
+                      BoxShadow(
+                        color: green.withOpacity(0.20),
+                        blurRadius: 10,
+                        offset: const Offset(0, 4),
+                      ),
+                    ],
                   ),
                   child: const Icon(
                     Icons.directions_car_rounded,
-                    color: AppColors.commonBlack,
+                    color: green,
                   ),
                 ),
                 const SizedBox(width: 12),
@@ -561,48 +584,93 @@ class _ConfirmBookingState extends State<ConfirmBooking> {
                         rideTypeLabel,
                         fontSize: 16,
                       ),
-                      const SizedBox(height: 4),
-                      CustomTextFields.textWithStylesSmall(
-                        rideModeLabel,
-                        colors: AppColors.commonBlack.withOpacity(0.65),
+                      const SizedBox(height: 3),
+                      Row(
+                        children: [
+                          const Icon(
+                            Icons.person_rounded,
+                            size: 13,
+                            color: green,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            rideModeLabel,
+                            style: const TextStyle(
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w600,
+                              color: green,
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),
                 ),
-                CustomTextFields.textWithImage(
-                  text: amountText,
-                  imagePath: AppImages.nBlackCurrency,
-                  fontWeight: FontWeight.w900,
-                  colors: AppColors.commonBlack,
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                      'Total fare',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w500,
+                        color: AppColors.commonBlack.withOpacity(0.5),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    CustomTextFields.textWithImage(
+                      text: amountText,
+                      imagePath: AppImages.nBlackCurrency,
+                      fontWeight: FontWeight.w900,
+                      fontSize: 18,
+                      colors: green,
+                      imageColors: green,
+                      imageSize: 16,
+                    ),
+                  ],
                 ),
               ],
             ),
-            const SizedBox(height: 14),
-            Wrap(
-              spacing: 10,
-              runSpacing: 10,
+          ),
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _buildSummaryChip(icon: Icons.schedule_rounded, label: etaText),
-                _buildSummaryChip(
-                  icon: Icons.route_rounded,
-                  label: distanceText,
+                Row(
+                  children: [
+                    Expanded(
+                      child: _buildSummaryChip(
+                        icon: Icons.schedule_rounded,
+                        label: etaText,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: _buildSummaryChip(
+                        icon: Icons.route_rounded,
+                        label: distanceText,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                _buildSummaryAddressRow(
+                  dotColor: green,
+                  title: 'PICKUP',
+                  value: pickupAddress,
+                  showConnector: true,
+                ),
+                _buildSummaryAddressRow(
+                  dotColor: dropRed,
+                  title: 'DROP',
+                  value: dropAddress,
+                  showConnector: false,
                 ),
               ],
             ),
-            const SizedBox(height: 14),
-            _buildSummaryAddressRow(
-              iconPath: AppImages.circleStart,
-              title: 'Pickup',
-              value: pickupAddress,
-            ),
-            const SizedBox(height: 10),
-            _buildSummaryAddressRow(
-              iconPath: AppImages.rectangleDest,
-              title: 'Drop',
-              value: dropAddress,
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -723,16 +791,17 @@ class _ConfirmBookingState extends State<ConfirmBooking> {
   }
 
   Widget _buildSummaryChip({required IconData icon, required String label}) {
+    const green = Color(0xFF15803D);
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
       decoration: BoxDecoration(
-        color: AppColors.commonWhite,
-        borderRadius: BorderRadius.circular(30),
+        color: const Color(0xFFE8F7EE),
+        borderRadius: BorderRadius.circular(14),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 18, color: AppColors.commonBlack),
+          Icon(icon, size: 18, color: green),
           const SizedBox(width: 8),
           CustomTextFields.textWithStyles600(label, fontSize: 13),
         ],
@@ -741,33 +810,68 @@ class _ConfirmBookingState extends State<ConfirmBooking> {
   }
 
   Widget _buildSummaryAddressRow({
-    required String iconPath,
+    required Color dotColor,
     required String title,
     required String value,
+    required bool showConnector,
   }) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.only(top: 2),
-          child: Image.asset(iconPath, height: 16, width: 16),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+    return IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Timeline dot + connector line.
+          Column(
             children: [
-              CustomTextFields.textWithStyles600(title, fontSize: 13),
-              const SizedBox(height: 2),
-              CustomTextFields.textWithStylesSmall(
-                value,
-                maxLines: 2,
-                colors: AppColors.commonBlack.withOpacity(0.65),
+              Container(
+                width: 13,
+                height: 13,
+                decoration: BoxDecoration(
+                  color: dotColor,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: AppColors.commonWhite, width: 2),
+                  boxShadow: [
+                    BoxShadow(color: dotColor.withOpacity(0.35), blurRadius: 5),
+                  ],
+                ),
               ),
+              if (showConnector)
+                Expanded(
+                  child: Container(
+                    width: 2,
+                    margin: const EdgeInsets.symmetric(vertical: 3),
+                    color: AppColors.commonBlack.withOpacity(0.12),
+                  ),
+                ),
             ],
           ),
-        ),
-      ],
+          const SizedBox(width: 12),
+          Expanded(
+            child: Padding(
+              padding: EdgeInsets.only(bottom: showConnector ? 14 : 0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.6,
+                      color: dotColor,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  CustomTextFields.textWithStylesSmall(
+                    value,
+                    maxLines: 2,
+                    colors: AppColors.commonBlack.withOpacity(0.78),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 

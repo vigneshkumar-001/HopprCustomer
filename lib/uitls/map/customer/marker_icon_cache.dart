@@ -35,14 +35,20 @@ class MarkerIconCache {
     return icon;
   }
 
+  // Pickup pin = black, Drop pin = green — same pin.png asset, tinted.
+  static const ui.Color _pickupColor = ui.Color(0xFF000000);
+  static const ui.Color _dropColor = ui.Color(0xFF15803D);
+
   static Future<BitmapDescriptor> pickupPin({double? dpr}) async {
     final resolvedDpr = (dpr ?? ui.window.devicePixelRatio).clamp(1.0, 4.0);
-    final key = 'pin|pickup|${MapUiConfig.pickupDropPinWidthDp}|$resolvedDpr';
+    final key =
+        'pin|pickup|black|${MapUiConfig.pickupDropPinWidthDp}|$resolvedDpr';
     final cached = _cache[key];
     if (cached != null) return cached;
     final icon = await CompactMarkerIcons.assetPin(
-      assetPath: AppImages.pinLocation,
+      assetPath: AppImages.pin,
       widthDp: MapUiConfig.pickupDropPinWidthDp,
+      tint: _pickupColor,
       dpr: resolvedDpr,
     );
     _cache[key] = icon;
@@ -51,12 +57,14 @@ class MarkerIconCache {
 
   static Future<BitmapDescriptor> dropPin({double? dpr}) async {
     final resolvedDpr = (dpr ?? ui.window.devicePixelRatio).clamp(1.0, 4.0);
-    final key = 'pin|drop|${MapUiConfig.pickupDropPinWidthDp}|$resolvedDpr';
+    final key =
+        'pin|drop|green|${MapUiConfig.pickupDropPinWidthDp}|$resolvedDpr';
     final cached = _cache[key];
     if (cached != null) return cached;
     final icon = await CompactMarkerIcons.assetPin(
-      assetPath: AppImages.rectangleDest,
+      assetPath: AppImages.pin,
       widthDp: MapUiConfig.pickupDropPinWidthDp,
+      tint: _dropColor,
       dpr: resolvedDpr,
     );
     _cache[key] = icon;

@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
 import 'package:hopper/Core/Consents/app_colors.dart';
+import 'package:hopper/Core/Consents/app_logger.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
+import 'package:hopper/Core/Utility/phone_launcher.dart';
 import 'package:get/get.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:hopper/Presentation/Drawer/controller/profle_cotroller.dart';
@@ -131,6 +133,7 @@ class _DrawerScreenState extends State<DrawerScreen> {
                             },
                             child: CustomTextFields.textWithStyles700(
                               'Ride Activity',
+                              fontSize: 20,
                             ),
                           ),
                           const SizedBox(height: 15),
@@ -146,6 +149,7 @@ class _DrawerScreenState extends State<DrawerScreen> {
                             },
                             child: CustomTextFields.textWithStyles700(
                               'Favourites',
+                              fontSize: 20,
                             ),
                           ),
                           const SizedBox(height: 15),
@@ -159,7 +163,10 @@ class _DrawerScreenState extends State<DrawerScreen> {
                             onTap: () {
                               Get.to(() => WalletScreen());
                             },
-                            child: CustomTextFields.textWithStyles700('Wallet'),
+                            child: CustomTextFields.textWithStyles700(
+                              'Wallet',
+                              fontSize: 20,
+                            ),
                           ),
                           const SizedBox(height: 15),
                           Divider(
@@ -174,6 +181,7 @@ class _DrawerScreenState extends State<DrawerScreen> {
                             },
                             child: CustomTextFields.textWithStyles700(
                               'Notifications',
+                              fontSize: 20,
                             ),
                           ),
                           const SizedBox(height: 20),
@@ -187,7 +195,10 @@ class _DrawerScreenState extends State<DrawerScreen> {
                             onTap: () {
                               Get.to(() => const CustomerSupportListScreen());
                             },
-                            child: CustomTextFields.textWithStyles700('Support'),
+                            child: CustomTextFields.textWithStyles700(
+                              'Support',
+                              fontSize: 20,
+                            ),
                           ),
                           const SizedBox(height: 20),
                           Divider(
@@ -199,8 +210,97 @@ class _DrawerScreenState extends State<DrawerScreen> {
                             onTap: () {
                               Get.to(() => const AboutScreen());
                             },
-                            child: CustomTextFields.textWithStyles700('About'),
+                            child: CustomTextFields.textWithStyles700(
+                              'About',
+                              fontSize: 20,
+                            ),
                           ),
+
+                          // --- TEMP (debug/testing): capture & share ride logs
+                          // from a real untethered ride. Remove after testing.
+                          const SizedBox(height: 30),
+                          InkWell(
+                            onTap: () => AppLogger.shareLogs(),
+                            onLongPress: () => AppLogger.clearLogs(),
+                            child: CustomTextFields.textWithStyles700(
+                              'Share ride logs',
+                              fontSize: 20,
+                            ),
+                          ),
+
+                          // Promo banner -> opens the Hoppr Driver app on the
+                          // Play Store (com.hopper.hopper). Sized from the
+                          // asset's native ratio (1825x862) so it never distorts.
+                          const SizedBox(height: 30),
+                          GestureDetector(
+                            onTap: () async {
+                              final messenger = ScaffoldMessenger.of(context);
+                              final ok = await launchPlayStore(
+                                'com.hopper.hopper',
+                              );
+                              if (!ok && mounted) {
+                                messenger.showSnackBar(
+                                  const SnackBar(
+                                    content: Text(
+                                      'Could not open the Play Store',
+                                    ),
+                                  ),
+                                );
+                              }
+                            },
+                            child: Container(
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(16),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withOpacity(0.06),
+                                    blurRadius: 12,
+                                    offset: const Offset(0, 4),
+                                  ),
+                                ],
+                              ),
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(16),
+                                // Full width, shorter height — trim only from the
+                                // BOTTOM (top-aligned) so the head + text stay
+                                // visible. Tweak `height` to taste.
+                                child: SizedBox(
+                                  width: double.infinity,
+                                  height: 120,
+                                  child: Image.asset(
+                                    AppImages.becomeCaptain,
+                                    fit: BoxFit.cover,
+                                    alignment: Alignment.topCenter,
+                                    // Graceful fallback: if the asset isn't
+                                    // bundled yet (full rebuild needed) the
+                                    // banner still shows and stays tappable.
+                                    errorBuilder:
+                                      (_, __, ___) => Container(
+                                        width: double.infinity,
+                                        height: 120,
+                                        alignment: Alignment.center,
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFFFBF6E9),
+                                          borderRadius: BorderRadius.circular(16),
+                                          border: Border.all(
+                                            color: AppColors.dividerColor1,
+                                          ),
+                                        ),
+                                        child: const Text(
+                                          'Earn money with Hoppr\nBecome a Captain!',
+                                          textAlign: TextAlign.center,
+                                          style: TextStyle(
+                                            fontSize: 16,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                      ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 10),
                         ],
                       ),
                       ),
@@ -274,7 +374,7 @@ class _DrawerScreenState extends State<DrawerScreen> {
                                       child: Text(
                                         user.firstName ?? '',
                                         style: const TextStyle(
-                                          fontSize: 18,
+                                          fontSize: 20,
                                           fontWeight: FontWeight.w600,
                                         ),
                                         softWrap: true,

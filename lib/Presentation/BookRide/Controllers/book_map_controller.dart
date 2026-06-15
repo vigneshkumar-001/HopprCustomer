@@ -13,6 +13,7 @@ import 'package:http/http.dart' as http;
 
 import 'package:hopper/Core/Consents/app_logger.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
+import 'package:hopper/uitls/map/drop_pulse.dart';
 import 'package:hopper/api/repository/api_consents.dart';
 import 'package:hopper/uitls/map/map_ui_defaults.dart';
 
@@ -23,6 +24,12 @@ class BookMapController extends GetxController {
   // Reactive map data
   final RxSet<Marker> markers = <Marker>{}.obs;
   final RxSet<Polyline> polylines = <Polyline>{}.obs;
+  final RxSet<Circle> circles = <Circle>{}.obs;
+
+  // Pulsing ripple under the drop pin.
+  late final DropPulse _dropPulse = DropPulse(
+    onUpdate: (c) => circles.assignAll(c),
+  );
 
   final RxString address = 'Search...'.obs;
 
@@ -62,6 +69,7 @@ class BookMapController extends GetxController {
   void onClose() {
     _cameraIdleDebounce?.cancel();
     _markerDebounce?.cancel();
+    _dropPulse.dispose();
     super.onClose();
   }
 
@@ -75,6 +83,9 @@ class BookMapController extends GetxController {
     pickupPosition = pickup;
     destinationPosition = destination;
 
+    // Pulse under the drop pin.
+    _dropPulse.start(destination);
+
     // draw once
     await drawPolyline();
 
@@ -83,9 +94,13 @@ class BookMapController extends GetxController {
       pickupLabel: pickupLabel.trim().isEmpty ? 'Pickup' : pickupLabel.trim(),
       dropLabel: dropLabel.trim().isEmpty ? 'Drop' : dropLabel.trim(),
       estimatedMin: '',
-      pickupAsset: AppImages.circleStart,
-      dropAsset: AppImages.rectangleDest,
+      pickupAsset: AppImages.pin,
+      dropAsset: AppImages.pin,
     );
+
+    // Re-fit now that positions exist — covers the case where the map was
+    // created (attachMap) before these positions were set.
+    await fitBounds();
   }
 
   Future<void> attachMap(GoogleMapController controller) async {
@@ -98,7 +113,10 @@ class BookMapController extends GetxController {
       } catch (_) {}
     }
 
-    // fit bounds once
+    // Let the platform map view get laid out before the first fit — calling
+    // newLatLngBounds in onMapCreated (before layout) is silently ignored,
+    // which left nearby trips stuck at the initial pickup zoom.
+    await Future.delayed(const Duration(milliseconds: 350));
     await fitBounds();
   }
 
@@ -260,8 +278,8 @@ class BookMapController extends GetxController {
         pickupLabel: pickupLabel,
         dropLabel: dropLabel,
         estimatedMin: estimatedMin,
-        pickupAsset: AppImages.circleStart,
-        dropAsset: AppImages.rectangleDest,
+        pickupAsset: AppImages.pin,
+        dropAsset: AppImages.pin,
       );
     });
   }
@@ -275,16 +293,23 @@ class BookMapController extends GetxController {
   }) async {
     if (pickupPosition == null || destinationPosition == null) return;
 
+    // Pickup pin = black, Drop pin = green — so the rider can tell them apart
+    // at a glance (same pin.png asset, tinted at draw time).
+    const pickupColor = Color(0xFF000000);
+    const dropColor = Color(0xFF15803D);
+
     final startIcon = await _createCustomMarkerWithLabel(
       timeText: estimatedMin.isNotEmpty ? '$estimatedMin MIN' : null,
       label: MapUiDefaults.placeLabel(pickupLabel, fallback: 'Pickup'),
       assetPath: pickupAsset,
+      tint: pickupColor,
     );
 
     final destIcon = await _createCustomMarkerWithLabel(
       timeText: null,
       label: MapUiDefaults.placeLabel(dropLabel, fallback: 'Drop'),
       assetPath: dropAsset,
+      tint: dropColor,
     );
 
     markers.assignAll({
@@ -308,6 +333,7 @@ class BookMapController extends GetxController {
   Future<BitmapDescriptor> _createCustomMarkerWithLabel({
     required String label,
     required String assetPath,
+    Color? tint,
     String? timeText,
     double bubbleWidthDp = MapUiDefaults.pickupDropBubbleWidthDp,
     double bubbleHeightDp = MapUiDefaults.pickupDropBubbleHeightDp,
@@ -430,7 +456,11 @@ class BookMapController extends GetxController {
         pinW.toDouble(),
         pinH.toDouble(),
       ),
-      Paint()..filterQuality = FilterQuality.high,
+      Paint()
+        ..filterQuality = FilterQuality.high
+        // Recolor the (solid-silhouette) pin: green for pickup, red for drop.
+        ..colorFilter =
+            tint != null ? ColorFilter.mode(tint, BlendMode.srcIn) : null,
     );
 
     final picture = recorder.endRecording();
@@ -441,24 +471,35 @@ class BookMapController extends GetxController {
   }
 
   // ---------- BOUNDS ----------
-  Future<void> fitBounds() async {
+  /// Frames pickup + destination. Robust against the two real-world failures:
+  /// (1) being called before the map surface is laid out (Google Maps silently
+  /// drops `newLatLngBounds` then) — we retry a few times; and (2) nearby
+  /// pickup/drop producing a degenerate box — we pad it to a minimum span.
+  Future<void> fitBounds({int attempt = 0}) async {
     if (pickupPosition == null || destinationPosition == null) return;
     final mc = mapController;
     if (mc == null) return;
 
-    double minLat = math.min(pickupPosition!.latitude, destinationPosition!.latitude);
-    double maxLat = math.max(pickupPosition!.latitude, destinationPosition!.latitude);
-    double minLng = math.min(pickupPosition!.longitude, destinationPosition!.longitude);
-    double maxLng = math.max(pickupPosition!.longitude, destinationPosition!.longitude);
+    double minLat =
+        math.min(pickupPosition!.latitude, destinationPosition!.latitude);
+    double maxLat =
+        math.max(pickupPosition!.latitude, destinationPosition!.latitude);
+    double minLng =
+        math.min(pickupPosition!.longitude, destinationPosition!.longitude);
+    double maxLng =
+        math.max(pickupPosition!.longitude, destinationPosition!.longitude);
 
-    const minDelta = 0.009;
+    // Nearby pickup/drop -> widen to a sane minimum so we don't over-zoom.
+    const minDelta = 0.006;
     if ((maxLat - minLat) < minDelta) {
-      minLat -= minDelta;
-      maxLat += minDelta;
+      final mid = (maxLat + minLat) / 2;
+      minLat = mid - minDelta / 2;
+      maxLat = mid + minDelta / 2;
     }
     if ((maxLng - minLng) < minDelta) {
-      minLng -= minDelta;
-      maxLng += minDelta;
+      final mid = (maxLng + minLng) / 2;
+      minLng = mid - minDelta / 2;
+      maxLng = mid + minDelta / 2;
     }
 
     final bounds = LatLngBounds(
@@ -466,7 +507,17 @@ class BookMapController extends GetxController {
       northeast: LatLng(maxLat, maxLng),
     );
 
-    await mc.animateCamera(CameraUpdate.newLatLngBounds(bounds, 120));
+    try {
+      // Smaller padding: the map sits in a 320px header, so 120px padding left
+      // almost no room and the fit could fail. 55px frames both points cleanly.
+      await mc.animateCamera(CameraUpdate.newLatLngBounds(bounds, 55));
+    } catch (_) {
+      // Map not laid out yet -> retry briefly (covers the onMapCreated race).
+      if (attempt < 4) {
+        await Future.delayed(const Duration(milliseconds: 300));
+        await fitBounds(attempt: attempt + 1);
+      }
+    }
   }
 
   double _haversineMeters(LatLng from, LatLng to) {

@@ -1242,7 +1242,15 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return PopScope(
+      // This is a terminal (post-ride) screen — back must go home, never back
+      // into the finished booking flow (confirm-booking / tracking).
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        Get.offAll(() => const CommonBottomNavigation(initialIndex: 0));
+      },
+      child: Scaffold(
       body: SafeArea(
         child: Container(
           height: double.infinity,
@@ -1697,18 +1705,29 @@ class _PaymentScreenState extends State<PaymentScreen> {
                       imageSize: 23,
                       imagePath: AppImages.nBlackCurrency,
                     ),
-                    // const SizedBox(height: 4),
-                    // Row(
-                    //   children: [
-                    //     GestureDetector(
-                    //       onTap: () {},
-                    //       child: CustomTextFields.textWithStylesSmall(
-                    //         'View Details',
-                    //       ),
-                    //     ),
-                    //     Icon(Icons.keyboard_arrow_down_outlined, size: 20),
-                    //   ],
-                    // ),
+                    const SizedBox(height: 2),
+                    GestureDetector(
+                      onTap: () => _showFareBreakdownSheet(context),
+                      behavior: HitTestBehavior.opaque,
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            'View details',
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w600,
+                              color: Color(0xFF15803D),
+                            ),
+                          ),
+                          Icon(
+                            Icons.keyboard_arrow_down_rounded,
+                            size: 18,
+                            color: Color(0xFF15803D),
+                          ),
+                        ],
+                      ),
+                    ),
                   ],
                 ),
                 const SizedBox(width: 40),
@@ -1867,6 +1886,219 @@ class _PaymentScreenState extends State<PaymentScreen> {
                 ),
               ],
             ),
+          ),
+        ),
+      ),
+      ),
+    );
+  }
+
+  // ---- Fare breakdown ("Rate Card") sheet, opened by the View details arrow.
+  void _showFareBreakdownSheet(BuildContext context) {
+    const green = Color(0xFF15803D);
+    final b = driverSearchController.carBooking.value;
+    final carType = (b?.carType ?? '').trim();
+    final total = (b?.total ?? widget.amount ?? 0).toDouble();
+
+    final rows = <List<dynamic>>[
+      ['Base Fare', (b?.baseFare ?? 0).toDouble()],
+      ['Pickup / Booking Fee', (b?.bookingFeeAmount ?? 0).toDouble()],
+      ['Distance Fare', (b?.distanceFareAmount ?? 0).toDouble()],
+      ['Time Fare', (b?.timeFareAmount ?? 0).toDouble()],
+      ['Service Fare', (b?.serviceFare ?? 0).toDouble()],
+    ];
+    final surge = (b?.surgeFareAmount ?? 0).toDouble();
+    if (surge > 0) rows.add(['Surge / Peak charge', surge]);
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetCtx) {
+        return Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(26)),
+          ),
+          padding: const EdgeInsets.fromLTRB(20, 14, 20, 24),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 44,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE2E5EC),
+                      borderRadius: BorderRadius.circular(99),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 18),
+                Row(
+                  children: [
+                    Container(
+                      height: 40,
+                      width: 40,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFE8F7EE),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Icon(
+                        Icons.receipt_long_rounded,
+                        color: green,
+                        size: 20,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Fare Breakdown',
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w800,
+                              color: AppColors.commonBlack,
+                            ),
+                          ),
+                          const SizedBox(height: 1),
+                          Text(
+                            carType.isEmpty
+                                ? 'Estimated charges'
+                                : '$carType  •  Estimated charges',
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w500,
+                              color: AppColors.commonBlack.withOpacity(0.55),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                Container(
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF7F8FA),
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    children: [
+                      for (final r in rows)
+                        _fareRow(r[0] as String, r[1] as double),
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 12),
+                        child: _DashedDivider(),
+                      ),
+                      _fareRow('Total', total, bold: true),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+                _noteLine(
+                  'Total fare may change if there is a change in distance or time.',
+                ),
+                _noteLine(
+                  'Toll, parking and state permit charges are not included and must be paid separately to the driver.',
+                ),
+                if (surge > 0)
+                  _noteLine(
+                    'Peak / surge pricing is applied due to high demand.',
+                  ),
+                const SizedBox(height: 18),
+                AppButtons.button(
+                  text: 'Got it',
+                  onTap: () => Navigator.pop(sheetCtx),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _fareRow(String label, double value, {bool bold = false}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: bold ? 15 : 14,
+                fontWeight: bold ? FontWeight.w800 : FontWeight.w500,
+                color: AppColors.commonBlack,
+              ),
+            ),
+          ),
+          Text(
+            '₦ ${value.toStringAsFixed(2)}',
+            style: TextStyle(
+              fontSize: bold ? 16 : 14,
+              fontWeight: bold ? FontWeight.w800 : FontWeight.w600,
+              color: bold ? const Color(0xFF15803D) : AppColors.commonBlack,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _noteLine(String text) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 6, right: 8),
+            child: Container(
+              width: 5,
+              height: 5,
+              decoration: BoxDecoration(
+                color: AppColors.commonBlack.withOpacity(0.4),
+                shape: BoxShape.circle,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              text,
+              style: TextStyle(
+                fontSize: 12.5,
+                height: 1.4,
+                color: AppColors.commonBlack.withOpacity(0.6),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Simple dashed divider used inside the fare-breakdown sheet.
+class _DashedDivider extends StatelessWidget {
+  const _DashedDivider();
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: List.generate(
+        32,
+        (i) => Expanded(
+          child: Container(
+            height: 1,
+            color: i.isEven ? const Color(0xFFD9DCE3) : Colors.transparent,
           ),
         ),
       ),

@@ -59,6 +59,16 @@ class DriverMotionEngine {
     // We detect low implied speed (from timestamps) and ignore small moves.
     double stationarySpeedThresholdMps = 0.6,
     double stationaryIgnoreUnderMeters = 4.0,
+    // Catch-up after a feed gap. When the driver feed stalls (network drop / app
+    // backgrounded) and resumes, the next fix lands far ahead. A single hop >=
+    // [catchUpDistanceMeters] is treated as that resumed-after-gap jump and is
+    // GLIDED smoothly (see _pumpMotion) instead of warping across the map in one
+    // normal-cadence segment. [catchUpSpeedMps] sets the glide speed and
+    // [catchUpMaxSeg] bounds it so even a long blackout resyncs in a couple of
+    // seconds (the Uber/Ola "smooth catch-up" feel).
+    double catchUpDistanceMeters = 55.0,
+    double catchUpSpeedMps = 16.0,
+    Duration catchUpMaxSeg = const Duration(milliseconds: 2600),
   })  : _playbackDelay = playbackDelay,
         _maxStale = maxStale,
         _minUpdateInterval = motionStepMinInterval,
@@ -80,6 +90,9 @@ class DriverMotionEngine {
         _deadReckonStopAfter = deadReckonStopAfter,
         _stationarySpeedThresholdMps = stationarySpeedThresholdMps,
         _stationaryIgnoreUnderMeters = stationaryIgnoreUnderMeters,
+        _catchUpDistanceMeters = catchUpDistanceMeters,
+        _catchUpSpeedMps = catchUpSpeedMps,
+        _catchUpMaxSeg = catchUpMaxSeg,
         _moveCtrl = AnimationController(vsync: vsync);
 
   final void Function(LatLng position, double bearing) onUpdate;
@@ -108,6 +121,9 @@ class DriverMotionEngine {
   final Duration _deadReckonStopAfter;
   final double _stationarySpeedThresholdMps;
   final double _stationaryIgnoreUnderMeters;
+  final double _catchUpDistanceMeters;
+  final double _catchUpSpeedMps;
+  final Duration _catchUpMaxSeg;
 
   final List<DriverPose> _poseQueue = <DriverPose>[];
   final AnimationController _moveCtrl;
@@ -298,18 +314,33 @@ class DriverMotionEngine {
     // at which packets actually arrive, instead of deriving it from distance.
     final int? intervalMs = toPose.packetIntervalMs ?? _lastPacketIntervalMs;
     int dur;
-    if (intervalMs != null && intervalMs > 0) {
+
+    // Catch-up after a feed gap. A single hop much larger than a normal cadence
+    // segment means the driver feed stalled (network drop / app backgrounded)
+    // and just resumed far ahead — the classic drop-leg "jump/teleport". At city
+    // speeds a real ~1s packet moves the car <~20m, so a >=55m hop is a gap, not
+    // driving. Cramming it into the normal segment would WARP the marker across
+    // the map; instead glide it at a believable display speed, bounded by
+    // [_catchUpMaxSeg] so even a long blackout resyncs within a couple of seconds
+    // (smooth, intentional — the Uber/Ola catch-up). Applies in every phase.
+    final bool bigCatchUp = dist >= _catchUpDistanceMeters;
+
+    if (bigCatchUp) {
+      dur = ((dist / _catchUpSpeedMps) * 1000).round();
+      dur = dur.clamp(_minSeg.inMilliseconds, _catchUpMaxSeg.inMilliseconds);
+    } else if (intervalMs != null && intervalMs > 0) {
       // Caught up (no buffered poses): stretch slightly past the interval so we
       // never run dry before the next packet lands -> continuous glide.
       // Behind (poses buffered): shrink below the interval to catch up smoothly
       // instead of accumulating lag.
       final double factor = _poseQueue.isEmpty ? 1.12 : 0.80;
       dur = (intervalMs * factor).round();
+      dur = dur.clamp(_minSeg.inMilliseconds, _maxSeg.inMilliseconds);
     } else {
       // First segment / unknown cadence: conservative distance-based guess.
       dur = ((dist / 6.0) * 1000).round();
+      dur = dur.clamp(_minSeg.inMilliseconds, _maxSeg.inMilliseconds);
     }
-    dur = dur.clamp(_minSeg.inMilliseconds, _maxSeg.inMilliseconds);
     final segDur = Duration(milliseconds: dur);
 
     final targetBearing = toPose.bearing ?? _computeBearing(from, to);
