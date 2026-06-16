@@ -47,6 +47,27 @@ class AppImages {
   static String luxuryCar = "assets/images/luxuryCar.png";
   static String driverTime = "assets/images/driverTime.png";
   static String sedan = "assets/images/sedan.png";
+  // New car types. Until the real SUV / Hatchback art is added, both reuse the
+  // luxury image. To switch later: drop suvCar.png / hatchbackCar.png into
+  // assets/images and change ONLY these two paths — carImageForType picks them up.
+  static String suvCar = "assets/images/luxuryCar.png";
+  static String hatchbackCar = "assets/images/luxuryCar.png";
+
+  /// Maps a server car type ("Sedan" / "Luxury" / "SUV" / "Hatchback") to its
+  /// image. Unknown types fall back to the luxury image.
+  static String carImageForType(String? carType) {
+    switch ((carType ?? '').toLowerCase()) {
+      case 'sedan':
+        return sedan;
+      case 'suv':
+        return suvCar;
+      case 'hatchback':
+        return hatchbackCar;
+      case 'luxury':
+      default:
+        return luxuryCar;
+    }
+  }
   static String confirmCar = "assets/images/confrimCar.png";
   static String clrTick = "assets/images/clrTick.png";
   static String digiPay = "assets/images/digiPay.png";

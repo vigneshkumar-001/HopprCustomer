@@ -85,7 +85,17 @@ class PackageController extends GetxController {
       return results.fold(
         (failure) {
           isLoading.value = false;
-          return '';
+          // Surface a clear message instead of silently failing (the server can
+          // return a 500 on create-booking). Prefer the server's message when it
+          // is meaningful; otherwise a friendly fallback. Return null so the
+          // screen does NOT navigate forward on a failed booking.
+          final raw = failure.message.trim();
+          final friendly =
+              (raw.isEmpty || raw == 'Something went wrong')
+                  ? 'Could not create your booking right now. Please try again.'
+                  : raw;
+          AppToasts.showErrorGlobal(friendly, title: 'Booking failed');
+          return null;
         },
         (response) {
           isLoading.value = false;
@@ -110,6 +120,10 @@ class PackageController extends GetxController {
     } catch (e) {
       isLoading.value = false;
       AppLogger.log.e(e);
+      AppToasts.showErrorGlobal(
+        'Could not create your booking right now. Please try again.',
+        title: 'Booking failed',
+      );
     }
     return null;
   }
@@ -169,6 +183,15 @@ class PackageController extends GetxController {
     required AddressModel senderData,
     required AddressModel receiverData,
   }) async {
+    // Guard: without a bookingId the request 500s on the server and the user
+    // would otherwise see nothing happen. Fail fast with a clear message.
+    if (bookingId.trim().isEmpty) {
+      AppToasts.showErrorGlobal(
+        'Something went wrong with your booking. Please go back and try again.',
+        title: 'Booking failed',
+      );
+      return null;
+    }
     try {
       isConfirmLoading.value = true;
       final results = await apiDataSource.sendPackageDriverRequest(
@@ -179,9 +202,16 @@ class PackageController extends GetxController {
       );
       return results.fold(
         (failure) {
-          isConfirmLoading.value = false; // ✅ handled
+          isConfirmLoading.value = false;
           AppLogger.log.e("Failure: $failure");
-          return '';
+          // Surface the failure instead of silently doing nothing.
+          final raw = failure.message.trim();
+          final friendly =
+              (raw.isEmpty || raw == 'Something went wrong')
+                  ? 'Could not confirm your booking right now. Please try again.'
+                  : raw;
+          AppToasts.showErrorGlobal(friendly, title: 'Booking failed');
+          return null;
         },
         (response) {
           isConfirmLoading.value = false;
@@ -193,10 +223,6 @@ class PackageController extends GetxController {
               receiverData: receiverData,
             ),
           );
-          // Navigator.push(
-          //   context,
-          //   MaterialPageRoute(builder: (context) => PaymentScreen()),
-          // );
           AppLogger.log.i('${response.data}');
 
           return response.data.toString();
@@ -205,6 +231,10 @@ class PackageController extends GetxController {
     } catch (e) {
       isConfirmLoading.value = false;
       AppLogger.log.e(e);
+      AppToasts.showErrorGlobal(
+        'Could not confirm your booking right now. Please try again.',
+        title: 'Booking failed',
+      );
     }
     return null;
   }

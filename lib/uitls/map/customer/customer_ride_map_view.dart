@@ -1096,6 +1096,41 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
         _markerRouteProgress >= 0.0 &&
         candProgress < _markerRouteProgress - 0.25;
 
+    // DROP LEG — pure forward route-walker (pickup-grade smoothness).
+    //
+    // WHY pickup is perfect but drop shakes: the pickup leg is a short, well-
+    // matched route the driver advances along monotonically, so the snapped point
+    // never lands behind the marker. The drop route is longer / curvier and uses
+    // a wider snap tolerance, so at stops and curves the nearest route point keeps
+    // landing BEHIND the marker. The old code answered that with a tangle of
+    // hold / release / raw-blend branches, and the hold→release→catch-up cycle is
+    // EXACTLY the "car stops, shakes, jumps and comes back" on the drop leg.
+    //
+    // Replace all of that on the drop leg with one rule: render the marker
+    // STRICTLY at its furthest-forward point ON the route. Advance the floor when
+    // a fix lands ahead; otherwise keep the same on-route point (the car simply
+    // waits — no wobble, no backward step, no raw-GPS sideways drift). Only a
+    // large genuine reverse (real U-turn; a reroute redraws the route and resets
+    // the floor anyway) moves it back. This makes drop behave like smooth pickup.
+    //
+    // First drop fix (progress still -1.0) falls through to seed the floor below;
+    // every fix after that is handled here.
+    if (widget.mode == RideMapMode.toDrop && _markerRouteProgress >= 0.0) {
+      final bool genuineReverse =
+          wouldRegress && rawMoveFromCurrent >= _kRealReverseMeters;
+      if (genuineReverse || candProgress > _markerRouteProgress) {
+        _markerRouteProgress = candProgress;
+      }
+      _holdStartedAt = null;
+      _consecutiveSnapMisses = 0;
+      // Motion engine still EMA-smooths this bearing + clamps turn rate, so the
+      // icon rotates cleanly; position is always an on-route forward point.
+      return _SnappedPose(
+        position: _pointAtRouteProgress(routeForSnap, _markerRouteProgress),
+        bearing: routeBearing,
+      );
+    }
+
     // Is the RAW fix genuinely advancing toward the destination? A snapped index
     // BEHIND progress while the raw GPS still moved meaningfully CLOSER to the
     // drop point is a snap MISLOCK (parallel road / curve / wide drop tolerance),

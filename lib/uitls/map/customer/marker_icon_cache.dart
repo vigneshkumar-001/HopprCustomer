@@ -20,8 +20,10 @@ class MarkerIconCache {
         type == VehicleType.bike
             ? MapUiConfig.bikeMarkerSizeDp
             : MapUiConfig.carMarkerSizeDp;
+    // Top-down marker (rotates correctly to bearing) — packageBike is the
+    // bird's-eye Hoppr rider; bikeImage was a side view that tilted when rotated.
     final asset =
-        type == VehicleType.bike ? AppImages.bikeImage : AppImages.carHop;
+        type == VehicleType.bike ? AppImages.packageBike : AppImages.carHop;
     final key = 'veh|contain|$asset|$sizeDp|$resolvedDpr';
     final cached = _cache[key];
     if (cached != null) return cached;

@@ -766,7 +766,7 @@ class AppButtons {
                                                   (fee == null
                                                       ? 'Cancellation fee may apply.'
                                                       : (fee > 0
-                                                          ? 'A cancellation fee of ₹${money(fee)} may apply.'
+                                                          ? 'A cancellation fee of ₦${money(fee)} may apply.'
                                                           : 'No cancellation fee applies.')))
                                               .toString(),
                                         ),
@@ -776,7 +776,7 @@ class AppButtons {
                                             fontWeight: FontWeight.w500,
                                             colors: AppColors.commonBlack,
                                             fontSize: 10,
-                                            'Total paid: ₹${money(paid)}',
+                                            'Total paid: ₦${money(paid)}',
                                           ),
                                         if (fee != null)
                                           CustomTextFields.textWithStylesSmall(
@@ -784,15 +784,15 @@ class AppButtons {
                                             colors: AppColors.commonBlack,
                                             fontSize: 10,
                                             fee > 0
-                                                ? 'Cancellation fee: ₹${money(fee)}'
-                                                : 'Cancellation fee: ₹0',
+                                                ? 'Cancellation fee: ₦${money(fee)}'
+                                                : 'Cancellation fee: ₦0',
                                           ),
                                         if (refund != null)
                                           CustomTextFields.textWithStylesSmall(
                                             colors: AppColors.commonBlack,
                                             fontWeight: FontWeight.w500,
                                             fontSize: 10,
-                                            'Refund amount: ₹${money(refund)}',
+                                            'Refund amount: ₦${money(refund)}',
                                           ),
                                       ],
                                     ),

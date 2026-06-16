@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:hopper/uitls/transitions/route_transitions.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -43,9 +44,21 @@ class BookMapScreen extends StatefulWidget {
   State<BookMapScreen> createState() => _BookMapScreenState();
 }
 
-class _BookMapScreenState extends State<BookMapScreen> {
+class _BookMapScreenState extends State<BookMapScreen>
+    with SingleTickerProviderStateMixin {
   final TextEditingController _startController = TextEditingController();
   final TextEditingController _destController = TextEditingController();
+
+  // Scroll-down hint: a bouncing arrow shown while there is more content below
+  // the fold (so users know the vehicle list / Book button can be scrolled to).
+  final ScrollController _scrollController = ScrollController();
+  final ValueNotifier<bool> _showScrollHint = ValueNotifier<bool>(false);
+  late final AnimationController _arrowBounceCtrl;
+
+  // Initial camera target, derived synchronously from the pickup passed into
+  // this screen — so the map opens already centred on the pickup instead of
+  // flashing the ocean (0,0) and then jumping once positions resolve.
+  LatLng? _initialCamTarget;
 
   final DriverSearchController driverController =
       Get.isRegistered<DriverSearchController>()
@@ -59,6 +72,14 @@ class _BookMapScreenState extends State<BookMapScreen> {
   @override
   void initState() {
     super.initState();
+
+    _arrowBounceCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 850),
+    )..repeat(reverse: true);
+    // Re-check the hint after the first layout (and again shortly after, once
+    // the vehicle list has loaded and the scroll extent grows).
+    WidgetsBinding.instance.addPostFrameCallback((_) => _refreshScrollHint());
 
     _startController.text = widget.pickupAddress;
     _destController.text = widget.destinationAddress;
@@ -96,6 +117,9 @@ class _BookMapScreenState extends State<BookMapScreen> {
 
     final resolvedPickup = pickupLocation;
     final resolvedDestination = destinationLocation;
+
+    // Centre the map on the pickup from the very first frame (no ocean flash).
+    _initialCamTarget = resolvedPickup;
 
     // optional: distance check
     final distance = Geolocator.distanceBetween(
@@ -137,11 +161,44 @@ class _BookMapScreenState extends State<BookMapScreen> {
         //   dropLng: resolvedDestination.longitude,
         // ),
       ]);
+
+      // Vehicle cards just loaded → scroll extent likely grew; re-evaluate hint.
+      if (mounted) {
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _refreshScrollHint(),
+        );
+      }
     });
+  }
+
+  // ---- Scroll-down hint helpers -------------------------------------------
+  void _updateHintFromMetrics(ScrollMetrics m) {
+    // Show the arrow when there is a meaningful amount still below the fold.
+    final moreBelow = (m.maxScrollExtent - m.pixels) > 24.0;
+    if (_showScrollHint.value != moreBelow) {
+      _showScrollHint.value = moreBelow;
+    }
+  }
+
+  void _refreshScrollHint() {
+    if (!mounted || !_scrollController.hasClients) return;
+    _updateHintFromMetrics(_scrollController.position);
+  }
+
+  void _scrollToBottom() {
+    if (!_scrollController.hasClients) return;
+    _scrollController.animateTo(
+      _scrollController.position.maxScrollExtent,
+      duration: const Duration(milliseconds: 450),
+      curve: Curves.easeOutCubic,
+    );
   }
 
   @override
   void dispose() {
+    _arrowBounceCtrl.dispose();
+    _scrollController.dispose();
+    _showScrollHint.dispose();
     _startController.dispose();
     _destController.dispose();
     if (Get.isRegistered<BookMapController>()) {
@@ -156,11 +213,22 @@ class _BookMapScreenState extends State<BookMapScreen> {
       child: WillPopScope(
         onWillPop: () async => false,
         child: Scaffold(
-          body: NotificationListener<ScrollNotification>(
-            onNotification: (_) => true,
-            child: CustomScrollView(
-              physics: const BouncingScrollPhysics(),
-              slivers: [
+          body: Stack(
+            children: [
+              NotificationListener<ScrollMetricsNotification>(
+                onNotification: (n) {
+                  _updateHintFromMetrics(n.metrics);
+                  return false;
+                },
+                child: NotificationListener<ScrollNotification>(
+                  onNotification: (n) {
+                    _updateHintFromMetrics(n.metrics);
+                    return true;
+                  },
+                  child: CustomScrollView(
+                    controller: _scrollController,
+                    physics: const BouncingScrollPhysics(),
+                    slivers: [
                 SliverAppBar(
                   backgroundColor: Colors.white,
                   expandedHeight: 320,
@@ -178,7 +246,10 @@ class _BookMapScreenState extends State<BookMapScreen> {
                             myLocationButtonEnabled: false,
 
                             initialCameraPosition: CameraPosition(
-                              target: mapC.pickupPosition ?? const LatLng(0, 0),
+                              target:
+                                  mapC.pickupPosition ??
+                                  _initialCamTarget ??
+                                  const LatLng(0, 0),
                               zoom: 14,
                             ),
 
@@ -258,7 +329,20 @@ class _BookMapScreenState extends State<BookMapScreen> {
                 ),
 
                 SliverToBoxAdapter(
-                  child: Padding(
+                  child: TweenAnimationBuilder<double>(
+                    tween: Tween(begin: 0.0, end: 1.0),
+                    duration: const Duration(milliseconds: 450),
+                    curve: Curves.easeOutCubic,
+                    builder: (context, t, child) {
+                      return Opacity(
+                        opacity: t.clamp(0.0, 1.0),
+                        child: Transform.translate(
+                          offset: Offset(0, (1 - t) * 36),
+                          child: child,
+                        ),
+                      );
+                    },
+                    child: Padding(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 15,
                       vertical: 15,
@@ -290,9 +374,8 @@ class _BookMapScreenState extends State<BookMapScreen> {
                                 onTap: () async {
                                   final selected = await Navigator.push(
                                     context,
-                                    MaterialPageRoute(
-                                      builder:
-                                          (_) => BookRideSearchScreen(
+                                    bottomUpRoute(
+                                          BookRideSearchScreen(
                                             isPickup: true,
                                             pickupData: {
                                               'description':
@@ -360,9 +443,8 @@ class _BookMapScreenState extends State<BookMapScreen> {
                                 onTap: () async {
                                   final selected = await Navigator.push(
                                     context,
-                                    MaterialPageRoute(
-                                      builder:
-                                          (_) => BookRideSearchScreen(
+                                    bottomUpRoute(
+                                          BookRideSearchScreen(
                                             isPickup: false,
                                             pickupData: {
                                               'description':
@@ -509,23 +591,154 @@ class _BookMapScreenState extends State<BookMapScreen> {
 
                           // ---------- RIDE ONLY ----------
                           if (rideOnly) {
-                            final luxuryDriver = normalDrivers.firstWhereOrNull(
-                              (e) =>
-                                  e.driverId.carType?.toLowerCase() == 'luxury',
-                            );
-                            final sedanDriver = normalDrivers.firstWhereOrNull(
-                              (e) =>
-                                  e.driverId.carType?.toLowerCase() == 'sedan',
-                            );
+                            // Support ALL server car types (Luxury / Sedan / SUV
+                            // / Hatchback), not just two — one card per type that
+                            // has a nearby driver.
+                            const carTypes = [
+                              'Luxury',
+                              'Sedan',
+                              'SUV',
+                              'Hatchback',
+                            ];
 
-                            // Set default marker once
+                            final rideCards = <Widget>[];
+                            for (final t in carTypes) {
+                              final d = normalDrivers.firstWhereOrNull(
+                                (e) =>
+                                    e.driverId.carType?.toLowerCase() ==
+                                    t.toLowerCase(),
+                              );
+                              if (d == null) continue;
+                              if (rideCards.isNotEmpty) {
+                                rideCards.add(const SizedBox(height: 20));
+                              }
+                              rideCards.add(
+                                PackageContainer.bookCarTypeContainer(
+                                  borderColor:
+                                      driverController.selectedCarType.value == t
+                                          ? AppColors.commonBlack
+                                          : AppColors.containerColor,
+                                  carImg: AppImages.carImageForType(t),
+                                  onTap: () {
+                                    driverController.selectedCarType.value = t;
+                                    driverController.estimatedTime.value =
+                                        d.estimatedTime?.toString() ?? '';
+                                    mapC.updateMarkersDebounced(
+                                      pickupLabel: widget.pickupAddress,
+                                      dropLabel: widget.destinationAddress,
+                                      estimatedMin:
+                                          driverController.estimatedTime.value,
+                                    );
+                                  },
+                                  carTitle: t,
+                                  carMinRate: d.estimatedPrice.toString(),
+                                  carMaxRate: d.estimatedPrice.toString(),
+                                  carSubTitle: 'Comfy, Economical Cars',
+                                  arrivingTime: '${d.estimatedTime ?? 0} min',
+                                ),
+                              );
+                            }
+
+                            // Set default marker once (first available type).
                             if (!driverController.markerAdded.value &&
-                                (luxuryDriver != null || sedanDriver != null)) {
-                              final defaultDriver =
-                                  luxuryDriver ?? sedanDriver!;
+                                rideCards.isNotEmpty) {
+                              dynamic defaultDriver;
+                              for (final t in carTypes) {
+                                final d = normalDrivers.firstWhereOrNull(
+                                  (e) =>
+                                      e.driverId.carType?.toLowerCase() ==
+                                      t.toLowerCase(),
+                                );
+                                if (d != null) {
+                                  defaultDriver = d;
+                                  break;
+                                }
+                              }
+                              if (defaultDriver != null) {
+                                driverController.estimatedTime.value =
+                                    defaultDriver.estimatedTime?.toString() ??
+                                    '';
+                                WidgetsBinding.instance.addPostFrameCallback((
+                                  _,
+                                ) {
+                                  mapC.updateMarkersDebounced(
+                                    pickupLabel: widget.pickupAddress,
+                                    dropLabel: widget.destinationAddress,
+                                    estimatedMin:
+                                        driverController.estimatedTime.value,
+                                  );
+                                  driverController.markerAdded.value = true;
+                                });
+                              }
+                            }
+
+                            return Column(children: rideCards);
+                          }
+
+                          // ---------- SHARED ----------
+                          const sharedCarTypes = [
+                            'Luxury',
+                            'Sedan',
+                            'SUV',
+                            'Hatchback',
+                          ];
+
+                          final sharedCards = <Widget>[];
+                          for (final t in sharedCarTypes) {
+                            final d = sharedDrivers.firstWhereOrNull(
+                              (e) =>
+                                  e.driverId?.carType?.toLowerCase() ==
+                                  t.toLowerCase(),
+                            );
+                            if (d == null) continue;
+                            if (sharedCards.isNotEmpty) {
+                              sharedCards.add(const SizedBox(height: 20));
+                            }
+                            sharedCards.add(
+                              PackageContainer.bookCarTypeContainer(
+                                borderColor:
+                                    driverController.selectedCarType.value == t
+                                        ? AppColors.commonBlack
+                                        : AppColors.containerColor,
+                                carImg: AppImages.carImageForType(t),
+                                onTap: () {
+                                  driverController.selectedCarType.value = t;
+                                  driverController.selectedSharedDriver.value = d;
+                                  driverController.estimatedTime.value =
+                                      d.estimatedTime?.toString() ?? '';
+                                  mapC.updateMarkersDebounced(
+                                    pickupLabel: widget.pickupAddress,
+                                    dropLabel: widget.destinationAddress,
+                                    estimatedMin:
+                                        driverController.estimatedTime.value,
+                                  );
+                                },
+                                carTitle: t,
+                                carMinRate: d.estimatedPrice.toString(),
+                                carMaxRate: d.estimatedPrice.toString(),
+                                carSubTitle: 'Shared comfy ride',
+                                arrivingTime: '${d.estimatedTime ?? 0} min',
+                              ),
+                            );
+                          }
+
+                          if (!driverController.markerAdded.value &&
+                              sharedCards.isNotEmpty) {
+                            dynamic defaultDriver;
+                            for (final t in sharedCarTypes) {
+                              final d = sharedDrivers.firstWhereOrNull(
+                                (e) =>
+                                    e.driverId?.carType?.toLowerCase() ==
+                                    t.toLowerCase(),
+                              );
+                              if (d != null) {
+                                defaultDriver = d;
+                                break;
+                              }
+                            }
+                            if (defaultDriver != null) {
                               driverController.estimatedTime.value =
                                   defaultDriver.estimatedTime?.toString() ?? '';
-
                               WidgetsBinding.instance.addPostFrameCallback((_) {
                                 mapC.updateMarkersDebounced(
                                   pickupLabel: widget.pickupAddress,
@@ -536,190 +749,82 @@ class _BookMapScreenState extends State<BookMapScreen> {
                                 driverController.markerAdded.value = true;
                               });
                             }
-
-                            return Column(
-                              children: [
-                                if (luxuryDriver != null)
-                                  PackageContainer.bookCarTypeContainer(
-                                    borderColor:
-                                        driverController
-                                                    .selectedCarType
-                                                    .value ==
-                                                'Luxury'
-                                            ? AppColors.commonBlack
-                                            : AppColors.containerColor,
-                                    carImg: AppImages.luxuryCar,
-                                    onTap: () {
-                                      driverController.selectedCarType.value =
-                                          'Luxury';
-                                      driverController.estimatedTime.value =
-                                          luxuryDriver.estimatedTime
-                                              .toString() ??
-                                          '';
-
-                                      mapC.updateMarkersDebounced(
-                                        pickupLabel: widget.pickupAddress,
-                                        dropLabel: widget.destinationAddress,
-                                        estimatedMin:
-                                            driverController
-                                                .estimatedTime
-                                                .value,
-                                      );
-                                    },
-                                    carTitle: 'Luxury',
-                                    carMinRate:
-                                        luxuryDriver.estimatedPrice.toString(),
-                                    carSubTitle: 'Comfy, Economical Cars',
-                                    arrivingTime:
-                                        '${luxuryDriver.estimatedTime ?? 0} min',
-                                  ),
-                                const SizedBox(height: 20),
-                                if (sedanDriver != null)
-                                  PackageContainer.bookCarTypeContainer(
-                                    borderColor:
-                                        driverController
-                                                    .selectedCarType
-                                                    .value ==
-                                                'Sedan'
-                                            ? AppColors.commonBlack
-                                            : AppColors.containerColor,
-                                    carImg: AppImages.sedan,
-                                    onTap: () {
-                                      driverController.selectedCarType.value =
-                                          'Sedan';
-                                      driverController.estimatedTime.value =
-                                          sedanDriver.estimatedTime
-                                              .toString() ??
-                                          '';
-
-                                      mapC.updateMarkersDebounced(
-                                        pickupLabel: widget.pickupAddress,
-                                        dropLabel: widget.destinationAddress,
-                                        estimatedMin:
-                                            driverController
-                                                .estimatedTime
-                                                .value,
-                                      );
-                                    },
-                                    carTitle: 'Sedan',
-                                    carMinRate:
-                                        sedanDriver.estimatedPrice.toString(),
-                                    carMaxRate:
-                                        sedanDriver.estimatedPrice.toString(),
-                                    carSubTitle: 'Comfy, Economical Cars',
-                                    arrivingTime:
-                                        '${sedanDriver.estimatedTime ?? 0} min',
-                                  ),
-                              ],
-                            );
                           }
 
-                          // ---------- SHARED ----------
-                          final luxuryShared = sharedDrivers.firstWhereOrNull(
-                            (e) =>
-                                e.driverId?.carType?.toLowerCase() == 'luxury',
-                          );
-                          final sedanShared = sharedDrivers.firstWhereOrNull(
-                            (e) =>
-                                e.driverId?.carType?.toLowerCase() == 'sedan',
-                          );
-
-                          if (!driverController.markerAdded.value &&
-                              (luxuryShared != null || sedanShared != null)) {
-                            final defaultDriver = luxuryShared ?? sedanShared;
-                            driverController.estimatedTime.value =
-                                defaultDriver?.estimatedTime?.toString() ?? '';
-
-                            WidgetsBinding.instance.addPostFrameCallback((_) {
-                              mapC.updateMarkersDebounced(
-                                pickupLabel: widget.pickupAddress,
-                                dropLabel: widget.destinationAddress,
-                                estimatedMin:
-                                    driverController.estimatedTime.value,
-                              );
-                              driverController.markerAdded.value = true;
-                            });
-                          }
-
-                          return Column(
-                            children: [
-                              if (luxuryShared != null)
-                                PackageContainer.bookCarTypeContainer(
-                                  borderColor:
-                                      driverController.selectedCarType.value ==
-                                              'Luxury'
-                                          ? AppColors.commonBlack
-                                          : AppColors.containerColor,
-                                  carImg: AppImages.luxuryCar,
-                                  onTap: () {
-                                    driverController.selectedCarType.value =
-                                        'Luxury';
-                                    driverController
-                                        .selectedSharedDriver
-                                        .value = luxuryShared;
-                                    driverController.estimatedTime.value =
-                                        luxuryShared.estimatedTime
-                                            ?.toString() ??
-                                        '';
-
-                                    mapC.updateMarkersDebounced(
-                                      pickupLabel: widget.pickupAddress,
-                                      dropLabel: widget.destinationAddress,
-                                      estimatedMin:
-                                          driverController.estimatedTime.value,
-                                    );
-                                  },
-                                  carTitle: 'Luxury',
-                                  carMinRate:
-                                      luxuryShared.estimatedPrice.toString(),
-                                  carSubTitle: 'Shared comfy ride',
-                                  arrivingTime:
-                                      '${luxuryShared.estimatedTime ?? 0} min',
-                                ),
-                              const SizedBox(height: 20),
-                              if (sedanShared != null)
-                                PackageContainer.bookCarTypeContainer(
-                                  borderColor:
-                                      driverController.selectedCarType.value ==
-                                              'Sedan'
-                                          ? AppColors.commonBlack
-                                          : AppColors.containerColor,
-                                  carImg: AppImages.sedan,
-                                  onTap: () {
-                                    driverController.selectedCarType.value =
-                                        'Sedan';
-                                    driverController
-                                        .selectedSharedDriver
-                                        .value = sedanShared;
-                                    driverController.estimatedTime.value =
-                                        sedanShared.estimatedTime?.toString() ??
-                                        '';
-
-                                    mapC.updateMarkersDebounced(
-                                      pickupLabel: widget.pickupAddress,
-                                      dropLabel: widget.destinationAddress,
-                                      estimatedMin:
-                                          driverController.estimatedTime.value,
-                                    );
-                                  },
-                                  carTitle: 'Sedan',
-                                  carMinRate:
-                                      sedanShared.estimatedPrice.toString(),
-                                  carMaxRate:
-                                      sedanShared.estimatedPrice.toString(),
-                                  carSubTitle: 'Shared comfy ride',
-                                  arrivingTime:
-                                      '${sedanShared.estimatedTime ?? 0} min',
-                                ),
-                            ],
-                          );
+                          return Column(children: sharedCards);
                         }),
                       ],
                     ),
                   ),
+                  ),
                 ),
               ],
-            ),
+                    ),
+                  ),
+                ),
+              // Bouncing down-arrow hint — visible only while more content
+              // remains below the fold. Tap to glide to the vehicle list / Book.
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 12,
+                child: IgnorePointer(
+                  ignoring: false,
+                  child: Center(
+                    child: ValueListenableBuilder<bool>(
+                      valueListenable: _showScrollHint,
+                      builder: (context, show, _) {
+                        return AnimatedOpacity(
+                          duration: const Duration(milliseconds: 220),
+                          opacity: show ? 1 : 0,
+                          child: AnimatedSlide(
+                            duration: const Duration(milliseconds: 220),
+                            offset: show ? Offset.zero : const Offset(0, 0.4),
+                            child: GestureDetector(
+                              onTap: show ? _scrollToBottom : null,
+                              child: AnimatedBuilder(
+                                animation: _arrowBounceCtrl,
+                                builder: (context, child) {
+                                  final dy =
+                                      Curves.easeInOut.transform(
+                                        _arrowBounceCtrl.value,
+                                      ) *
+                                      6.0;
+                                  return Transform.translate(
+                                    offset: Offset(0, dy),
+                                    child: child,
+                                  );
+                                },
+                                child: Container(
+                                  width: 38,
+                                  height: 38,
+                                  decoration: BoxDecoration(
+                                    color: Colors.white,
+                                    shape: BoxShape.circle,
+                                    boxShadow: const [
+                                      BoxShadow(
+                                        color: Colors.black26,
+                                        blurRadius: 8,
+                                        offset: Offset(0, 3),
+                                      ),
+                                    ],
+                                  ),
+                                  child: const Icon(
+                                    Icons.keyboard_arrow_down_rounded,
+                                    color: Colors.black87,
+                                    size: 24,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
 
           bottomNavigationBar: Obx(

@@ -148,8 +148,20 @@ class RideShareSocketService {
   void onReconnect(Function() callback) =>
       _socket?.onReconnect((_) => callback());
   void on(String event, Function(dynamic data) callback) {
-    _callbacks[event] = callback;
-    _socket?.on(event, callback);
+    // Unwrap a leading Map when the backend emits extra trailing args
+    // (socket.io then delivers the whole emit as a List [payload, id, ...]).
+    // No-op when the payload is already a Map. Store the wrapped handler so
+    // reconnect re-attach (via _callbacks) keeps the same normalization.
+    void wrapped(dynamic data) {
+      var payload = data;
+      if (payload is List && payload.isNotEmpty && payload.first is Map) {
+        payload = payload.first;
+      }
+      callback(payload);
+    }
+
+    _callbacks[event] = wrapped;
+    _socket?.on(event, wrapped);
   }
 
   void onAck(String event, Function(dynamic data, Function? ack) callback) {

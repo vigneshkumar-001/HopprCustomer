@@ -275,7 +275,7 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                                       const SizedBox(width: 8),
                                       Expanded(
                                         child: Text(
-                                          'Applied: ${_appliedCouponCode!} - Saved ₹${_discountAmount.toStringAsFixed(2)}',
+                                          'Applied: ${_appliedCouponCode!} - Saved ₦${_discountAmount.toStringAsFixed(2)}',
                                           style: const TextStyle(
                                             color: Colors.green,
                                             fontWeight: FontWeight.w600,
@@ -514,7 +514,7 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
     return Row(
       children: [
         Expanded(child: Text(label, style: left)),
-        Text('$prefix₹${amount.toStringAsFixed(2)}', style: right),
+        Text('$prefix₦${amount.toStringAsFixed(2)}', style: right),
       ],
     );
   }
@@ -934,7 +934,7 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                                         if (_appliedCouponCode != null &&
                                             _discountAmount > 0)
                                           Text(
-                                            'You saved ₹${_discountAmount.toStringAsFixed(2)}',
+                                            'You saved ₦${_discountAmount.toStringAsFixed(2)}',
                                             style: const TextStyle(
                                               color: Colors.green,
                                               fontSize: 12,

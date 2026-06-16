@@ -145,7 +145,20 @@ class SocketService {
   void onReconnect(Function() callback) =>
       _socket.onReconnect((_) => callback());
   void on(String event, Function(dynamic) callback) =>
-      _socket.on(event, callback);
+      _socket.on(event, (dynamic data) {
+        // The backend sometimes emits with extra trailing args
+        // (e.g. emit('nearby-driver-update', payload, packetId)). socket.io
+        // then delivers the whole thing as a List [payload, id, ...]. Unwrap
+        // the leading Map so handlers can read fields directly. This is a
+        // no-op when the payload is already a Map (the common case).
+        var payload = data;
+        if (payload is List &&
+            payload.isNotEmpty &&
+            payload.first is Map) {
+          payload = payload.first;
+        }
+        callback(payload);
+      });
   void emit(String event, dynamic data) => _socket.emit(event, data);
   void emitWithAck(String event, dynamic data, Function(dynamic)? ack) =>
       _socket.emitWithAck(event, data, ack: ack);

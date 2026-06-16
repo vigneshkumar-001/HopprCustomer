@@ -123,7 +123,21 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
   double? _routeMeters;
   int? _routeSeconds;
+  // Live ETA: ticks down once per second between route updates so the ETA reads
+  // as live (Uber/Ola feel) instead of freezing until the next packet. Reset to
+  // `_routeSeconds` whenever a fresh route ETA arrives (`_setRouteEta`).
+  int? _etaDisplaySeconds;
+  Timer? _etaTicker;
   bool _routeMetricsFromSocket = false;
+
+  /// Display ETA = the live-decrementing value when available, else the raw one.
+  int? get _displayEtaSeconds => _etaDisplaySeconds ?? _routeSeconds;
+
+  /// Set the route ETA and (re)seed the live countdown from it.
+  void _setRouteEta(int? seconds) {
+    _routeSeconds = seconds;
+    _etaDisplaySeconds = seconds;
+  }
   DateTime _routeMetricsFromSocketAt = DateTime.fromMillisecondsSinceEpoch(0);
   bool _navigatedToPayment = false;
   Timer? _paymentNavTimer;
@@ -1281,6 +1295,14 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       if (!mounted) return;
       setState(() => _searchingElapsedSeconds += 1);
     });
+    // Live ETA countdown: between route updates, tick the displayed ETA down by
+    // one second so it never looks frozen. A fresh socket/route ETA reseeds it.
+    _etaTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      final v = _etaDisplaySeconds;
+      if (v == null || v <= 0) return;
+      setState(() => _etaDisplaySeconds = v - 1);
+    });
     _initLocation();
     _loadPickupDropIcons();
     _loadCustomMarker();
@@ -1676,7 +1698,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
           _routeMetricsFromSocketAt = DateTime.now();
         }
         if (socketMins != null && socketMins >= 0) {
-          _routeSeconds = socketMins * 60;
+          _setRouteEta(socketMins * 60);
           _routeMetricsFromSocket = true;
           _routeMetricsFromSocketAt = DateTime.now();
         }
@@ -2142,7 +2164,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
           setState(() {
             if (!socketFresh) {
               _routeMeters = meters;
-              _routeSeconds = seconds;
+              _setRouteEta(seconds);
               _routeMetricsFromSocket = false;
             }
           });
@@ -2302,7 +2324,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
   Widget _etaChip() {
     final etaText =
-        (_routeSeconds != null) ? _formatDuration(_routeSeconds!) : '';
+        (_displayEtaSeconds != null) ? _formatDuration(_displayEtaSeconds!) : '';
     final distText =
         (_routeMeters != null) ? _formatDistance(_routeMeters!) : '';
 
@@ -2360,7 +2382,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
   Future<void> _showEtaDistanceSheet() async {
     final etaText =
-        (_routeSeconds != null) ? _formatDuration(_routeSeconds!) : '';
+        (_displayEtaSeconds != null) ? _formatDuration(_displayEtaSeconds!) : '';
     final distText =
         (_routeMeters != null) ? _formatDistance(_routeMeters!) : '';
     if (etaText.isEmpty && distText.isEmpty) return;
@@ -2440,7 +2462,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
   Widget _tripInfoInline() {
     final etaText =
-        (_routeSeconds != null) ? _formatDuration(_routeSeconds!) : '';
+        (_displayEtaSeconds != null) ? _formatDuration(_displayEtaSeconds!) : '';
     final distText =
         (_routeMeters != null) ? _formatDistance(_routeMeters!) : '';
 
@@ -2643,6 +2665,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     _driverMarkerFlushTimer?.cancel();
     _paymentNavTimer?.cancel();
     _searchingElapsedTimer?.cancel();
+    _etaTicker?.cancel();
     _searchingAnimController.dispose();
     _motion.dispose();
     _markersNotifier.dispose();
@@ -2683,8 +2706,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                           ? RideMapMode.toDrop
                           : RideMapMode.toPickup,
                   etaText:
-                      _routeSeconds != null
-                          ? _formatDuration(_routeSeconds!)
+                      _displayEtaSeconds != null
+                          ? _formatDuration(_displayEtaSeconds!)
                           : '',
                   distanceText:
                       _routeMeters != null
@@ -2702,6 +2725,54 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                   mapPadding: const EdgeInsets.only(bottom: 230),
                 ),
               ),
+
+              // Empty state: driver accepted but their first live location has
+              // not arrived yet (or signal briefly dropped). Without this the map
+              // just shows the pins and the user thinks it is stuck.
+              if (_isDriverConfirmed &&
+                  _driverRawLatLng == null &&
+                  !destinationReached)
+                Positioned(
+                  top: 60,
+                  left: 0,
+                  right: 0,
+                  child: Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 10,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.82),
+                        borderRadius: BorderRadius.circular(24),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: const [
+                          SizedBox(
+                            height: 14,
+                            width: 14,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                Colors.white,
+                              ),
+                            ),
+                          ),
+                          SizedBox(width: 10),
+                          Text(
+                            'Getting courier location…',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
               Positioned(
                 top: 350,
                 right: 10,
@@ -3118,9 +3189,10 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                                                         _formatDistance(
                                                           _routeMeters!,
                                                         ),
-                                                      if (_routeSeconds != null)
+                                                      if (_displayEtaSeconds !=
+                                                          null)
                                                         _formatDuration(
-                                                          _routeSeconds!,
+                                                          _displayEtaSeconds!,
                                                         ),
                                                     ]
                                                     .where(
@@ -3951,14 +4023,16 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Image.asset(
-            AppImages.emptyNoDrivers,
+            // Package flow -> show the bike/scooter empty illustration (same
+            // style as the car one used for single rides), not a car.
+            AppImages.emptyDeliveries,
             width: 150,
             height: 150,
             fit: BoxFit.contain,
           ),
           const SizedBox(height: 20),
           const Text(
-            "No drivers found",
+            "No riders found",
             style: TextStyle(
               fontSize: 16,
               fontWeight: FontWeight.w700,
@@ -3967,7 +4041,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
           ),
           const SizedBox(height: 8),
           const Text(
-            "We couldn't find any available drivers nearby.\nPlease try again in a few minutes.",
+            "We couldn't find any available riders nearby.\nPlease try again in a few minutes.",
             textAlign: TextAlign.center,
             style: TextStyle(
               fontSize: 13,

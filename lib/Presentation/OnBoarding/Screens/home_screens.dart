@@ -623,8 +623,9 @@ class _HomeScreensState extends State<HomeScreens>
             'lng': _pickupPos!.longitude,
           },
         ),
-        transition: Transition.rightToLeft,
-        duration: const Duration(milliseconds: 300),
+        transition: Transition.downToUp,
+        curve: Curves.easeOutCubic,
+        duration: const Duration(milliseconds: 360),
       );
     } finally {
       _busy = false;
@@ -1512,9 +1513,10 @@ class _HomeBottomSheet extends StatelessWidget {
                                         isPickup: false,
                                         pickupData: pickupData,
                                       ),
-                                      transition: Transition.rightToLeft,
+                                      transition: Transition.downToUp,
+                                      curve: Curves.easeOutCubic,
                                       duration: const Duration(
-                                        milliseconds: 300,
+                                        milliseconds: 360,
                                       ),
                                     );
                                   },
