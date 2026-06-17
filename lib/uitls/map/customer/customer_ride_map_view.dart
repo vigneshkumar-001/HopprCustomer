@@ -105,6 +105,8 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   DateTime? _holdStartedAt;
   // Throttle for the hold log so it is visible in release without flooding.
   DateTime? _lastHoldLogAt;
+  // Throttle for the drop-render diagnostic trace (one line ~per second).
+  DateTime? _lastDropRenderLogAt;
   double? _lastTrimDistanceToTargetMeters;
   int _trimPausedCount = 0;
   String _routeSig = '';
@@ -303,6 +305,13 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       _requestFitBounds(reason: 'pickup_drop_changed', force: true);
     }
     if (oldWidget.mode != widget.mode) {
+      // BUILD FINGERPRINT — confirms the running build includes the drop-leg
+      // forward-walker removal. If this line is absent from a drop-phase log,
+      // the app was NOT rebuilt with the fix.
+      AppLogger.log.w(
+        '[drop-phase] mode ${oldWidget.mode} -> ${widget.mode} '
+        'build=drop-eq-pickup-v3 routePts=${widget.routePoints.length}',
+      );
       _syncRoute(force: true);
       _syncMarkers(force: true);
       _rebuildPolylines();
@@ -1038,6 +1047,20 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     // "parallel road lock" and makes the vehicle appear to cut across streets.
     if (nearest.distanceMeters > effectiveTol) {
       _noteSnapMiss(nearest.distanceMeters);
+      // DIAGNOSTIC (drop leg, throttled): the marker is being shown at RAW GPS
+      // because it is too far from the route to snap. If the drop "dump" is this
+      // case, the route doesn't match the road the driver is on (reroute lag).
+      if (widget.mode == RideMapMode.toDrop &&
+          (_lastDropRenderLogAt == null ||
+              now.difference(_lastDropRenderLogAt!) >=
+                  const Duration(seconds: 1))) {
+        _lastDropRenderLogAt = now;
+        AppLogger.log.w(
+          '[drop-render] RAW (off-route) snapDist=${nearest.distanceMeters.toStringAsFixed(1)} '
+          'tol=${effectiveTol.toStringAsFixed(0)} misses=$_consecutiveSnapMisses '
+          'routePts=${routeForSnap.length}',
+        );
+      }
       return _SnappedPose(position: raw, bearing: fallbackBearing);
     }
 
@@ -1096,40 +1119,25 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
         _markerRouteProgress >= 0.0 &&
         candProgress < _markerRouteProgress - 0.25;
 
-    // DROP LEG — pure forward route-walker (pickup-grade smoothness).
+    // DROP LEG renders EXACTLY like the pickup leg (which is flawless): it falls
+    // through to the shared path below, which returns the real snapped GPS
+    // position (`_resolveDisplayPosition` -> `nearest.point`) on forward motion
+    // and only HOLDS the marker on genuine backward jitter at a stop.
     //
-    // WHY pickup is perfect but drop shakes: the pickup leg is a short, well-
-    // matched route the driver advances along monotonically, so the snapped point
-    // never lands behind the marker. The drop route is longer / curvier and uses
-    // a wider snap tolerance, so at stops and curves the nearest route point keeps
-    // landing BEHIND the marker. The old code answered that with a tangle of
-    // hold / release / raw-blend branches, and the hold→release→catch-up cycle is
-    // EXACTLY the "car stops, shakes, jumps and comes back" on the drop leg.
-    //
-    // Replace all of that on the drop leg with one rule: render the marker
-    // STRICTLY at its furthest-forward point ON the route. Advance the floor when
-    // a fix lands ahead; otherwise keep the same on-route point (the car simply
-    // waits — no wobble, no backward step, no raw-GPS sideways drift). Only a
-    // large genuine reverse (real U-turn; a reroute redraws the route and resets
-    // the floor anyway) moves it back. This makes drop behave like smooth pickup.
-    //
-    // First drop fix (progress still -1.0) falls through to seed the floor below;
-    // every fix after that is handled here.
-    if (widget.mode == RideMapMode.toDrop && _markerRouteProgress >= 0.0) {
-      final bool genuineReverse =
-          wouldRegress && rawMoveFromCurrent >= _kRealReverseMeters;
-      if (genuineReverse || candProgress > _markerRouteProgress) {
-        _markerRouteProgress = candProgress;
-      }
-      _holdStartedAt = null;
-      _consecutiveSnapMisses = 0;
-      // Motion engine still EMA-smooths this bearing + clamps turn rate, so the
-      // icon rotates cleanly; position is always an on-route forward point.
-      return _SnappedPose(
-        position: _pointAtRouteProgress(routeForSnap, _markerRouteProgress),
-        bearing: routeBearing,
-      );
-    }
+    // History / why this block was removed: there used to be a drop-only
+    // "forward route-walker" early-return here that rendered a SYNTHETIC point
+    // `_pointAtRouteProgress(_markerRouteProgress)` — a position that only moved
+    // when the snapped floor index strictly increased. On curves / when the
+    // driver was laterally offset, the snap landed "behind" the floor, the floor
+    // did not advance, and the marker FROZE in place while the real driver drove
+    // on; when the floor finally jumped, the marker LEAPT to catch up. That
+    // freeze-then-leap was the production "car stuck moving front-and-back while
+    // the driver already crossed the road" on the drop leg. It also shadowed the
+    // `rawAdvancingToDest` anti-freeze logic right below (early-returned before
+    // it could run). Pickup never had this block — it renders the real snapped
+    // position — which is why pickup was always smooth. Deleting the block makes
+    // drop identical to pickup (the forward-only floor below still guards genuine
+    // backward jitter; the wider drop tolerance + reroute behaviour are kept).
 
     // Is the RAW fix genuinely advancing toward the destination? A snapped index
     // BEHIND progress while the raw GPS still moved meaningfully CLOSER to the
@@ -1233,6 +1241,31 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       snapped: nearest.point,
       maxSnapMeters: effectiveTol,
     );
+
+    // DIAGNOSTIC (drop leg only, throttled ~1/s): trace what the marker is
+    // actually told to render so a socket+app log shows freeze vs follow vs
+    // jump without guessing. `rawToSnap` = how far the rendered point sits from
+    // the real GPS; `move` = how far the rendered point moved this fix.
+    if (widget.mode == RideMapMode.toDrop) {
+      if (_lastDropRenderLogAt == null ||
+          now.difference(_lastDropRenderLogAt!) >= const Duration(seconds: 1)) {
+        _lastDropRenderLogAt = now;
+        final rawToSnap = Geolocator.distanceBetween(
+          raw.latitude,
+          raw.longitude,
+          resolved.latitude,
+          resolved.longitude,
+        );
+        AppLogger.log.w(
+          '[drop-render] follow snapDist=${nearest.distanceMeters.toStringAsFixed(1)} '
+          'rawToRendered=${rawToSnap.toStringAsFixed(1)} '
+          'rendMove=${snappedMoveFromCurrent.toStringAsFixed(1)} '
+          'rawMove=${rawMoveFromCurrent.toStringAsFixed(1)} '
+          'cand=${candProgress.toStringAsFixed(1)} '
+          'floor=${_markerRouteProgress.toStringAsFixed(1)} tol=${effectiveTol.toStringAsFixed(0)}',
+        );
+      }
+    }
 
     return _SnappedPose(position: resolved, bearing: smooth);
   }
