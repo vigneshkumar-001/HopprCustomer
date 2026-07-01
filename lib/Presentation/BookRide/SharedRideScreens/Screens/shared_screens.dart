@@ -101,6 +101,14 @@ class _SharedScreensState extends State<SharedScreens>
     with SingleTickerProviderStateMixin {
   Timer? _searchingElapsedTimer;
   Timer? _noDriverFoundTimer;
+  // PERF: throttle the heavy route-trim + ETA/distance setState (which rebuilds the
+  // whole bottom sheet) to at most once per _trimMinInterval, instead of on every
+  // driver-location packet (1–3/s). The map interpolates the car marker between the
+  // positions it receives, so movement stays smooth while the sheet stops thrashing.
+  Timer? _trimThrottleTimer;
+  DateTime _lastTrimAt = DateTime.fromMillisecondsSinceEpoch(0);
+  LatLng? _pendingTrimPos;
+  static const Duration _trimMinInterval = Duration(milliseconds: 800);
   int _searchingElapsedSeconds = 0;
   ValueNotifier<int>? _searchingElapsedSecondsVN;
 
@@ -223,9 +231,60 @@ class _SharedScreensState extends State<SharedScreens>
         _pickupInstructionLocal = state.pickupInstruction;
       }
     });
-    // RESUME/RECONNECT recovery: if the backend says MY booking is already
-    // completed (driver dropped me while the app was dead), go straight to payment.
+    // RESUME/RECONNECT recovery: if the backend says MY booking was CANCELLED
+    // (driver cancelled while the app was backgrounded / socket missed), leave the
+    // ride screen instead of restoring a stuck trip.
+    if (state.myStatus == 'CANCELLED') {
+      _exitCancelled('Your trip has been cancelled by the driver.');
+      return;
+    }
+    // ...or already completed (driver dropped me while the app was dead) → payment.
     _maybeGoToPaymentFromMyState(state);
+  }
+
+  /// Single exit path for a cancelled ride (socket event OR resume recovery).
+  /// Idempotent via [_didExitToHome]; blocks any payment nav; shows the reason
+  /// briefly, then returns home exactly once.
+  void _exitCancelled(String reason) {
+    if (!mounted || _didExitToHome) return;
+    _didExitToHome = true; // nav lock — dedupe duplicate cancel events
+    _didGoToPayment = true; // hard-block payment nav after a cancel
+    setState(() {
+      isTripCancelled = true;
+      cancelReason = reason;
+    });
+    Future.delayed(const Duration(seconds: 2), () {
+      if (!mounted) return;
+      Get.offAll(() => const HomeScreens());
+    });
+  }
+
+  /// Handle a driver/customer cancellation socket event. The event NAME is
+  /// definitive, so we accept it whether `status` is `true`, a "CANCELLED" string,
+  /// `clearActiveRide` is set, or status is absent — but ONLY for MY bookingId.
+  void _handleRideCancelledEvent(dynamic data, String source) {
+    if (data is! Map) return;
+    final evtBookingId = (data['bookingId'] ?? '').toString();
+    final myBookingId = _effectiveBookingId();
+    // bookingId guard: ignore a cancellation meant for a different booking.
+    if (evtBookingId.isNotEmpty &&
+        myBookingId.isNotEmpty &&
+        evtBookingId != myBookingId) {
+      return;
+    }
+    final st = data['status'];
+    final statusStr = (st ?? '').toString().toUpperCase();
+    final isCancel = st == true ||
+        statusStr == 'CANCELLED' ||
+        statusStr == 'DRIVER_CANCELLED' ||
+        data['clearActiveRide'] == true ||
+        st == null; // event fired without a status field is still a cancellation
+    if (!isCancel) return;
+    AppLogger.log.i('$source booking=$evtBookingId');
+    _exitCancelled(
+      (data['message'] ?? data['reason'] ?? 'Your trip has been cancelled.')
+          .toString(),
+    );
   }
 
   /// Backend status is the source of truth for completion. Opens payment when MY
@@ -233,6 +292,25 @@ class _SharedScreensState extends State<SharedScreens>
   /// from the my-state HTTP API) or the aggregate's DROPPED status (live socket).
   /// Used on resume/reconnect AND as a backup if the per-booking 'ride-completed'
   /// event is missed. NEVER GPS-based, and strictly scoped to MY bookingId.
+  /// True when a new shared_my_state differs in a UI-meaningful field, so we only
+  /// rebuild the sheet on real changes (not on every backend re-emit). Covers every
+  /// field the status/seat/payment UI reads.
+  bool _sharedStateChanged(SharedMyState? a, SharedMyState? b) {
+    if (a == null || b == null) return true;
+    return a.myStatus != b.myStatus ||
+        a.driverCurrentAction != b.driverCurrentAction ||
+        a.amINextPickup != b.amINextPickup ||
+        a.amINextDrop != b.amINextDrop ||
+        a.stopsBeforeMe != b.stopsBeforeMe ||
+        a.myBookingCompleted != b.myBookingCompleted ||
+        a.etaToMyPickupMinutes != b.etaToMyPickupMinutes ||
+        a.etaToMyDropMinutes != b.etaToMyDropMinutes ||
+        a.pickupInstruction != b.pickupInstruction ||
+        a.paymentMode != b.paymentMode ||
+        a.customerBookingId != b.customerBookingId ||
+        a.mySeatNumbers.join(',') != b.mySeatNumbers.join(',');
+  }
+
   void _maybeGoToPaymentFromMyState(SharedMyState? state) {
     if (state == null) return;
     final bool completed =
@@ -464,6 +542,7 @@ class _SharedScreensState extends State<SharedScreens>
   void dispose() {
     _searchingElapsedTimer?.cancel();
     _noDriverFoundTimer?.cancel();
+    _trimThrottleTimer?.cancel();
     _searchingElapsedSecondsVN?.dispose();
     _sheetController.dispose();
     // CRITICAL FIX: remove every socket listener registered in
@@ -812,6 +891,31 @@ class _SharedScreensState extends State<SharedScreens>
   /// Update remaining meters/ETA based on driver's progress along the route.
   /// Note: map polyline trimming is handled by `CustomerRideMapView` so we do
   /// NOT mutate `_activeRoute` here (mutating causes flicker / missing polylines).
+  /// Leading + trailing throttle around [_trimRouteForDriver] so its sheet-wide
+  /// setState fires at most once per [_trimMinInterval]. The latest driver position
+  /// is always kept in [_pendingTrimPos]; the car marker stays smooth because the
+  /// map interpolates between the positions it receives.
+  void _throttledTrimRoute(LatLng driverPos) {
+    _pendingTrimPos = driverPos;
+    final now = DateTime.now();
+    final sinceLast = now.difference(_lastTrimAt);
+    if (sinceLast >= _trimMinInterval) {
+      _lastTrimAt = now;
+      _trimThrottleTimer?.cancel();
+      _trimThrottleTimer = null;
+      _trimRouteForDriver(driverPos);
+      return;
+    }
+    if (_trimThrottleTimer != null) return; // trailing run already scheduled
+    _trimThrottleTimer = Timer(_trimMinInterval - sinceLast, () {
+      _trimThrottleTimer = null;
+      if (!mounted) return;
+      _lastTrimAt = DateTime.now();
+      final p = _pendingTrimPos;
+      if (p != null && _activeRoute.isNotEmpty) _trimRouteForDriver(p);
+    });
+  }
+
   void _trimRouteForDriver(LatLng driverPos) {
     if (_activeRoute.length < 2) return;
 
@@ -1820,11 +1924,18 @@ class _SharedScreensState extends State<SharedScreens>
     rideShareSocket.on('shared_my_state', (data) {
       if (!mounted || data is! Map) return;
       try {
-        setState(() =>
-            _myState = SharedMyState.fromJson(Map<String, dynamic>.from(data)));
-        // Backup completion path: if the live state says MY leg is DROPPED and the
-        // 'ride-completed' event was somehow missed, still route to payment (once).
-        _maybeGoToPaymentFromMyState(_myState);
+        final newState = SharedMyState.fromJson(Map<String, dynamic>.from(data));
+        // PERF dedupe: the backend re-emits my-state on every sync (incl. driver
+        // location ticks). Only rebuild the sheet when a UI-meaningful field
+        // actually changed; otherwise refresh the reference without a rebuild. The
+        // payment-completion backup still runs every time (its fields are compared).
+        if (!_sharedStateChanged(_myState, newState)) {
+          _myState = newState;
+          _maybeGoToPaymentFromMyState(newState);
+          return;
+        }
+        setState(() => _myState = newState);
+        _maybeGoToPaymentFromMyState(newState);
       } catch (_) {}
     });
 
@@ -2162,41 +2273,11 @@ class _SharedScreensState extends State<SharedScreens>
       if (p != null) _updateLiveMetrics(p);
     });
 
-    rideShareSocket.on('customer-cancelled', (data) async {
-      AppLogger.log.i('customer-cancelled : $data');
-      if (data is Map && data['status'] == true) {
-        if (!mounted) return;
-        setState(() {
-          isTripCancelled = true;
-          cancelReason =
-              (data['message'] ?? data['reason'] ?? "Trip cancelled")
-                  .toString();
-        });
-        await Future.delayed(const Duration(seconds: 3));
-        if (!mounted) return;
-        if (_didExitToHome) return;
-        _didExitToHome = true;
-        Get.offAll(() => const HomeScreens());
-      }
-    });
+    rideShareSocket.on('customer-cancelled',
+        (data) => _handleRideCancelledEvent(data, 'customer-cancelled'));
 
-    rideShareSocket.on('driver-cancelled', (data) async {
-      AppLogger.log.i('driver-cancelled : $data');
-      if (data is Map && data['status'] == true) {
-        if (!mounted) return;
-        setState(() {
-          isTripCancelled = true;
-          cancelReason =
-              (data['message'] ?? data['reason'] ?? "Trip cancelled")
-                  .toString();
-        });
-        await Future.delayed(const Duration(seconds: 3));
-        if (!mounted) return;
-        if (_didExitToHome) return;
-        _didExitToHome = true;
-        Get.offAll(() => const HomeScreens());
-      }
-    });
+    rideShareSocket.on('driver-cancelled',
+        (data) => _handleRideCancelledEvent(data, 'driver-cancelled'));
 
     // SMOOTH driver-location updates
     rideShareSocket.onAck('driver-location', (data, ack) async {
@@ -2247,9 +2328,9 @@ class _SharedScreensState extends State<SharedScreens>
       }
       _driverLatLng = newPos;
 
-      // Trim route according to driver progress
+      // Trim route according to driver progress (throttled — see _throttledTrimRoute).
       if (_activeRoute.isNotEmpty) {
-        _trimRouteForDriver(newPos);
+        _throttledTrimRoute(newPos);
 
         // OFF-ROUTE DETECTION (production-safe):
         // - Require consecutive misses (GPS noise protection)
@@ -2945,6 +3026,11 @@ class _SharedScreensState extends State<SharedScreens>
                                                 child: CachedNetworkImage(
                                                   imageUrl: ProfilePic,
                                                   fit: BoxFit.cover,
+                                                  // Decode at the 52px display size
+                                                  // (×DPR), not full resolution —
+                                                  // less memory/decode cost per
+                                                  // rebuild for a small avatar.
+                                                  memCacheWidth: 160,
                                                   placeholder: (context, url) =>
                                                       const Center(
                                                     child: SizedBox(
@@ -3053,6 +3139,9 @@ class _SharedScreensState extends State<SharedScreens>
                                           fit: BoxFit.cover,
                                           height: 66,
                                           width: 86,
+                                          // Decode at ~display size (×DPR), not
+                                          // full car-photo resolution.
+                                          memCacheWidth: 260,
                                           imageUrl: CarExteriorPhotos,
                                           placeholder: (context, url) =>
                                               const Center(

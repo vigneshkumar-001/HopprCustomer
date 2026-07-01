@@ -9,6 +9,8 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:get/get.dart';
 import 'package:hopper/Core/Consents/app_logger.dart';
+import 'package:hopper/Presentation/OnBoarding/Screens/home_screens.dart';
+import 'package:hopper/Presentation/OnBoarding/Screens/payment_screen.dart';
 import 'package:hopper/Core/Utility/app_toasts.dart';
 import 'package:hopper/Presentation/Authentication/controller/otp_controller.dart';
 import 'package:hopper/Presentation/OnBoarding/Screens/chat_screen.dart';
@@ -353,7 +355,15 @@ class FirebaseService {
       AppLogger.log.i(
         '[FOREGROUND] messageId=${msg.messageId} data=${msg.data}',
       );
-      await showNotification(msg);
+      // Shared-ride LIVE updates (driver picking/dropping another rider first,
+      // you-are-next, etc.) carry suppressForeground=true: the app is open and the
+      // socket already updated the UI, so we skip the local notification to avoid
+      // noise. Background/terminated delivery still shows via the system tray.
+      final suppress =
+          (msg.data['suppressForeground'] ?? '').toString() == 'true';
+      if (!suppress) {
+        await showNotification(msg);
+      }
       if (onForeground != null) onForeground(msg);
     });
 
@@ -407,6 +417,22 @@ class FirebaseService {
             Get.to(() => ChatScreen(bookingId: bookingId));
           } else {
             AppLogger.log.w('booking page without bookingId');
+          }
+          break;
+
+        // Shared-ride live/lifecycle push → open the app to home, which resumes
+        // the active shared ride + its tracking screen (backend is source of truth).
+        case 'shared_tracking':
+        case 'shared-ride-tracking':
+          Get.offAll(() => const HomeScreens());
+          break;
+
+        // Ride completed → open the payment screen for THIS booking only.
+        case 'payment':
+          if (bookingId.isNotEmpty) {
+            Get.to(() => PaymentScreen(bookingId: bookingId));
+          } else {
+            AppLogger.log.w('payment page without bookingId');
           }
           break;
 
