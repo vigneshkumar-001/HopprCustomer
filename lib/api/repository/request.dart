@@ -51,14 +51,17 @@ class Request {
     dynamic body,
     Map<String, dynamic>? queryParams,
   }) {
-    final authToken = headers['Authorization'];
-    final rawToken = authToken?.toString().replaceFirst('Bearer ', '');
+    // SECURITY: never log the JWT — only whether one was attached.
+    final tokenState =
+        (headers['Authorization']?.toString().trim().isNotEmpty ?? false)
+            ? 'Bearer ***masked***'
+            : '(none)';
 
     // Debug-only: full request details. Keep production logs clean.
     _debugLogInfo(
       'Method: $method\n'
       'Url: $url\n'
-      'Token: ${rawToken ?? ''}\n'
+      'Token: $tokenState\n'
       'Body: ${_formatBody(body ?? (queryParams ?? const <String, dynamic>{}))}',
     );
   }
@@ -69,14 +72,20 @@ class Request {
   
     required Response<dynamic> response,
   }) {
-    final authToken = response.requestOptions.headers['Authorization'];
-    final rawToken = authToken?.toString().replaceFirst('Bearer ', '');
+    // SECURITY: never log the JWT — only whether one was attached.
+    final tokenState = (response.requestOptions.headers['Authorization']
+                ?.toString()
+                .trim()
+                .isNotEmpty ??
+            false)
+        ? 'Bearer ***masked***'
+        : '(none)';
     final reqBody =
         response.requestOptions.data ?? response.requestOptions.queryParameters;
     _debugLogInfo(
       'Method: $method\n'
       'Url: $url\n'
-      'Token: ${rawToken ?? ''}\n'
+      'Token: $tokenState\n'
       'Body: ${_formatBody(reqBody)}\n'
       'Response: ${response.data}',
     );

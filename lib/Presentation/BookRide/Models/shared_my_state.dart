@@ -23,6 +23,18 @@ class SharedMyState {
   final String pickupInstruction; // DB-sourced "Directions to reach" note
   final String paymentMode; // DB-sourced payment method (COD/PAYSTACK/WALLET/…)
   final bool myBookingCompleted; // booking-doc terminal status (SUCCESS/PAID)
+  // SERVER-DRIVEN UI text — the backend decides the exact headline/detail for this
+  // rider's current state (waiting vs picked-up etc.). When present, the UI shows
+  // these verbatim so wording can be changed from the backend without an app update.
+  final String statusTitle;
+  final String statusMessage;
+  // Privacy-safe location the driver is heading to NEXT (stops[0]). Lets the map
+  // draw the driver's actual next leg + a generic "stop for another rider"
+  // marker. Never carries the other rider's identity/address.
+  final double? activeStopLat;
+  final double? activeStopLng;
+  final String activeStopType; // 'pickup' | 'drop' | ''
+  final bool activeStopIsMine;
 
   const SharedMyState({
     required this.sharedRideId,
@@ -39,7 +51,20 @@ class SharedMyState {
     this.pickupInstruction = '',
     this.paymentMode = '',
     this.myBookingCompleted = false,
+    this.statusTitle = '',
+    this.statusMessage = '',
+    this.activeStopLat,
+    this.activeStopLng,
+    this.activeStopType = '',
+    this.activeStopIsMine = false,
   });
+
+  /// True when the backend told us where the driver is heading next.
+  bool get hasActiveStop => activeStopLat != null && activeStopLng != null;
+
+  /// The driver's next stop belongs to ANOTHER rider (so the app should draw a
+  /// generic "serving another rider" leg + marker, never identity).
+  bool get activeStopIsOther => hasActiveStop && !activeStopIsMine;
 
   /// Friendly label for the payment method, or '' when unknown.
   String get paymentLabel {
@@ -60,6 +85,20 @@ class SharedMyState {
 
   bool get isOnboard => myStatus == 'PICKED_UP' || myStatus == 'DROPPED';
 
+  /// Headline/detail the UI should show — the backend's server-driven text when it
+  /// sent any, else the locally-computed fallback (so old backends still work).
+  String get titleText =>
+      statusTitle.trim().isNotEmpty ? statusTitle : primaryTitle;
+  String get detailText =>
+      statusMessage.trim().isNotEmpty ? statusMessage : primaryDetail;
+
+  /// Compact one-liner for the collapsed sheet — server text preferred.
+  String get collapsedResolved {
+    if (statusMessage.trim().isNotEmpty) return statusMessage;
+    if (statusTitle.trim().isNotEmpty) return statusTitle;
+    return collapsedText;
+  }
+
   static int? _toInt(dynamic v) =>
       v is num ? v.toInt() : (v == null ? null : int.tryParse(v.toString()));
 
@@ -70,6 +109,12 @@ class SharedMyState {
       pickupInstruction: (j['pickupInstruction'] ?? '').toString(),
       paymentMode: (j['paymentMode'] ?? '').toString(),
       myBookingCompleted: j['myBookingCompleted'] == true,
+      statusTitle: (j['statusTitle'] ?? '').toString(),
+      statusMessage: (j['statusMessage'] ?? '').toString(),
+      activeStopLat: (j['activeStopLat'] as num?)?.toDouble(),
+      activeStopLng: (j['activeStopLng'] as num?)?.toDouble(),
+      activeStopType: (j['activeStopType'] ?? '').toString(),
+      activeStopIsMine: j['activeStopIsMine'] == true,
       myStatus: (j['myStatus'] ?? '').toString(),
       driverCurrentAction: (j['driverCurrentAction'] ?? '').toString(),
       amINextPickup: j['amINextPickup'] == true,
@@ -110,8 +155,13 @@ class SharedMyState {
   String get primaryTitle {
     if (isDropped) return 'You have reached your destination';
     if (!isOnboard) {
+      // The driver's next stop is MY pickup → coming to me.
       if (amINextPickup) return 'You are next';
-      // Surface exactly what the driver is doing for the stop ahead of you.
+      // Otherwise surface EXACTLY what the driver is doing for the stop ahead of
+      // me, so a waiting rider knows why the car isn't heading to them yet.
+      if (driverCurrentAction == 'PICKING_OTHER_RIDER') {
+        return 'Driver is picking up another rider first';
+      }
       if (driverCurrentAction == 'DROPPING_OTHER_RIDER') {
         return 'Driver is dropping another rider first';
       }
@@ -121,7 +171,16 @@ class SharedMyState {
       }
       return '$stopsBeforeMe stop${_plural(stopsBeforeMe)} before you';
     }
+    // ONBOARD: the driver's next stop is MY drop → taking me there.
     if (amINextDrop) return 'You are next';
+    // Onboard but the car is serving someone else first — tell me WHY (this is the
+    // reason an already-picked rider sees the driver detour instead of a bare count).
+    if (driverCurrentAction == 'PICKING_OTHER_RIDER') {
+      return 'Driver is picking up another rider first';
+    }
+    if (driverCurrentAction == 'DROPPING_OTHER_RIDER') {
+      return 'Driver is dropping another rider first';
+    }
     return '$stopsBeforeMe drop${_plural(stopsBeforeMe)} before yours';
   }
 
@@ -155,6 +214,9 @@ class SharedMyState {
             : 'You are next';
       }
       final etaTxt = eta != null ? ' • ETA $eta min' : '';
+      if (driverCurrentAction == 'PICKING_OTHER_RIDER') {
+        return 'Driver picking up another rider first$etaTxt';
+      }
       if (driverCurrentAction == 'DROPPING_OTHER_RIDER') {
         return 'Driver dropping another rider first$etaTxt';
       }
@@ -170,6 +232,12 @@ class SharedMyState {
           : 'On the way to your destination';
     }
     final etaTxt = eta != null ? ' • ETA $eta min' : '';
+    if (driverCurrentAction == 'PICKING_OTHER_RIDER') {
+      return 'Driver picking up another rider first$etaTxt';
+    }
+    if (driverCurrentAction == 'DROPPING_OTHER_RIDER') {
+      return 'Driver dropping another rider first$etaTxt';
+    }
     return '$stopsBeforeMe drop${_plural(stopsBeforeMe)} before yours$etaTxt';
   }
 }

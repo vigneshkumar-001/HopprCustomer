@@ -32,6 +32,7 @@ import 'package:hopper/uitls/netWorkHandling/network_handling_screen.dart';
 import 'package:hopper/uitls/websocket/shared_web_socket.dart';
 import 'package:hopper/uitls/map/customer/customer_ride_map_view.dart';
 import 'package:hopper/uitls/map/customer/marker_icon_cache.dart' as icon_cache;
+import 'package:hopper/Presentation/BookRide/SharedRideScreens/Widgets/shared_trip_status_card.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:hopper/Presentation/CustomerSupport/screens/customer_support_list_screen.dart';
 
@@ -240,6 +241,8 @@ class _SharedScreensState extends State<SharedScreens>
     }
     // ...or already completed (driver dropped me while the app was dead) → payment.
     _maybeGoToPaymentFromMyState(state);
+    // Route the map to the driver's actual next stop (resume/reconnect).
+    _refreshSharedRouteForState();
   }
 
   /// Single exit path for a cancelled ride (socket event OR resume recovery).
@@ -308,6 +311,12 @@ class _SharedScreensState extends State<SharedScreens>
         a.pickupInstruction != b.pickupInstruction ||
         a.paymentMode != b.paymentMode ||
         a.customerBookingId != b.customerBookingId ||
+        a.statusTitle != b.statusTitle ||
+        a.statusMessage != b.statusMessage ||
+        a.activeStopLat != b.activeStopLat ||
+        a.activeStopLng != b.activeStopLng ||
+        a.activeStopType != b.activeStopType ||
+        a.activeStopIsMine != b.activeStopIsMine ||
         a.mySeatNumbers.join(',') != b.mySeatNumbers.join(',');
   }
 
@@ -1278,28 +1287,160 @@ class _SharedScreensState extends State<SharedScreens>
   /// driver is coming to THIS rider (amINextPickup), arrived, onboard, or for a
   /// single ride (no shared state). Privacy-safe: counts + generic action only,
   /// never the other rider's location / identity.
+  /// Map route styling for this rider: grey dashed while the driver is serving
+  /// ANOTHER rider first, solid brand-blue ("your route") once the driver is
+  /// headed to me. Privacy-safe — driven only by the generic driverCurrentAction.
+  SharedRouteStyle _sharedRouteStyle() {
+    // The main route is always MY own leg now (blue). The grey "serving another
+    // rider" leg is drawn as a SEPARATE polyline (otherRoute).
+    return SharedRouteStyle.mine;
+  }
+
+  /// The location the driver is heading to next, as a map point (or null).
+  LatLng? get _activeStopLatLng {
+    final ms = _myState;
+    if (ms == null || !ms.hasActiveStop) return null;
+    return LatLng(ms.activeStopLat!, ms.activeStopLng!);
+  }
+
+  /// The generic "another rider" stop marker to show on the map — only when the
+  /// driver's current target is NOT mine. Privacy-safe (location + type only).
+  LatLng? get _otherStopForMap {
+    final ms = _myState;
+    if (ms == null || !ms.activeStopIsOther) return null;
+    return _activeStopLatLng;
+  }
+
+  // Re-route the map to where the driver is ACTUALLY heading next (stops[0])
+  // rather than always MY pickup/drop. When the driver detours to another
+  // rider's stop, the polyline follows the real leg (styled grey by
+  // _sharedRouteStyle) and the other-rider marker is shown. Only re-requests
+  // Directions when the TARGET stop changes (driver movement is handled by the
+  // existing route-trim), so no API spam.
+  // Grey "serving another rider" leg (driver → the other rider's stop). The main
+  // _activeRoute is then MY own leg (other stop → my pickup/drop), drawn blue.
+  List<LatLng> _otherLegRoute = const <LatLng>[];
+  String _lastSharedRouteKey = '';
+  Future<void> _refreshSharedRouteForState() async {
+    final active = _activeStopLatLng;
+    if (active == null) return; // old backend / no data → keep phase route
+    final ms = _myState!;
+    final key = '${ms.activeStopLat},${ms.activeStopLng},${ms.activeStopIsMine}';
+    if (key == _lastSharedRouteKey) return;
+    final from = _driverLatLng ?? _customerPickupLatLng;
+    if (from == null) return;
+    _lastSharedRouteKey = key;
+
+    if (ms.activeStopIsOther) {
+      // Two legs: grey driver→other stop, then blue other stop→MY next stop.
+      final leg1 = await _requestRoute(from, active);
+      if (mounted) setState(() => _otherLegRoute = leg1);
+      final myTarget = ms.isOnboard ? _customerDropLatLng : _customerPickupLatLng;
+      if (myTarget != null) {
+        final leg2 = await _requestRoute(active, myTarget);
+        if (leg2.isNotEmpty) _setActiveRoute(leg2);
+      }
+    } else {
+      // Driver is coming to ME → single blue leg driver→my stop.
+      if (_otherLegRoute.isNotEmpty && mounted) {
+        setState(() => _otherLegRoute = const <LatLng>[]);
+      }
+      final pts = await _requestRoute(from, active);
+      if (pts.isNotEmpty) _setActiveRoute(pts);
+    }
+  }
+
+  /// One Cancel/Support/Share action cell: icon on top, label below.
+  Widget _actionCell({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 24, color: color),
+            const SizedBox(height: 6),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w600,
+                color: color,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _actionDivider() => SizedBox(
+        height: 34,
+        child: VerticalDivider(
+          width: 1,
+          thickness: 1,
+          color: Colors.black.withOpacity(0.08),
+        ),
+      );
+
+  /// Right-side status for MY pickup row in the stops card (privacy-safe).
+  String _pickupStopTrailing() {
+    if (destinationReached) return 'Done';
+    if (driverStartedRide) return 'Picked up';
+    final ms = _myState;
+    if (ms != null && ms.amINextPickup) {
+      final e = ms.etaToMyPickupMinutes;
+      return e != null ? '~$e min' : 'Arriving';
+    }
+    return 'In queue';
+  }
+
+  Color _pickupStopTrailingColor() {
+    if (destinationReached || driverStartedRide) return const Color(0xFF15803D);
+    return const Color(0xFF111418);
+  }
+
+  /// Right-side ETA for MY drop row in the stops card.
+  String _dropStopTrailing() {
+    if (destinationReached) return 'Reached';
+    final e = _myState?.etaToMyDropMinutes;
+    return e != null ? '~$e min' : 'En route';
+  }
+
   Widget _buildDriverBusyMapBanner() {
     final ms = _myState;
     if (ms == null) return const SizedBox.shrink();
-    if (driverStartedRide || _driverArrived || destinationReached) {
+    if (destinationReached) return const SizedBox.shrink();
+    // Show ONLY when the driver is serving another rider (and I'm not the next
+    // stop). This now works for an ONBOARD rider too (Customer 2), so an
+    // already-picked customer sees WHY the car is detouring — not just a bare count.
+    if (ms.amINextPickup || ms.amINextDrop || ms.isDropped) {
       return const SizedBox.shrink();
     }
-    if (ms.isOnboard || ms.amINextPickup) return const SizedBox.shrink();
 
     String title;
-    if (ms.driverCurrentAction == 'DROPPING_OTHER_RIDER') {
-      title = 'Driver is dropping another rider first';
-    } else if (ms.driverCurrentAction == 'PICKING_OTHER_RIDER') {
+    if (ms.driverCurrentAction == 'PICKING_OTHER_RIDER') {
       title = 'Driver is picking up another rider first';
+    } else if (ms.driverCurrentAction == 'DROPPING_OTHER_RIDER') {
+      title = 'Driver is dropping another rider first';
     } else if (ms.stopsBeforeMe > 0) {
       final s = ms.stopsBeforeMe;
       title = '$s stop${s == 1 ? '' : 's'} before you';
     } else {
       return const SizedBox.shrink();
     }
-    final eta = ms.etaToMyPickupMinutes;
+    // ETA to MY next stop: my drop if I'm already onboard, else my pickup.
+    final eta = ms.isOnboard ? ms.etaToMyDropMinutes : ms.etaToMyPickupMinutes;
+    final legWord = ms.isOnboard ? 'drop' : 'pickup';
     final sub = eta != null
-        ? "You're next after · ~$eta min to your pickup"
+        ? "You're next after · ~$eta min to your $legWord"
         : "You're next after — hang tight";
 
     return Container(
@@ -1382,8 +1523,8 @@ class _SharedScreensState extends State<SharedScreens>
       icon = Icons.navigation_rounded;
       badge = _nearDestination ? 'ALMOST THERE' : 'ON TRIP';
       if (ms != null) {
-        title = ms.primaryTitle;
-        sharedDetail = ms.primaryDetail;
+        title = ms.titleText;
+        sharedDetail = ms.detailText;
       } else {
         title = _nearDestination
             ? 'Almost at your destination'
@@ -1403,8 +1544,8 @@ class _SharedScreensState extends State<SharedScreens>
       // the driver is coming to THEM or to another rider first.
       if (ms != null) {
         badge = ms.amINextPickup ? 'YOU ARE NEXT' : 'IN QUEUE';
-        title = ms.primaryTitle;
-        sharedDetail = ms.primaryDetail;
+        title = ms.titleText;
+        sharedDetail = ms.detailText;
       } else {
         badge = 'PICKUP';
         title = 'Driver is reaching you';
@@ -1423,7 +1564,8 @@ class _SharedScreensState extends State<SharedScreens>
     // Uber-style morph: cross-fade the content + ease the height whenever the
     // stage changes (PICKUP → ARRIVED → ON TRIP → COMPLETED). One screen, no
     // rebuild, theme colors unchanged — only the card content animates.
-    final String stageKey = '$badge|$title|$detail';
+    final String stageKey =
+        '$badge|$title|$detail|${_effectiveSeats.join(',')}';
     return AnimatedSize(
       duration: const Duration(milliseconds: 320),
       curve: Curves.easeOutCubic,
@@ -1441,194 +1583,23 @@ class _SharedScreensState extends State<SharedScreens>
             if (currentChild != null) currentChild,
           ],
         ),
-        child: Container(
+        child: SharedTripStatusCard(
           key: ValueKey<String>(stageKey),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
-          decoration: BoxDecoration(
-            color: const Color(0xFF111418).withOpacity(0.90),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: Colors.white.withOpacity(emphasise ? 0.22 : 0.10),
-          width: emphasise ? 1.4 : 1,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.18),
-            blurRadius: 14,
-            offset: const Offset(0, 5),
-          ),
-        ],
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 42,
-            height: 42,
-            decoration: const BoxDecoration(
-              color: Colors.white,
-              shape: BoxShape.circle,
-            ),
-            child: Icon(icon, color: const Color(0xFF111418), size: 21),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.16),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Text(
-                    badge,
-                    style: const TextStyle(
-                      fontSize: 10,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: 0.5,
-                      color: Colors.white,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 5),
-                Text(
-                  title,
-                  style: const TextStyle(
-                    fontSize: 14.5,
-                    fontWeight: FontWeight.w700,
-                    color: Colors.white,
-                    height: 1.15,
-                  ),
-                ),
-                if (detail.isNotEmpty) ...[
-                  const SizedBox(height: 3),
-                  Text(
-                    detail,
-                    style: const TextStyle(
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w600,
-                      color: Color(0xFFB7BBC2),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ],
-      ),
+          overline: badge,
+          title: title,
+          detail: detail,
+          icon: icon,
+          seats: _effectiveSeats,
+          emphasise: emphasise,
         ),
       ),
     );
   }
 
-  /// Phase B polish: privacy-safe "Shared ride progress" card. Shows only this
-  /// customer's counts/ETA/seats + GENERIC stop labels (no other-passenger data).
-  Widget _buildSharedProgressCard() {
-    final ms = _myState;
-    if (ms == null) return const SizedBox.shrink();
-    final eta = ms.isOnboard ? ms.etaToMyDropMinutes : ms.etaToMyPickupMinutes;
-    final etaLabel = ms.isOnboard ? 'Drop ETA' : 'Pickup ETA';
-    final beforeWhat = ms.isOnboard ? 'your drop' : 'your pickup';
-
-    Widget row(IconData ic, String text, {bool mine = false}) => Padding(
-          padding: const EdgeInsets.only(bottom: 6),
-          child: Row(children: [
-            Icon(ic,
-                size: 16,
-                color: mine ? const Color(0xFF006FD0) : const Color(0xFF6B7280)),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                text,
-                style: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: mine ? FontWeight.w700 : FontWeight.w500,
-                  color: mine ? const Color(0xFF0C447C) : const Color(0xFF374151),
-                ),
-              ),
-            ),
-          ]),
-        );
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(15),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF6F8FA),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.black.withOpacity(0.06)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.04),
-            blurRadius: 12,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.groups_rounded,
-                  size: 18, color: Color(0xFF006FD0)),
-              const SizedBox(width: 8),
-              const Expanded(
-                child: Text(
-                  'Shared ride progress',
-                  style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
-                      color: Color(0xFF1A1A1A)),
-                ),
-              ),
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 2.5),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF006FD0).withOpacity(0.12),
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: const Text(
-                  'SHARED',
-                  style: TextStyle(
-                    fontSize: 9.5,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: 0.5,
-                    color: Color(0xFF0C447C),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          row(
-            Icons.alt_route_rounded,
-            ms.stopsBeforeMe > 0
-                ? '${ms.stopsBeforeMe} stop${ms.stopsBeforeMe == 1 ? '' : 's'} before $beforeWhat'
-                : (ms.isOnboard ? 'You are the next drop' : 'You are the next pickup'),
-          ),
-          if (eta != null) row(Icons.schedule_rounded, '$etaLabel: $eta min'),
-          if (ms.mySeatNumbers.isNotEmpty)
-            row(Icons.event_seat_rounded, 'Seat ${ms.mySeatNumbers.join(', ')}'),
-          if (ms.privacySafeStops.isNotEmpty) ...[
-            const SizedBox(height: 6),
-            ...ms.privacySafeStops.map((s) {
-              final mine = s.type == 'MY_PICKUP' || s.type == 'MY_DROP';
-              return row(
-                mine ? Icons.my_location_rounded : Icons.circle_outlined,
-                s.label,
-                mine: mine,
-              );
-            }),
-          ],
-        ],
-      ),
-    );
-  }
+  // Shared-ride progress + stop timeline now live in the reusable
+  // SharedTripStatusCard / SharedStopTimeline widgets
+  // (Widgets/shared_trip_status_card.dart), so the sheet leads with a single
+  // clean status card instead of two stacked cards.
 
   void _updateLiveMetrics(LatLng driverPos) {
     final now = DateTime.now();
@@ -1936,6 +1907,8 @@ class _SharedScreensState extends State<SharedScreens>
         }
         setState(() => _myState = newState);
         _maybeGoToPaymentFromMyState(newState);
+        // Re-route the map to the driver's actual next stop when it changed.
+        _refreshSharedRouteForState();
       } catch (_) {}
     });
 
@@ -2662,12 +2635,12 @@ class _SharedScreensState extends State<SharedScreens>
           backgroundColor: Colors.white,
           body: Stack(
             children: [
-              SizedBox(
-                height: 550,
-                width: double.infinity,
+              Positioned.fill(
                 child: RepaintBoundary(
                   child: CustomerRideMapView(
                     key: _mapKey,
+                    // Full screen behind the sheet. Map auto day/night (dark
+                    // after 7pm) — no forced dark.
                     vehicleType:
                         widget.carType.toLowerCase().contains('bike')
                             ? icon_cache.VehicleType.bike
@@ -2686,7 +2659,20 @@ class _SharedScreensState extends State<SharedScreens>
                         driverStartedRide
                             ? 'Ride in progress'
                             : 'Driver reaching pickup',
-                    mapPadding: const EdgeInsets.only(bottom: 110),
+                    // Keep the route/car above the collapsed sheet peek.
+                    mapPadding: EdgeInsets.only(
+                      bottom: MediaQuery.of(context).size.height * 0.32,
+                    ),
+                    // Blue solid = "your route"; grey dashed while the driver is
+                    // serving another rider (matches the on-map legend).
+                    sharedRouteStyle: _sharedRouteStyle(),
+                    // Generic "another rider" stop the driver is heading to
+                    // (privacy-safe: location + type only, never identity).
+                    otherStop: _otherStopForMap,
+                    otherStopIsPickup:
+                        (_myState?.activeStopType ?? '') == 'pickup',
+                    // Grey dashed leg driver → that other-rider stop.
+                    otherRoute: _otherLegRoute,
                   ),
                 ),
               ),
@@ -2787,6 +2773,18 @@ class _SharedScreensState extends State<SharedScreens>
                 ),
               ),
 
+              // Map legend — explains the two route styles (your route vs
+              // serving another rider). Only when another rider's stop is in the
+              // queue, so the grey/blue distinction is actually on screen.
+              if (isDriverConfirmed &&
+                  !isTripCancelled &&
+                  (_myState?.privacySafeStops.length ?? 0) > 1)
+                const Positioned(
+                  left: 12,
+                  top: 300,
+                  child: SafeArea(child: SharedRouteLegend()),
+                ),
+
               // DRAGGABLE SHEET
               DraggableScrollableSheet(
                 // ONE sheet for the whole journey (Uber-style): no `key`, so it is
@@ -2799,11 +2797,13 @@ class _SharedScreensState extends State<SharedScreens>
                 // One size config for both phases. We don't switch initialChildSize
                 // on confirm (that needs a recreate) — the sheet just stays where
                 // the rider left it while the content cross-fades.
-                initialChildSize: 0.5,
-                minChildSize: 0.30,
-                maxChildSize: 0.9,
+                // Uber-style: small peek by default so the FULL map shows;
+                // drag up to expand. Min is a thin handle-height peek.
+                initialChildSize: 0.34,
+                minChildSize: 0.16,
+                maxChildSize: 0.92,
                 snap: true,
-                snapSizes: const <double>[0.42, 0.5, 0.65, 0.9],
+                snapSizes: const <double>[0.16, 0.34, 0.62, 0.92],
                 builder: (context, scrollController) {
                   return Container(
                     padding: const EdgeInsets.symmetric(horizontal: 15),
@@ -2842,19 +2842,19 @@ class _SharedScreensState extends State<SharedScreens>
                         if (_myState != null &&
                             isDriverConfirmed &&
                             !isTripCancelled &&
-                            _myState!.collapsedText.trim().isNotEmpty) ...[
+                            _myState!.collapsedResolved.trim().isNotEmpty) ...[
                           Row(
                             children: [
                               const Icon(Icons.groups_rounded,
-                                  size: 18, color: Color(0xFF006FD0)),
+                                  size: 18, color: Color(0xFF111418)),
                               const SizedBox(width: 8),
                               Expanded(
                                 child: Text(
-                                  _myState!.collapsedText,
+                                  _myState!.collapsedResolved,
                                   style: const TextStyle(
                                     fontSize: 13,
                                     fontWeight: FontWeight.w600,
-                                    color: Color(0xFF0C447C),
+                                    color: Color(0xFF111418),
                                   ),
                                 ),
                               ),
@@ -2999,56 +2999,108 @@ class _SharedScreensState extends State<SharedScreens>
                                   border: Border.all(
                                       color: Colors.black.withOpacity(0.12)),
                                 ),
-                                child: Row(
+                                child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    // Driver photo (tap → Hero preview).
-                                    GestureDetector(
-                                      onTap: ProfilePic.trim().isEmpty
-                                          ? null
-                                          : _openDriverPhotoPreview,
-                                      child: Container(
-                                        height: 52,
-                                        width: 52,
-                                        clipBehavior: Clip.antiAlias,
-                                        decoration: BoxDecoration(
-                                          shape: BoxShape.circle,
-                                          color: AppColors.containerColor1,
-                                          border: Border.all(
-                                            color: const Color(0xFF006FD0)
-                                                .withOpacity(0.35),
-                                            width: 2,
-                                          ),
-                                        ),
-                                        child: (ProfilePic.isNotEmpty)
-                                            ? Hero(
-                                                tag: 'driver-photo-hero',
-                                                child: CachedNetworkImage(
-                                                  imageUrl: ProfilePic,
-                                                  fit: BoxFit.cover,
-                                                  // Decode at the 52px display size
-                                                  // (×DPR), not full resolution —
-                                                  // less memory/decode cost per
-                                                  // rebuild for a small avatar.
-                                                  memCacheWidth: 160,
-                                                  placeholder: (context, url) =>
-                                                      const Center(
-                                                    child: SizedBox(
-                                                      height: 16,
-                                                      width: 16,
-                                                      child:
-                                                          CircularProgressIndicator(
-                                                              strokeWidth: 2),
-                                                    ),
-                                                  ),
-                                                  errorWidget:
-                                                      (context, url, error) =>
-                                                          const Icon(
-                                                              Icons.person,
-                                                              size: 26),
+                                    Row(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                    // Driver photo + rating badge (tap → Hero).
+                                    SizedBox(
+                                      width: 52,
+                                      child: Stack(
+                                        clipBehavior: Clip.none,
+                                        alignment: Alignment.bottomCenter,
+                                        children: [
+                                          GestureDetector(
+                                            onTap: ProfilePic.trim().isEmpty
+                                                ? null
+                                                : _openDriverPhotoPreview,
+                                            child: Container(
+                                              height: 52,
+                                              width: 52,
+                                              clipBehavior: Clip.antiAlias,
+                                              decoration: BoxDecoration(
+                                                shape: BoxShape.circle,
+                                                color:
+                                                    AppColors.containerColor1,
+                                                border: Border.all(
+                                                  color: const Color(0xFF111418)
+                                                      .withOpacity(0.25),
+                                                  width: 2,
                                                 ),
-                                              )
-                                            : const Icon(Icons.person, size: 26),
+                                              ),
+                                              child: (ProfilePic.isNotEmpty)
+                                                  ? Hero(
+                                                      tag: 'driver-photo-hero',
+                                                      child: CachedNetworkImage(
+                                                        imageUrl: ProfilePic,
+                                                        fit: BoxFit.cover,
+                                                        memCacheWidth: 160,
+                                                        placeholder:
+                                                            (context, url) =>
+                                                                const Center(
+                                                          child: SizedBox(
+                                                            height: 16,
+                                                            width: 16,
+                                                            child:
+                                                                CircularProgressIndicator(
+                                                                    strokeWidth:
+                                                                        2),
+                                                          ),
+                                                        ),
+                                                        errorWidget: (context,
+                                                                url, error) =>
+                                                            const Icon(
+                                                                Icons.person,
+                                                                size: 26),
+                                                      ),
+                                                    )
+                                                  : const Icon(Icons.person,
+                                                      size: 26),
+                                            ),
+                                          ),
+                                          if (ratingOnly.isNotEmpty)
+                                            Positioned(
+                                              bottom: -7,
+                                              child: Container(
+                                                padding:
+                                                    const EdgeInsets.symmetric(
+                                                        horizontal: 6,
+                                                        vertical: 2),
+                                                decoration: BoxDecoration(
+                                                  color:
+                                                      const Color(0xFF111418),
+                                                  borderRadius:
+                                                      BorderRadius.circular(8),
+                                                  border: Border.all(
+                                                      color: Colors.white,
+                                                      width: 1.5),
+                                                ),
+                                                child: Row(
+                                                  mainAxisSize:
+                                                      MainAxisSize.min,
+                                                  children: [
+                                                    Text(
+                                                      ratingOnly,
+                                                      style: const TextStyle(
+                                                        fontSize: 10.5,
+                                                        fontWeight:
+                                                            FontWeight.w700,
+                                                        color: Colors.white,
+                                                      ),
+                                                    ),
+                                                    const SizedBox(width: 2),
+                                                    const Icon(
+                                                        Icons.star_rounded,
+                                                        size: 10,
+                                                        color: Colors.white),
+                                                  ],
+                                                ),
+                                              ),
+                                            ),
+                                        ],
                                       ),
                                     ),
                                     const SizedBox(width: 12),
@@ -3070,26 +3122,7 @@ class _SharedScreensState extends State<SharedScreens>
                                               color: Color(0xFF1A1A1A),
                                             ),
                                           ),
-                                          if (ratingOnly.isNotEmpty) ...[
-                                            const SizedBox(height: 3),
-                                            Row(
-                                              children: [
-                                                const Icon(Icons.star_rounded,
-                                                    size: 15,
-                                                    color: Color(0xFFF5A623)),
-                                                const SizedBox(width: 3),
-                                                Text(
-                                                  ratingOnly,
-                                                  style: const TextStyle(
-                                                    fontSize: 12.5,
-                                                    fontWeight: FontWeight.w600,
-                                                    color: Color(0xFF6B7280),
-                                                  ),
-                                                ),
-                                              ],
-                                            ),
-                                          ],
-                                          const SizedBox(height: 7),
+                                          const SizedBox(height: 6),
                                           // Number plate.
                                           Container(
                                             padding:
@@ -3131,7 +3164,7 @@ class _SharedScreensState extends State<SharedScreens>
                                       ),
                                     ),
                                     const SizedBox(width: 10),
-                                    // Car image (right).
+                                    // Car exterior photo (right).
                                     if (CarExteriorPhotos.isNotEmpty)
                                       ClipRRect(
                                         borderRadius: BorderRadius.circular(12),
@@ -3139,8 +3172,6 @@ class _SharedScreensState extends State<SharedScreens>
                                           fit: BoxFit.cover,
                                           height: 66,
                                           width: 86,
-                                          // Decode at ~display size (×DPR), not
-                                          // full car-photo resolution.
                                           memCacheWidth: 260,
                                           imageUrl: CarExteriorPhotos,
                                           placeholder: (context, url) =>
@@ -3166,34 +3197,32 @@ class _SharedScreensState extends State<SharedScreens>
                                       ),
                                   ],
                                 ),
-                              );
-                            },
-                          ),
-                          const SizedBox(height: 20),
-
-                          // Shared-ride tag + your seat as two clean styled pills.
-                          if (!isTripCancelled) ...[
-                            Row(
-                              children: [
+                                // Shared-ride tag + your seat, INSIDE the card.
+                                if (!isTripCancelled) ...[
+                                  const SizedBox(height: 14),
+                                  Row(
+                                    children: [
                                 Container(
                                   padding: const EdgeInsets.symmetric(
                                       horizontal: 10, vertical: 6),
                                   decoration: BoxDecoration(
-                                    color: const Color(0xFFEDF3FF),
+                                    color: Colors.white,
                                     borderRadius: BorderRadius.circular(9),
+                                    border: Border.all(
+                                        color: Colors.black.withOpacity(0.14)),
                                   ),
                                   child: const Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
                                       Icon(Icons.groups_rounded,
-                                          size: 15, color: Color(0xFF006FD0)),
+                                          size: 15, color: Color(0xFF14213A)),
                                       SizedBox(width: 6),
                                       Text(
                                         'Shared ride',
                                         style: TextStyle(
                                           fontSize: 12,
                                           fontWeight: FontWeight.w700,
-                                          color: Color(0xFF0C447C),
+                                          color: Color(0xFF14213A),
                                         ),
                                       ),
                                     ],
@@ -3205,21 +3234,23 @@ class _SharedScreensState extends State<SharedScreens>
                                     padding: const EdgeInsets.symmetric(
                                         horizontal: 10, vertical: 6),
                                     decoration: BoxDecoration(
-                                      color: const Color(0xFFF5F5F7),
+                                      color: Colors.white,
                                       borderRadius: BorderRadius.circular(9),
+                                      border: Border.all(
+                                          color: Colors.black.withOpacity(0.14)),
                                     ),
                                     child: Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        const Icon(Icons.event_seat_rounded,
-                                            size: 15, color: Color(0xFF1A1A1A)),
+                                        const Icon(Icons.person_outline_rounded,
+                                            size: 15, color: Color(0xFF14213A)),
                                         const SizedBox(width: 6),
                                         Text(
                                           'Seat ${_effectiveSeats.join(', ')}',
                                           style: const TextStyle(
                                             fontSize: 12,
                                             fontWeight: FontWeight.w700,
-                                            color: Color(0xFF1A1A1A),
+                                            color: Color(0xFF14213A),
                                           ),
                                         ),
                                       ],
@@ -3265,14 +3296,16 @@ class _SharedScreensState extends State<SharedScreens>
                                   ),
                                 ],
                               ],
+                                  ),
+                                ],
+                              ],
                             ),
-                            const SizedBox(height: 14),
-                          ],
-                          // Privacy-safe shared-route progress (moved below).
-                          if (!isTripCancelled && _myState != null) ...[
-                            _buildSharedProgressCard(),
-                            const SizedBox(height: 14),
-                          ],
+                          );
+                            },
+                          ),
+                          const SizedBox(height: 14),
+                          // Shared-route progress + stop timeline are now part of
+                          // the status card at the top of the sheet.
 
                           // FARE BOX
                           Container(
@@ -3374,12 +3407,12 @@ class _SharedScreensState extends State<SharedScreens>
                                                     borderRadius:
                                                         BorderRadius.circular(8),
                                                     color: const Color(
-                                                      0xFFE6F1FB,
+                                                      0xFFF2F3F5,
                                                     ),
                                                     border: Border.all(
                                                       color: const Color(
-                                                        0xFF378ADD,
-                                                      ).withOpacity(0.35),
+                                                        0xFF111418,
+                                                      ).withOpacity(0.20),
                                                     ),
                                                   ),
                                                   child: Text(
@@ -3388,7 +3421,7 @@ class _SharedScreensState extends State<SharedScreens>
                                                       fontSize: 13,
                                                       fontWeight: FontWeight.w700,
                                                       letterSpacing: 0.5,
-                                                      color: Color(0xFF185FA5),
+                                                      color: Color(0xFF111418),
                                                     ),
                                                   ),
                                                 )
@@ -3712,41 +3745,15 @@ class _SharedScreensState extends State<SharedScreens>
                             ),
                             child: Column(
                               children: [
-                                CustomTextFields.plainTextField(
-                                  readOnly: true,
-                                  Style: TextStyle(
-                                    fontSize: 12,
-                                    color: AppColors.commonBlack.withOpacity(
-                                      0.6,
-                                    ),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                  controller: _startController,
-                                  containerColor: AppColors.commonWhite,
-                                  leadingImage: AppImages.circleStart,
-                                  title: 'Search for an address or landmark',
-                                  hintStyle: const TextStyle(fontSize: 11),
-                                  imgHeight: 17,
-                                ),
-                                const Divider(
-                                  height: 0,
-                                  color: AppColors.containerColor,
-                                ),
-                                CustomTextFields.plainTextField(
-                                  readOnly: true,
-                                  Style: TextStyle(
-                                    fontSize: 12,
-                                    color: AppColors.commonBlack.withOpacity(
-                                      0.6,
-                                    ),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                  controller: _destController,
-                                  containerColor: AppColors.commonWhite,
-                                  leadingImage: AppImages.rectangleDest,
-                                  title: 'Enter destination',
-                                  hintStyle: const TextStyle(fontSize: 11),
-                                  imgHeight: 17,
+                                // Clean stops card (privacy-safe: MY pickup + MY
+                                // drop only, with status/ETA on the right).
+                                SharedStopsCard(
+                                  pickupAddress: _startController.text,
+                                  dropAddress: _destController.text,
+                                  pickupTrailing: _pickupStopTrailing(),
+                                  pickupTrailingColor:
+                                      _pickupStopTrailingColor(),
+                                  dropTrailing: _dropStopTrailing(),
                                 ),
                                 const Divider(
                                   height: 0,
@@ -3754,116 +3761,98 @@ class _SharedScreensState extends State<SharedScreens>
                                 ),
                                 Padding(
                                   padding: const EdgeInsets.symmetric(
-                                    horizontal: 15,
-                                    vertical: 15,
+                                    horizontal: 6,
+                                    vertical: 6,
                                   ),
                                   child: Row(
-                                    mainAxisAlignment: MainAxisAlignment.center,
                                     children: [
-                                      Obx(() {
-                                        final isCancelling =
-                                            driverSearchController
-                                                .isCancelLoading
-                                                .value;
-                                        final canCancel =
-                                            !isCancelling &&
-                                            !driverStartedRide &&
-                                            !destinationReached;
-
-                                        return CustomTextFields.textWithImage(
-                                          onTap: () {
-                                            if (!canCancel) {
-                                              if (driverStartedRide) {
+                                      Expanded(
+                                        child: Obx(() {
+                                          final isCancelling =
+                                              driverSearchController
+                                                  .isCancelLoading
+                                                  .value;
+                                          final canCancel = !isCancelling &&
+                                              !driverStartedRide &&
+                                              !destinationReached;
+                                          return _actionCell(
+                                            icon: Icons.cancel_outlined,
+                                            label: isCancelling
+                                                ? 'Cancelling...'
+                                                : 'Cancel Ride',
+                                            color: canCancel
+                                                ? AppColors.cancelRideColor
+                                                : AppColors.cancelRideColor
+                                                    .withOpacity(0.55),
+                                            onTap: () {
+                                              if (!canCancel) {
+                                                if (driverStartedRide) {
+                                                  AppToasts.showInfoGlobal(
+                                                    "Ride is in progress. Cancellation is not available now.",
+                                                    title: 'Info',
+                                                  );
+                                                  return;
+                                                }
                                                 AppToasts.showInfoGlobal(
-                                                  "Ride is in progress. Cancellation is not available now.",
+                                                  'Please wait a moment',
                                                   title: 'Info',
                                                 );
                                                 return;
                                               }
-                                              AppToasts.showInfoGlobal(
-                                                'Please wait a moment',
-                                                title: 'Info',
+                                              AppButtons
+                                                  .showCancelRideBottomSheet(
+                                                context,
+                                                onConfirmCancel: (
+                                                  String selectedReason,
+                                                ) {
+                                                  return _handleCancelRide(
+                                                    selectedReason,
+                                                  );
+                                                },
                                               );
-                                              return;
-                                            }
-                                            AppButtons.showCancelRideBottomSheet(
-                                              context,
-                                              onConfirmCancel: (
-                                                String selectedReason,
-                                              ) {
-                                                return _handleCancelRide(
-                                                  selectedReason,
-                                                );
-                                              },
+                                            },
+                                          );
+                                        }),
+                                      ),
+                                      _actionDivider(),
+                                      Expanded(
+                                        child: _actionCell(
+                                          icon: Icons.support,
+                                          label: 'Support',
+                                          color: const Color(0xFF14213A),
+                                          onTap: () {
+                                            final String bookingId =
+                                                shareRideController
+                                                        .sharedBooking
+                                                        .value
+                                                        ?.bookingId ??
+                                                    '';
+                                            Get.to(
+                                              () => CustomerSupportListScreen(
+                                                bookingId: bookingId,
+                                              ),
                                             );
                                           },
-                                          text:
-                                              isCancelling
-                                                  ? 'Cancelling...'
-                                                  : 'Cancel Ride',
-                                          fontWeight: FontWeight.w500,
-                                          colors:
-                                              canCancel
-                                                  ? AppColors.cancelRideColor
-                                                  : AppColors.cancelRideColor
-                                                      .withOpacity(0.55),
-                                          imagePath: AppImages.cancel,
-                                        );
-                                      }),
-                                      const SizedBox(width: 10),
-                                      SizedBox(
-                                        height: 24,
-                                        child: VerticalDivider(
-                                          color: Colors.grey,
-                                          thickness: 1,
                                         ),
                                       ),
-                                      const SizedBox(width: 10),
-                                      CustomTextFields.textWithImage(
-                                        onTap: () {
-                                          final String bookingId =
-                                              shareRideController
-                                                  .sharedBooking
-                                                  .value
-                                                  ?.bookingId ??
-                                              '';
-                                          Get.to(
-                                            () => CustomerSupportListScreen(
-                                              bookingId: bookingId,
-                                            ),
-                                          );
-                                        },
-                                        text: 'Support',
-                                        fontWeight: FontWeight.w500,
-                                        colors: AppColors.cancelRideColor,
-                                        imagePath: AppImages.support,
-                                      ),
-                                      const SizedBox(width: 10),
-                                      SizedBox(
-                                        height: 24,
-                                        child: VerticalDivider(
-                                          color: Colors.grey,
-                                          thickness: 1,
+                                      _actionDivider(),
+                                      Expanded(
+                                        child: _actionCell(
+                                          icon: Icons.ios_share,
+                                          label: 'Share Ride',
+                                          color: const Color(0xFF14213A),
+                                          onTap: () {
+                                            final String bookingId =
+                                                shareRideController
+                                                        .sharedBooking
+                                                        .value
+                                                        ?.bookingId ??
+                                                    '';
+                                            final url =
+                                                "https://hoppr-admin-e7bebfb9fb05.herokuapp.com/ride-tracker/$bookingId";
+                                            Share.share(url);
+                                          },
                                         ),
-                                      ),
-                                      const SizedBox(width: 10),
-                                      CustomTextFields.textWithImage(
-                                        onTap: () {
-                                          final String bookingId =
-                                              shareRideController
-                                                  .sharedBooking
-                                                  .value
-                                                  ?.bookingId ??
-                                              '';
-
-                                          final url =
-                                              "https://hoppr-admin-e7bebfb9fb05.herokuapp.com/ride-tracker/$bookingId";
-                                          Share.share(url);
-                                        },
-                                        text: 'Share',
-                                        fontWeight: FontWeight.w500,
-                                        colors: AppColors.cancelRideColor,
-                                        imagePath: AppImages.share,
                                       ),
                                     ],
                                   ),

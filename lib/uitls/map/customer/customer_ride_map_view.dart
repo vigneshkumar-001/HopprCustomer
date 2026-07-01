@@ -18,6 +18,12 @@ import 'package:hopper/uitls/map/route_tracking_math.dart';
 
 enum RideMapMode { idle, toPickup, toDrop }
 
+/// Shared-ride active-route styling. Null (single ride) keeps the default look
+/// untouched; the shared screen opts in per driver action:
+///   - [mine]         → solid brand-blue "your route" (driver headed to you),
+///   - [servingOther] → grey dashed "serving another rider" (driver detouring).
+enum SharedRouteStyle { mine, servingOther }
+
 class CustomerRideMapView extends StatefulWidget {
   final VehicleType vehicleType;
 
@@ -44,6 +50,23 @@ class CustomerRideMapView extends StatefulWidget {
   final EdgeInsets mapPadding;
   final ValueChanged<GoogleMapController>? onMapReady;
 
+  /// Shared-ride only. Null on single ride → default styling is unchanged.
+  final SharedRouteStyle? sharedRouteStyle;
+
+  /// Shared-ride only. When set, a GENERIC marker is drawn where the driver is
+  /// heading next for ANOTHER rider (privacy-safe: location + type only). Null
+  /// on single ride and whenever the driver's next stop is the customer's own.
+  final LatLng? otherStop;
+  final bool otherStopIsPickup;
+
+  /// Shared-ride only. The grey "serving another rider" leg (driver → the other
+  /// rider's stop). Drawn as a second dashed polyline in ADDITION to the main
+  /// blue route (which is then the customer's own leg). Empty on single ride.
+  final List<LatLng> otherRoute;
+
+  /// Force the dark map style regardless of time of day (Uber-style shared ride).
+  final bool forceDarkMap;
+
   const CustomerRideMapView({
     super.key,
     required this.vehicleType,
@@ -56,6 +79,11 @@ class CustomerRideMapView extends StatefulWidget {
     required this.etaText,
     required this.distanceText,
     this.statusText,
+    this.sharedRouteStyle,
+    this.otherStop,
+    this.otherStopIsPickup = true,
+    this.otherRoute = const <LatLng>[],
+    this.forceDarkMap = false,
     this.mapPadding = const EdgeInsets.only(
       bottom: MapUiConfig.defaultBottomPadding,
     ),
@@ -274,6 +302,13 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       _syncMarkers(force: true);
       _requestFitBounds(reason: 'pickup_drop_changed', force: true);
     }
+    if (oldWidget.otherStop != widget.otherStop) {
+      // The "another rider" stop appeared / moved / cleared — refresh markers.
+      _syncMarkers(force: true);
+    }
+    if (oldWidget.otherRoute != widget.otherRoute) {
+      _rebuildPolylines();
+    }
     if (oldWidget.mode != widget.mode) {
       // BUILD FINGERPRINT — confirms the running build includes the drop-leg
       // forward-walker removal. If this line is absent from a drop-phase log,
@@ -338,9 +373,10 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
 
   Future<void> _loadMapStyle() async {
     try {
-      // Auto day/night: clean light style by day, clean dark style at night.
+      // forceDarkMap (shared ride) always uses the dark style; otherwise auto
+      // day/night: clean light style by day, clean dark style at night.
       final asset =
-          _isNightNow()
+          (widget.forceDarkMap || _isNightNow())
               ? 'assets/map_style/map_style_dark.json'
               : 'assets/map_style.json';
       _mapStyle = await rootBundle.loadString(asset);
@@ -572,6 +608,26 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   ///  - a soft white "energy" comet that flows toward the destination.
   Set<Polyline> _composePolylineSet() {
     final set = <Polyline>{};
+
+    // Shared-ride "serving another rider" leg: grey dashed, driver → other
+    // rider's stop. Drawn independently of the main route / mode.
+    final otherLeg = widget.otherRoute;
+    if (otherLeg.length >= 2) {
+      set.add(
+        Polyline(
+          polylineId: const PolylineId('other_leg'),
+          points: otherLeg,
+          color: Colors.grey.shade500,
+          width: 5,
+          zIndex: 1,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          jointType: JointType.round,
+          patterns: <PatternItem>[PatternItem.dash(20), PatternItem.gap(10)],
+        ),
+      );
+    }
+
     final isPickup = widget.mode == RideMapMode.toPickup;
     final isDrop = widget.mode == RideMapMode.toDrop;
     if (!isPickup && !isDrop) return set;
@@ -610,27 +666,51 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     final drawn = revealing ? _revealPrefix(active, drawT) : active;
     if (drawn.length < 2) return set;
 
+    // Active-route style. Single ride (sharedRouteStyle == null) keeps the
+    // existing grey/dark dashed look. Shared ride switches to the mockup's two
+    // states: solid brand-blue for MY leg, grey dashed while serving another.
+    final shared = widget.sharedRouteStyle;
+    final Color routeColor;
+    final double routeWidth;
+    final List<PatternItem> routePatterns;
+    switch (shared) {
+      case SharedRouteStyle.mine:
+        routeColor = const Color(0xFF006FD0); // "your route" — solid blue
+        routeWidth = 6;
+        routePatterns = const <PatternItem>[];
+        break;
+      case SharedRouteStyle.servingOther:
+        routeColor = Colors.grey.shade600; // "serving another rider" — dashed
+        routeWidth = 5;
+        routePatterns = <PatternItem>[PatternItem.dash(20), PatternItem.gap(10)];
+        break;
+      case null:
+        routeColor = isPickup ? Colors.grey.shade600 : const Color(0xFF111111);
+        routeWidth = isPickup ? 4 : 6;
+        routePatterns = <PatternItem>[PatternItem.dash(20), PatternItem.gap(10)];
+        break;
+    }
+
     set.add(
       Polyline(
         polylineId: const PolylineId('active_route'),
         points: drawn,
-        color: isPickup ? Colors.grey.shade600 : const Color(0xFF111111),
-        width: isPickup ? 4 : 6,
+        color: routeColor,
+        width: routeWidth.toInt(),
         zIndex: 1,
         startCap: Cap.roundCap,
         endCap: Cap.roundCap,
         jointType: JointType.round,
-        // Dotted/dashed on BOTH legs now. The drop leg used to be a solid line
-        // with a flowing "comet" animation; per request it now renders as the
-        // same dotted line as pickup (static, no moving animation).
-        patterns: <PatternItem>[PatternItem.dash(20), PatternItem.gap(10)],
+        patterns: routePatterns,
       ),
     );
 
-    // Flowing comet — a brand-blue "energy" glow pulse that runs toward the
-    // destination. Enabled on BOTH legs (pickup + drop / in-trip) so the
-    // animated glow shows the whole ride, on single and shared alike.
-    if (!revealing && drawn.length >= 6) {
+    // Flowing comet — a brand-blue "energy" glow toward the destination. Shown
+    // on single ride and on MY shared leg, but suppressed while the driver is
+    // serving another rider (grey dashed stays calm — it's not your turn yet).
+    if (!revealing &&
+        drawn.length >= 6 &&
+        shared != SharedRouteStyle.servingOther) {
       set.addAll(_flowCometPolylines(drawn));
     }
     return set;
@@ -922,6 +1002,23 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
           anchor: const Offset(0.5, MapUiConfig.pickupDropAnchorY),
           zIndexInt: 1,
           infoWindow: InfoWindow.noText,
+        ),
+      // GENERIC "another rider" stop the driver is heading to first. Privacy-
+      // safe: a neutral pin + a generic label, never the other rider's identity.
+      if (widget.otherStop != null)
+        Marker(
+          markerId: const MarkerId('other_stop'),
+          position: widget.otherStop!,
+          icon: BitmapDescriptor.defaultMarkerWithHue(
+            BitmapDescriptor.hueViolet,
+          ),
+          anchor: const Offset(0.5, 1.0),
+          zIndexInt: 1,
+          infoWindow: InfoWindow(
+            title: widget.otherStopIsPickup
+                ? 'Pickup stop for another rider'
+                : 'Drop stop for another rider',
+          ),
         ),
     };
 
