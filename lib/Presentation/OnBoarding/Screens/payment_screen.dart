@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:hopper/Core/Utility/shared_pref_helper.dart';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -453,7 +454,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
   displayPaymentSheet() async {
     SharedPreferences prefs = await SharedPreferences.getInstance();
-    String? token = prefs.getString('token');
+    String? token = await SharedPrefHelper.getToken();
 
     if (token == null) {
       AppLogger.log.i('⚠️ Token not found in shared preferences');
@@ -513,7 +514,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
     try {
       final String bookingId = widget.bookingId ?? '';
       SharedPreferences prefs = await SharedPreferences.getInstance();
-      String? token = prefs.getString('token');
+      String? token = await SharedPrefHelper.getToken();
 
       final response = await http.post(
         Uri.parse(
@@ -595,7 +596,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
     setState(() => flutterWaveLoading = true);
 
     try {
-      String? token = prefs.getString('token');
+      String? token = await SharedPrefHelper.getToken();
       final response = await http.post(
         Uri.parse(
           'https://bk.myhoppr.com/api/flutterwave/initialize',
@@ -836,7 +837,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
     setState(() => payStackLoading = true);
 
     try {
-      String? token = prefs.getString('token');
+      String? token = await SharedPrefHelper.getToken();
       final response = await http.post(
         Uri.parse(
           'https://bk.myhoppr.com/api/paystack/init',
@@ -918,7 +919,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
   Future<Map<String, String>> _authHeaders() async {
     final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('token');
+    final token = await SharedPrefHelper.getToken();
     return {
       'Content-Type': 'application/json',
       if (token != null && token.isNotEmpty) 'Authorization': 'Bearer $token',
@@ -3019,7 +3020,7 @@ class _PaymentSuccessSheetState extends State<_PaymentSuccessSheet> {
 
 //   displayPaymentSheet() async {
 //     SharedPreferences prefs = await SharedPreferences.getInstance();
-//     String? token = prefs.getString('token');
+//     String? token = await SharedPrefHelper.getToken();
 
 //     if (token == null) {
 //       AppLogger.log.i('⚠️ Token not found in shared preferences');
@@ -3079,7 +3080,7 @@ class _PaymentSuccessSheetState extends State<_PaymentSuccessSheet> {
 //     try {
 //       final String bookingId = widget.bookingId ?? '';
 //       SharedPreferences prefs = await SharedPreferences.getInstance();
-//       String? token = prefs.getString('token');
+//       String? token = await SharedPrefHelper.getToken();
 
 //       final response = await http.post(
 //         Uri.parse(
@@ -3161,7 +3162,7 @@ class _PaymentSuccessSheetState extends State<_PaymentSuccessSheet> {
 //     setState(() => flutterWaveLoading = true);
 
 //     try {
-//       String? token = prefs.getString('token');
+//       String? token = await SharedPrefHelper.getToken();
 //       final response = await http.post(
 //         Uri.parse(
 //           'https://bk.myhoppr.com/api/flutterwave/initialize',
@@ -3382,7 +3383,7 @@ class _PaymentSuccessSheetState extends State<_PaymentSuccessSheet> {
 //     setState(() => payStackLoading = true);
 
 //     try {
-//       String? token = prefs.getString('token');
+//       String? token = await SharedPrefHelper.getToken();
 //       final response = await http.post(
 //         Uri.parse(
 //           'https://bk.myhoppr.com/api/paystack/init',

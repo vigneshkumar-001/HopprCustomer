@@ -369,6 +369,50 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
 
   /// Premium, equal-sized quick-destination card (2-per-row grid). Staggers
   /// in (fade + rise) by [index] when the screen opens.
+  /// Google place `type` for each quick chip → enables a nearest-by-distance
+  /// lookup instead of a prominence-biased autocomplete (fixes the "365 km" bug).
+  static const Map<String, String> _quickTypeByLabel = {
+    'Airport': 'airport',
+    'Railway Station': 'train_station',
+    'Bus Stand': 'bus_station',
+    'Mall': 'shopping_mall',
+  };
+
+  /// Resolve a quick chip to the NEAREST matching place from the current
+  /// location (correct coordinates + correct distance). Falls back to a typed
+  /// search if the type is unknown or nothing is found nearby — never a fake
+  /// distance.
+  Future<void> _resolveQuickDestination(Map<String, dynamic> q) async {
+    final label = q['label'] as String;
+    final type = _quickTypeByLabel[label];
+    setState(() => _isStartFieldFocused = false);
+
+    if (type == null) {
+      final query = q['query'] as String;
+      _destController.text = query;
+      _destinationFocus.requestFocus();
+      _onQueryChanged(query);
+      return;
+    }
+
+    // Show a LIST of nearby matching places (ranked by distance, correct
+    // distances) for the user to choose from — not a single auto-pick.
+    _destController.text = label;
+    setState(() => _isSearching = true);
+    final places = await LocationHelper.nearbyPlacesByType(type);
+    if (!mounted) return;
+    setState(() {
+      _isSearching = false;
+      _destSearchResults = places;
+    });
+
+    if (places.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("No nearby $label found. Try searching.")),
+      );
+    }
+  }
+
   Widget _buildQuickDestinationCard(int index, Map<String, dynamic> q) {
     final color = q['color'] as Color;
     return TweenAnimationBuilder<double>(
@@ -386,13 +430,7 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
       },
       child: InkWell(
       borderRadius: BorderRadius.circular(16),
-      onTap: () {
-        final query = q['query'] as String;
-        _destController.text = query;
-        setState(() => _isStartFieldFocused = false);
-        _destinationFocus.requestFocus();
-        _onQueryChanged(query);
-      },
+      onTap: () => _resolveQuickDestination(q),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12),
         decoration: BoxDecoration(

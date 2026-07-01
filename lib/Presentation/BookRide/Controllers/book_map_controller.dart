@@ -13,6 +13,7 @@ import 'package:http/http.dart' as http;
 
 import 'package:hopper/Core/Consents/app_logger.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
+import 'package:hopper/Presentation/OnBoarding/Controller/home_map_controller.dart';
 import 'package:hopper/uitls/map/drop_pulse.dart';
 import 'package:hopper/api/repository/api_consents.dart';
 import 'package:hopper/uitls/map/map_ui_defaults.dart';
@@ -59,16 +60,43 @@ class BookMapController extends GetxController {
   String _lastMarkerTime = '';
 
   // ---------- LIFECYCLE ----------
+  // Reuse the (permanent) HomeMapController's LIVE nearby-driver engine — same
+  // socket listener + animateDriverTo + stale-TTL + marker set. No duplicate
+  // listener (that would fight our off-before-on dedup) and no code duplication.
+  Timer? _bookmapDiagTimer;
+  HomeMapController? get _homeC =>
+      Get.isRegistered<HomeMapController>() ? Get.find<HomeMapController>() : null;
+
   @override
   void onInit() {
     super.onInit();
     _loadMapStyle();
+    _initNearbyReuse();
+  }
+
+  void _initNearbyReuse() {
+    final home = _homeC;
+    if (home == null) {
+      AppLogger.log.w(
+        '[BOOKMAP-SOCKET] HomeMapController not registered — nearby reuse unavailable');
+      return;
+    }
+    // Re-pull a fresh nearby snapshot so BookMap isn't blank on open.
+    home.refreshNearbyDrivers();
+    _bookmapDiagTimer?.cancel();
+    _bookmapDiagTimer = Timer(const Duration(seconds: 5), () {
+      AppLogger.log.i(
+        '[BOOKMAP-SOCKET] 5s check homeNearbyMarkers=${home.markers.length} '
+        '(reused from HomeMapController live socket stream)');
+      if (home.markers.isEmpty) home.refreshNearbyDrivers();
+    });
   }
 
   @override
   void onClose() {
     _cameraIdleDebounce?.cancel();
     _markerDebounce?.cancel();
+    _bookmapDiagTimer?.cancel();
     _dropPulse.dispose();
     super.onClose();
   }

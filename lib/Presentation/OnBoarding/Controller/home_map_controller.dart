@@ -152,6 +152,7 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
     _geocodeDebounce?.cancel();
     _publishDebounce?.cancel();
     _staleDriverGcTimer?.cancel();
+    _nearbyDiagTimer?.cancel();
     _compassThrottle?.cancel();
     _compassSub?.cancel();
     _gateReadyWorker?.dispose();
@@ -290,6 +291,68 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
     _positionSub = null;
   }
 
+  // While the customer is on an active-ride tracking screen (pushed ON TOP of
+  // home — home is never popped), the home map is invisible yet its GPS stream
+  // and nearby-driver marker animations keep running on the SAME device that is
+  // rendering the live driver marker. Pause that work so it does not contend
+  // for CPU/battery during tracking. Both calls are idempotent and fully
+  // reversible (the GPS stream re-arms via _startPositionStream's null-guard).
+  bool _pausedForActiveTrip = false;
+  bool get isPausedForActiveTrip => _pausedForActiveTrip;
+
+  void pauseForActiveTrip() {
+    if (_pausedForActiveTrip) return;
+    _pausedForActiveTrip = true;
+    _stopPositionStream();
+  }
+
+  void resumeFromActiveTrip() {
+    if (!_pausedForActiveTrip) return;
+    _pausedForActiveTrip = false;
+    // Only re-arm the GPS stream if home was actually started (avoids starting
+    // a stream before the home flow has initialised location).
+    if (_started) _startPositionStream();
+    // Nearby markers were dropped (animateDriverTo no-ops while paused, and the
+    // 90s GC cleared the set during the ride). Re-pull a fresh snapshot so the
+    // home map isn't blank until a driver happens to move.
+    refreshNearbyDrivers();
+  }
+
+  /// Re-request the nearby-driver snapshot from the backend (it re-emits a fresh
+  /// batch on customer register). Call after returning from an active ride or on
+  /// reconnect so the home map repopulates immediately instead of waiting for a
+  /// random driver movement. Safe no-op when not connected / no customerId.
+  void refreshNearbyDrivers() {
+    if (customerId.isEmpty) return;
+    try {
+      socketService.registerUser(customerId);
+      rideShareSocket.registerUser(customerId);
+    } catch (_) {}
+  }
+
+  // Diagnostic + safe fallback: 5s after listeners attach, report the live
+  // connection state of BOTH sockets and the marker count. This single log line
+  // pinpoints the failure — `sharedConnected=false` means the shared socket never
+  // reached bck (so a global io.emit can't reach us); `sharedConnected=true` with
+  // 0 markers means the event isn't arriving / rendering (check onAny). If still
+  // empty, re-request the snapshot on both sockets. No HTTP nearby API exists, so
+  // no fake markers are created.
+  Timer? _nearbyDiagTimer;
+  void _startNearbyDiagnostics() {
+    _nearbyDiagTimer?.cancel();
+    _nearbyDiagTimer = Timer(const Duration(seconds: 5), () {
+      AppLogger.log.i(
+        '[HOME-SOCKET] 5s check singleConnected=${socketService.connected} '
+        'sharedConnected=${rideShareSocket.connected} '
+        'nearbyMarkers=${_driverMarkers.length}');
+      if (_driverMarkers.isEmpty) {
+        AppLogger.log.w(
+          '[HOME-SOCKET] no nearby drivers after 5s — re-requesting snapshot');
+        refreshNearbyDrivers();
+      }
+    });
+  }
+
   Future<void> start() async {
     if (_started) return;
     _started = true;
@@ -303,6 +366,11 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
 
   Future<void> attachMap(GoogleMapController controller) async {
     mapController = controller;
+
+    // Map is ready — best-effort pull of the current nearby-driver snapshot so the
+    // home map isn't blank waiting for a driver to move (safe no-op if not yet
+    // connected; the onConnect path also refreshes).
+    refreshNearbyDrivers();
 
     if (mapStyle != null) {
       try {
@@ -352,10 +420,35 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
     return ScreenCoordinate(x: centerX, y: pinY);
   }
 
+  // Batch 4 (geo-scoped emits): report the visible map region so the server only streams
+  // drivers in this viewport (instead of every driver in the system). Throttled; safe no-op
+  // when the server flag GEO_SCOPED_EMITS is off (the rooms simply aren't emitted to).
+  DateTime? _lastGeoCellSub;
+  Future<void> _updateGeoCellSubscription() async {
+    final controller = mapController;
+    if (controller == null || !socketService.connected) return;
+    final now = DateTime.now();
+    if (_lastGeoCellSub != null &&
+        now.difference(_lastGeoCellSub!).inMilliseconds < 1000) {
+      return;
+    }
+    _lastGeoCellSub = now;
+    try {
+      final bounds = await controller.getVisibleRegion();
+      socketService.emit('subscribe-geocells', {
+        'minLat': bounds.southwest.latitude,
+        'minLng': bounds.southwest.longitude,
+        'maxLat': bounds.northeast.latitude,
+        'maxLng': bounds.northeast.longitude,
+      });
+    } catch (_) {}
+  }
+
   Future<String?> onCameraIdle({
     bool immediateGeocode = false,
     bool suppressible = true,
   }) async {
+    unawaited(_updateGeoCellSubscription());
     if (suppressible && _suppressNextIdle) {
       _suppressNextIdle = false;
       return null;
@@ -393,6 +486,7 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
     bool immediateGeocode = false,
     bool suppressible = true,
   }) async {
+    unawaited(_updateGeoCellSubscription());
     if (suppressible && _suppressNextIdle) {
       _suppressNextIdle = false;
       return null;
@@ -617,13 +711,17 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
   }
 
   void _startCompassListener() {
-    _compassSub = FlutterCompass.events?.listen((event) {
-      if (event.heading == null) return;
-
-      if (_compassThrottle?.isActive == true) return;
-      _compassThrottle = Timer(const Duration(milliseconds: 200), () {});
-      _heading = event.heading!;
-    });
+    // DISABLED (battery/heat fix): this subscribed to the magnetometer for the
+    // controller's whole lifetime. The native flutter_compass plugin logs
+    // "Compass sensor is unreliable, device calibration is needed" on EVERY
+    // sensor event, and the sensor running non-stop heated the device — the Dart
+    // 200ms throttle only gated our handler, not the native sensor rate.
+    //
+    // _heading was only the 3rd-priority fallback for the DRIVER marker bearing
+    // (serverHeading ?? movementBearing ?? _heading). The CUSTOMER's phone
+    // compass is the wrong signal for the driver's car heading anyway, so we drop
+    // it entirely; _heading stays 0.0 and is used only if both better sources are
+    // null (marker briefly north-up). No subscription => no sensor => no heat/log.
   }
 
   Future<void> _loadCustomerId() async {
@@ -638,7 +736,16 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
   }
 
   void _initSocket() {
-    if (customerId.isEmpty) return;
+    // Diagnostics (no token/PII): prove _initSocket runs, customerId is present,
+    // and which URLs we connect to.
+    AppLogger.log.i(
+      '[HOME-SOCKET] init customerId=${customerId.isEmpty ? "EMPTY" : "present"} '
+      'single=${ApiConsents.baseUrl} shared=${ApiConsents.sharedBaseUrl}');
+    if (customerId.isEmpty) {
+      AppLogger.log.w(
+        '[HOME-SOCKET] init ABORTED — customerId empty → no sockets/listeners');
+      return;
+    }
 
     socketService.initSocket(ApiConsents.baseUrl);
 
@@ -648,14 +755,25 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
     rideShareSocket.registerUser(customerId);
 
     socketService.onConnect(() {
-      socketService.registerUser(customerId);
+      // Register + pull a fresh nearby snapshot on every (re)connect. Uses
+      // refreshNearbyDrivers() so BOTH the single and shared sockets re-register
+      // (the backend re-emits its current nearby set on register) — so reconnect
+      // never leaves the home map blank until a driver happens to move.
+      refreshNearbyDrivers();
       socketService.onReconnect(() {
-        socketService.registerUser(customerId);
+        refreshNearbyDrivers();
       });
     });
 
     socketService.on('nearby-driver-update', (data) {
       final String driverId = data['driverId'].toString();
+      // Diagnostic: confirms the customer ACTUALLY receives nearby updates from
+      // the single backend (bisects backend-emit vs client-render). Driver coords
+      // are public matching data — no user PII logged.
+      AppLogger.log.i(
+        '📍 [nearby-recv:single] driverId=$driverId '
+        'lat=${data['latitude']} lng=${data['longitude']} type=${data['rideType']}',
+      );
       final now = DateTime.now().toUtc();
 
       final last = _lastSocketProcessedAt[driverId];
@@ -665,8 +783,11 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
       }
       _lastSocketProcessedAt[driverId] = now;
 
-      final double lat = (data['latitude'] as num).toDouble();
-      final double lng = (data['longitude'] as num).toDouble();
+      final latRaw = data['latitude'];
+      final lngRaw = data['longitude'];
+      if (latRaw is! num || lngRaw is! num) return; // ignore malformed packet
+      final double lat = latRaw.toDouble();
+      final double lng = lngRaw.toDouble();
 
       final String rideType =
           (data['rideType'] ??
@@ -693,6 +814,12 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
     rideShareSocket.on('nearby-driver-update', (data) {
       final String driverId = 'shared_${(data['driverId'] ?? '').toString()}';
       if (driverId == 'shared_') return;
+      // Diagnostic: confirms the customer receives nearby updates from the SHARED
+      // backend. No user PII logged.
+      AppLogger.log.i(
+        '📍 [nearby-recv:shared] driverId=$driverId '
+        'lat=${data['latitude']} lng=${data['longitude']} type=${data['rideType']}',
+      );
 
       final now = DateTime.now().toUtc();
       final last = _lastSocketProcessedAt[driverId];
@@ -740,6 +867,9 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
 
       _publishMarkersDebounced();
     });
+
+    AppLogger.log.i('[HOME-SOCKET] nearby listeners attached (single + shared)');
+    _startNearbyDiagnostics();
 
     rideShareSocket.on('remove-nearby-driver', (data) {
       final raw = (data['driverId'] ?? '').toString();
@@ -1185,6 +1315,9 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
     required String serviceType,
     double? serverHeading,
   }) {
+    // Home map is hidden under an active-ride tracking screen — skip nearby
+    // marker animation work so it doesn't steal frames from the live tracker.
+    if (_pausedForActiveTrip) return;
     final from = _lastPos[driverId] ?? to;
     final meters = _haversineMeters(from, to);
 

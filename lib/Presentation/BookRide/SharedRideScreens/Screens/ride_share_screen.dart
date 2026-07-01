@@ -48,12 +48,107 @@ class _RideShareScreenState extends State<RideShareScreen> {
   int selectedIndex = -1;
   Set<int> selectedSeats = {};
   List<LatLng> _routePoints = [];
-  int seatCount = 1;
-  final int maxSeatCount = 2;
+
+  // Use the max allowed seats per booking from the backend if available, or default.
+  // The UI currently mentions "Max 2 per booking".
+  /// Passenger seats (2..maxSeats) that are currently free on this driver.
+  int get _freePassengerSeats {
+    final maxSeats = widget.sharedDriver.maxSeats ?? 4;
+    int free = 0;
+    for (int n = 2; n <= maxSeats; n++) {
+      if (!_isSeatTaken(n)) free++;
+    }
+    return free;
+  }
+
+  /// The specific free passenger seat NUMBERS (2..maxSeats) on THIS driver — used
+  /// to tell the rider exactly which seats they CAN pick when their choice is
+  /// taken (BUG 2: "Available seats: Seat 2, Seat 4"). Computed locally from the
+  /// already-loaded per-driver occupancy (`_seats`), so no backend call needed.
+  List<int> get _availableSeatNumbers {
+    final maxSeats = widget.sharedDriver.maxSeats ?? 4;
+    final free = <int>[];
+    for (int n = 2; n <= maxSeats; n++) {
+      if (!_isSeatTaken(n)) free.add(n);
+    }
+    return free;
+  }
+
+  /// "Seat 2" / "Seat 2 and Seat 3" / "Seat 2, Seat 3 and Seat 4".
+  String _seatList(List<int> seats) {
+    if (seats.isEmpty) return '';
+    if (seats.length == 1) return 'Seat ${seats.first}';
+    final head =
+        seats.sublist(0, seats.length - 1).map((s) => 'Seat $s').join(', ');
+    return '$head and Seat ${seats.last}';
+  }
+
+  /// How many seats THIS rider can pick: never more than what's actually free,
+  /// and never more than the per-booking policy cap (default 3 passenger seats).
+  /// Old code hard-defaulted to 2, so riders couldn't book 3-4 even when free.
+  int get maxSelectableSeats {
+    final policyCap = widget.sharedDriver.maxSeatsPerBooking ?? 3;
+    final free = _freePassengerSeats;
+    final cap = policyCap < free ? policyCap : free;
+    return cap < 1 ? 1 : cap;
+  }
+
   final int minSeatCount = 1;
 
-  List<SharedSeat> get _seats =>
-      widget.seats ?? widget.sharedDriver.seats ?? [];
+  // Mutable so we can refresh live availability — a seat freed by a driver /
+  // customer cancellation must stop showing as "already booked".
+  List<SharedSeat> _seats = <SharedSeat>[];
+
+  @override
+  void initState() {
+    super.initState();
+    _seats = widget.seats ?? widget.sharedDriver.seats ?? <SharedSeat>[];
+    _refreshSeatAvailability();
+  }
+
+  /// Re-fetch live seat availability for THIS driver so a seat that was freed
+  /// by a cancellation no longer shows as taken. On any failure we keep the
+  /// seats we already have, so this can never make the screen worse.
+  Future<void> _refreshSeatAvailability() async {
+    try {
+      final driverId = widget.sharedDriver.driverId?.id;
+      final fromLat = (widget.pickupData['lat'] as num?)?.toDouble();
+      final fromLng = (widget.pickupData['lng'] as num?)?.toDouble();
+      final toLat = (widget.destinationData['lat'] as num?)?.toDouble();
+      final toLng = (widget.destinationData['lng'] as num?)?.toDouble();
+      if (driverId == null ||
+          fromLat == null ||
+          fromLng == null ||
+          toLat == null ||
+          toLng == null) {
+        return;
+      }
+
+      final searchCtrl = Get.isRegistered<DriverSearchController>()
+          ? Get.find<DriverSearchController>()
+          : Get.put(DriverSearchController());
+      final response = await searchCtrl.getSharedDriverSearch(
+        pickupLat: fromLat,
+        pickupLng: fromLng,
+        dropLat: toLat,
+        dropLng: toLng,
+      );
+
+      SharedDriverData? fresh;
+      for (final d in (response?.data ?? const <SharedDriverData>[])) {
+        if (d.driverId?.id == driverId) {
+          fresh = d;
+          break;
+        }
+      }
+      if (!mounted || fresh?.seats == null) return;
+      setState(() {
+        _seats = fresh!.seats!;
+      });
+    } catch (_) {
+      // Keep existing seats — never regress the UI on a refresh failure.
+    }
+  }
 
   bool _isSeatTaken(int apiSeatNumber) {
     for (final seat in _seats) {
@@ -139,7 +234,7 @@ class _RideShareScreenState extends State<RideShareScreen> {
                                 ),
                                 Icon(Icons.circle, size: 7),
                                 CustomTextFields.textWithStyles600(
-                                  '  4 seats',
+                                  '  ${widget.sharedDriver.maxSeats ?? 4} seats',
                                   fontSize: 16,
                                 ),
                               ],
@@ -458,11 +553,11 @@ class _RideShareScreenState extends State<RideShareScreen> {
                                                   selectedSeats.remove(apiSeat);
                                                 } else {
                                                   if (selectedSeats.length <
-                                                      maxSeatCount) {
+                                                      maxSelectableSeats) {
                                                     selectedSeats.add(apiSeat);
                                                   } else {
                                                     AppToasts.showInfoGlobal(
-                                                      'Maximum $maxSeatCount seats can be selected',
+                                                      'Maximum $maxSelectableSeats seats can be selected',
                                                       title: 'Limit Reached',
                                                     );
                                                   }
@@ -509,11 +604,11 @@ class _RideShareScreenState extends State<RideShareScreen> {
                                                   selectedSeats.remove(apiSeat);
                                                 } else {
                                                   if (selectedSeats.length <
-                                                      maxSeatCount) {
+                                                      maxSelectableSeats) {
                                                     selectedSeats.add(apiSeat);
                                                   } else {
                                                     AppToasts.showInfoGlobal(
-                                                      'Maximum $maxSeatCount seats can be selected',
+                                                      'Maximum $maxSelectableSeats seats can be selected',
                                                       title: 'Limit Reached',
                                                     );
                                                   }
@@ -554,11 +649,11 @@ class _RideShareScreenState extends State<RideShareScreen> {
                                                   selectedSeats.remove(apiSeat);
                                                 } else {
                                                   if (selectedSeats.length <
-                                                      maxSeatCount) {
+                                                      maxSelectableSeats) {
                                                     selectedSeats.add(apiSeat);
                                                   } else {
                                                     AppToasts.showInfoGlobal(
-                                                      'Maximum $maxSeatCount seats can be selected',
+                                                      'Maximum $maxSelectableSeats seats can be selected',
                                                       title: 'Limit Reached',
                                                     );
                                                   }
@@ -651,6 +746,36 @@ class _RideShareScreenState extends State<RideShareScreen> {
                       return;
                     }
 
+                    // 🔹 Race guard: re-check live availability right before booking
+                    // so we never book a seat another rider grabbed while this
+                    // screen was open. If one of our picks just got taken, drop it,
+                    // tell the rider, and let them re-pick instead of booking blind.
+                    await _refreshSeatAvailability();
+                    final conflicts =
+                        selectedSeats.where((s) => _isSeatTaken(s)).toList()
+                          ..sort();
+                    if (conflicts.isNotEmpty) {
+                      if (mounted) {
+                        setState(() => selectedSeats
+                            .removeWhere((s) => _isSeatTaken(s)));
+                      }
+                      // BUG 2: name the exact taken seat(s) AND the seats they can
+                      // still pick — and stay on this screen (return below).
+                      final available = _availableSeatNumbers;
+                      final isAre = conflicts.length == 1 ? 'is' : 'are';
+                      final availLine = available.isEmpty
+                          ? 'No seats are free in this car right now.'
+                          : 'Available seats: '
+                              '${available.map((s) => 'Seat $s').join(', ')}';
+                      AppToasts.showInfoGlobal(
+                        'Sorry, ${_seatList(conflicts)} $isAre not currently '
+                        'available.\n$availLine',
+                        title: 'Seat unavailable',
+                      );
+                      return;
+                    }
+                    if (!mounted) return;
+
                     // 🔹 Extract coordinates from pickupData / destinationData
                     final fromLat =
                         (widget.pickupData['lat'] as num?)?.toDouble() ?? 0.0;
@@ -700,6 +825,7 @@ class _RideShareScreenState extends State<RideShareScreen> {
                                 destinationData: widget.destinationData,
                                 pickupAddress: widget.pickupAddress,
                                 destinationAddress: widget.destinationAddress,
+                                selectedSeats: seatNumbers,
                               ),
                         ),
                       );

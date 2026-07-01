@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:hopper/Core/Utility/shared_pref_helper.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -32,7 +33,7 @@ class _SplashScreensState extends State<SplashScreens> {
 
   Future<void> _navigateNext() async {
     final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('token');
+    final token = await SharedPrefHelper.getToken();
 
     if (!mounted) return;
 

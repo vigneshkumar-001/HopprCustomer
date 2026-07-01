@@ -46,10 +46,15 @@ class ApiConsents {
       '$baseUrl/api/customer/send-driver-request';
   static final String paymentBooking = '$baseUrl/api/customer/paymentBooking';
   static final String activeBooking = '$baseUrl/api/customer/active-booking';
+  static final String resendRideOtp = '$baseUrl/api/customer/resend-ride-otp';
 
   /// Universal ride receipt (works for COD / Wallet / Paystack / Flutterwave).
   static String rideReceipt(String bookingId) =>
       '$baseUrl/api/customer/ride-receipt/$bookingId';
+
+  /// Email the ride invoice/receipt to the customer's registered email.
+  static String sendRideReceipt(String bookingId) =>
+      '$baseUrl/api/customer/ride-receipt/$bookingId/send';
 
   static final String chatHistory = '$baseUrl/api/customer/chat-history';
   static final String rideHistory = '$baseUrl/api/customer/ride-history';
@@ -138,5 +143,13 @@ class ApiConsents {
 
   static final String sharedSendRequest =
       '$sharedBaseUrl/api/shared/customer/send-driver-request';
+
+  // Phase A/B: per-customer privacy-safe shared-ride state (recovery on open/reconnect).
+  static String sharedMyState(String bookingId) =>
+      '$sharedBaseUrl/api/shared/customer/my-state/$bookingId';
+
+  // Customer add/edit pickup instruction ("Directions to reach").
+  static String updatePickupInstruction(String bookingId) =>
+      '$sharedBaseUrl/api/shared/customer/bookings/$bookingId/pickup-instruction';
   // https://hoppr-backend-3d2b7f783917.herokuapp.com/api/users/districts?state=$state
 }

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:hopper/Core/Utility/shared_pref_helper.dart';
 import 'package:hopper/Core/Utility/app_toasts.dart';
 import 'package:hopper/Presentation/OnBoarding/Controller/package_controller.dart';
 import 'package:hopper/Presentation/OnBoarding/Screens/pay_pall_screen.dart';
@@ -80,7 +81,7 @@ class _WalletPaymentScreensState extends State<WalletPaymentScreens> {
 
   Future<void> displayPaymentSheet() async {
     final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('token');
+    final token = await SharedPrefHelper.getToken();
 
     if (token == null) {
       AppLogger.log.e('⚠️ Token not found');
@@ -169,7 +170,7 @@ class _WalletPaymentScreensState extends State<WalletPaymentScreens> {
   Future<Map<String, dynamic>?> createPaymentIntent(int? amount) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('token');
+      final token = await SharedPrefHelper.getToken();
 
       if (token == null) {
         AppLogger.log.e('⚠️ Token not found');
@@ -242,7 +243,7 @@ class _WalletPaymentScreensState extends State<WalletPaymentScreens> {
   Future<void> confirmPayment(String transactionId) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final token = prefs.getString('token');
+      final token = await SharedPrefHelper.getToken();
       final String url = ApiConsents.addToWalletResponse;
 
       // Extract the PaymentIntent ID (remove the _secret part)
@@ -320,7 +321,7 @@ class _WalletPaymentScreensState extends State<WalletPaymentScreens> {
     setState(() => flutterWaveLoading = true);
 
     try {
-      String? token = prefs.getString('token');
+      String? token = await SharedPrefHelper.getToken();
       final response = await http.post(
         Uri.parse(
           'https://bk.myhoppr.com/api/flutterwave/wallet/initialize',
@@ -995,7 +996,7 @@ class _WalletPaymentScreensState extends State<WalletPaymentScreens> {
     setState(() => payStackLoading = true);
 
     try {
-      String? token = prefs.getString('token');
+      String? token = await SharedPrefHelper.getToken();
       final response = await http.post(
         Uri.parse(
           'https://bk.myhoppr.com/api/paystack/wallet/initialize',

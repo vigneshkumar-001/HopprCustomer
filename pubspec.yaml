@@ -18,6 +18,7 @@ dependencies:
   flutter_compass: any
   intl: any
   shared_preferences: any
+  flutter_secure_storage: ^9.2.2
   get: any
   get_it: any
   equatable: any

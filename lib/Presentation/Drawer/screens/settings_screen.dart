@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:hopper/Core/Utility/shared_pref_helper.dart';
 import 'dart:io';
 import 'package:country_picker/country_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -506,11 +507,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _logout(BuildContext context) async {
     final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('token');
+    final token = await SharedPrefHelper.getToken();
     unawaited(
       Request.sendLogoutFireAndForget(url: ApiConsents.logout, token: token),
     );
-    unawaited(prefs.remove('token'));
+    unawaited(SharedPrefHelper.clearToken());
     unawaited(prefs.remove('refreshToken'));
     unawaited(prefs.remove('sessionToken'));
     unawaited(prefs.remove('role'));

@@ -38,7 +38,13 @@ class SocketService {
     _socket = IO.io(
       url,
       IO.OptionBuilder()
-          .setTransports(['websocket'])
+          // Allow polling as well as websocket (matches the driver app). A
+          // websocket-ONLY socket cannot fall back when the WS upgrade is
+          // blocked or drops on a flaky mobile network / proxy, which stalls the
+          // live feed and freezes the customer's car marker mid-ride. With
+          // polling enabled socket.io connects over HTTP long-polling and
+          // upgrades to WS when possible, so the stream self-heals.
+          .setTransports(['websocket', 'polling'])
           .enableReconnection()
           .enableAutoConnect()
           // Was 10: after 10 'transport close' drops the socket gave up FOREVER,
@@ -68,9 +74,21 @@ class SocketService {
       for (final driverId in _joinedRooms.values) {
         emit('track-driver', {'driverId': driverId});
       }
+
+      // C7: invoke the single STORED external connect callback (set via
+      // onConnect()). Stored, not re-registered, so reconnect / screen reopen
+      // never multiplies it.
+      _externalConnectCb?.call();
     });
 
     _socket.onDisconnect((_) => AppLogger.log.e("❌ Disconnected from $url"));
+    // C7 + H6: on a real reconnect, ask the backend to validate our session and
+    // resync the active ride — the server (Phase 2) replies with
+    // 'active_ride_sync_required'. Then fan out to the stored external callback.
+    _socket.onReconnect((_) {
+      if (_userId != null) emit('reconnect', {'userId': _userId});
+      _externalReconnectCb?.call();
+    });
     // Throttle error logs: while offline the socket retries forever and would
     // otherwise flood the log with the same DNS/connect error every few seconds.
     _socket.onConnectError((err) {
@@ -141,24 +159,32 @@ class SocketService {
     }
   }
 
-  void onConnect(Function() callback) => _socket.onConnect((_) => callback());
-  void onReconnect(Function() callback) =>
-      _socket.onReconnect((_) => callback());
-  void on(String event, Function(dynamic) callback) =>
-      _socket.on(event, (dynamic data) {
-        // The backend sometimes emits with extra trailing args
-        // (e.g. emit('nearby-driver-update', payload, packetId)). socket.io
-        // then delivers the whole thing as a List [payload, id, ...]. Unwrap
-        // the leading Map so handlers can read fields directly. This is a
-        // no-op when the payload is already a Map (the common case).
-        var payload = data;
-        if (payload is List &&
-            payload.isNotEmpty &&
-            payload.first is Map) {
-          payload = payload.first;
-        }
-        callback(payload);
-      });
+  // C7: external connect/reconnect callbacks are STORED (single slot each), not
+  // re-registered on the socket. The internal handlers in initSocket fan out to
+  // these, so reconnect / screen reopen / controller recreate / app resume can
+  // never stack duplicate connect handlers.
+  Function()? _externalConnectCb;
+  Function()? _externalReconnectCb;
+
+  void onConnect(Function() callback) => _externalConnectCb = callback;
+  void onReconnect(Function() callback) => _externalReconnectCb = callback;
+
+  void on(String event, Function(dynamic) callback) {
+    // C7: off-before-on so re-registering the same event REPLACES the handler
+    // instead of stacking another one. Event name + payload unwrapping unchanged.
+    _socket.off(event);
+    _socket.on(event, (dynamic data) {
+      // The backend sometimes emits with extra trailing args
+      // (e.g. emit('nearby-driver-update', payload, packetId)). socket.io then
+      // delivers the whole thing as a List [payload, id, ...]. Unwrap the leading
+      // Map so handlers can read fields directly. No-op when already a Map.
+      var payload = data;
+      if (payload is List && payload.isNotEmpty && payload.first is Map) {
+        payload = payload.first;
+      }
+      callback(payload);
+    });
+  }
   void emit(String event, dynamic data) => _socket.emit(event, data);
   void emitWithAck(String event, dynamic data, Function(dynamic)? ack) =>
       _socket.emitWithAck(event, data, ack: ack);

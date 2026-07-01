@@ -11,10 +11,9 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import 'package:hopper/Core/Consents/app_logger.dart';
 import 'package:hopper/uitls/map/customer/camera_utils.dart';
-import 'package:hopper/uitls/map/customer/map_eta_distance_card.dart';
 import 'package:hopper/uitls/map/customer/map_ui_config.dart';
 import 'package:hopper/uitls/map/customer/marker_icon_cache.dart';
-import 'package:hopper/uitls/map/driver_motion_engine.dart';
+import 'package:hopper/uitls/map/tracking_playback_engine.dart';
 import 'package:hopper/uitls/map/route_tracking_math.dart';
 
 enum RideMapMode { idle, toPickup, toDrop }
@@ -24,6 +23,11 @@ class CustomerRideMapView extends StatefulWidget {
 
   /// Live driver location updates (raw). Animations happen in-widget.
   final LatLng? driverLocation;
+
+  /// Server emit time (serverEmittedAt/serverTime) for [driverLocation]. Drives
+  /// the playback engine's jitter buffer so bursty packet delivery does not
+  /// distort marker timing. Null falls back to client arrival time.
+  final DateTime? driverLocationTs;
 
   /// Decoded route points.
   final List<LatLng> routePoints;
@@ -44,6 +48,7 @@ class CustomerRideMapView extends StatefulWidget {
     super.key,
     required this.vehicleType,
     required this.driverLocation,
+    this.driverLocationTs,
     required this.routePoints,
     required this.pickup,
     required this.drop,
@@ -70,7 +75,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   BitmapDescriptor? _pickupIcon;
   BitmapDescriptor? _dropIcon;
 
-  late final DriverMotionEngine _motion;
+  late final TrackingPlaybackEngine _motion;
   LatLng? _vehiclePos;
   double _vehicleBearing = 0;
 
@@ -82,31 +87,13 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   // GPS jitter (the stop/start "front-and-back" on the drop leg) — only on a
   // genuine reverse. Reset whenever the route/phase changes. Phase-symmetric:
   // the pickup leg already advances monotonically, so this is a no-op there.
+  // Tracked purely for route trimming / diagnostics now — it no longer gates or
+  // holds the marker (the restructured pipeline never holds; see _snapAndBearing).
   double _markerRouteProgress = -1.0;
-  // A snapped fix that lands BEHIND the marker's route progress is only treated as
-  // a genuine reverse (and allowed to move the marker back) when the raw GPS moved
-  // at least this far. At a stop/signal the driver reports speed 0 but GPS still
-  // jitters 5-20m; the old 8m threshold mistook that jitter for a reverse and
-  // jumped the car backward — the drop-leg "front-and-back" at signals. 25m is
-  // above normal stop jitter yet well below a real reroute (which redraws the
-  // route and resets `_markerRouteProgress` anyway), so genuine reverses still
-  // register. Below this the marker HOLDS its forward position (no backward jump).
-  static const double _kRealReverseMeters = 25.0;
-  // The backward-jitter hold above must be BOUNDED. A sustained "behind" snap
-  // (parallel-road lock, GPS drift, a route that doesn't match the leg) used to
-  // freeze the marker until a >=25m reverse accumulated, then snap it back: the
-  // reported "ride moves, then freezes, then jumps" (most visible on a second
-  // ride whose geometry/noise differs). After holding this long we give up the
-  // hold and let the marker follow the real fix (smooth catch-up). Brief jitter
-  // (under this window) is still absorbed, so the stop/signal smoothing is kept.
-  static const Duration _kMaxMarkerHold = Duration(milliseconds: 2500);
-  // Wall-clock when the current consecutive backward-jitter hold began (null =
-  // not holding). Cleared on every accepted/forward fix.
-  DateTime? _holdStartedAt;
-  // Throttle for the hold log so it is visible in release without flooding.
-  DateTime? _lastHoldLogAt;
   // Throttle for the drop-render diagnostic trace (one line ~per second).
   DateTime? _lastDropRenderLogAt;
+  // [LIVETRACK] debug: throttle for the rendered-marker trace (grep "LIVETRACK").
+  DateTime? _lastLiveTrackDrawLogAt;
   double? _lastTrimDistanceToTargetMeters;
   int _trimPausedCount = 0;
   String _routeSig = '';
@@ -159,6 +146,7 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   /// far from the active target and tightening automatically as they approach,
   /// like a polished Ola/Uber tracking view. North-up + flat, so these read
   /// comfortably (not "over-zoomed").
+  // ignore: unused_element
   double _adaptiveFollowZoom(LatLng vehiclePos, {bool recenter = false}) {
     final target =
         widget.mode == RideMapMode.toDrop ? widget.drop : widget.pickup;
@@ -177,8 +165,9 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     } else {
       z = 17.0; // about to arrive: tight so the user sees the exact spot
     }
-    // Recenter is an explicit "focus" tap -> nudge slightly tighter.
-    if (recenter) z += 0.3;
+    // Recenter is a "focus" tap — keep it MODERATE (Ola-style): capped so it
+    // shows the car + surrounding roads instead of a tight "full zoom".
+    if (recenter) return z.clamp(16.4, 16.8);
     return z.clamp(MapUiConfig.minZoom, MapUiConfig.maxZoom);
   }
 
@@ -208,45 +197,26 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     );
     _fxTimer = Timer.periodic(const Duration(milliseconds: 70), _onFxTick);
 
-    _motion = DriverMotionEngine(
+    _motion = TrackingPlaybackEngine(
       vsync: this,
       onUpdate: (pos, bearing) {
-        // Raw fixes are snapped ONCE, on ingest (with the forward-only progress
-        // guard), so the engine already interpolates between on-route targets.
-        // Re-snapping the interpolated pose EVERY FRAME shifted the snap target
-        // frame-to-frame and produced the lateral "zig-zag" on the drop leg.
-        // Render the interpolated pose directly; `bearing` is the route-aligned
-        // heading carried from ingest (stable, no per-frame GPS recompute).
+        // The render loop already interpolated between two real, time-ordered
+        // samples (or dead-reckoned). Render the result directly — no per-frame
+        // re-snap (that caused the lateral zig-zag).
         _queueVehicleMarker(pos, bearing);
       },
       onFrameSideEffects: (pos) {
-        // Trim / camera / arrival each do their own route projection off the
-        // rendered pose — no per-frame re-snap of the marker itself.
         _maybeTrimRoute(pos);
         _maybeFollowCamera(pos);
         _maybeCelebrateArrival(pos);
       },
-      // Buffer ~0.8 of a packet interval against the driver's steady ~1s feed:
-      // a small constant lag bought for near-zero stutter (Uber/Ola do the same).
-      playbackDelay: const Duration(milliseconds: 800),
-      // Clamp each segment to ~the real packet cadence so the marker keeps
-      // gliding until the next packet lands instead of racing then freezing.
-      minSeg: const Duration(milliseconds: 700),
-      maxSeg: const Duration(milliseconds: 1500),
-      // Lower gates so slow / stop-and-go traffic still moves the car instead of
-      // freezing. Snap-to-route + the marker throttle still suppress jitter.
-      minMoveMeters: 0.8,
-      requireBearingForDeadReckoning: true,
-      // > the 1s feed with margin: a single missed packet coasts smoothly,
-      // but we stop projecting once the gap is clearly too large.
-      maxDeadReckonPacketGap: const Duration(seconds: 5),
-      deadReckonStopAfter: const Duration(seconds: 5),
-      stationarySpeedThresholdMps: 0.35,
-      stationaryIgnoreUnderMeters: 1.0,
-      // A real car cannot spin: cap rotation at 120°/s (a 90° turn animates in
-      // ~0.75s) instead of the 540°/s default that let a single noisy heading
-      // flip the icon ~195° in one packet. Slower bearing EMA (0.30) further
-      // damps any residual jitter that slips past the stationary freeze.
+      // Jitter buffer: render ~1.5s behind real arrival so late / bursty / out-
+      // of-order packets land BEFORE their render time -> no jump, no teleport,
+      // no backward step; smooth even when fixes arrive every 2-5s.
+      playbackDelay: const Duration(milliseconds: 1500),
+      // Coast (dead-reckon) at most this long through a signal gap, then hold.
+      maxPredict: const Duration(seconds: 5),
+      // A real car cannot spin: cap rotation at 120 deg/s; EMA damps heading.
       maxTurnDegPerSec: 120.0,
       bearingEmaAlpha: 0.30,
     );
@@ -352,7 +322,11 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
         _vehicleBearing = snapped.bearing;
         _syncMarkers(force: true);
       } else {
-        _motion.ingest(snapped.position, bearing: snapped.bearing);
+        _motion.ingest(
+          snapped.position,
+          bearing: snapped.bearing,
+          serverTs: widget.driverLocationTs,
+        );
       }
     }
   }
@@ -418,12 +392,15 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     _remainingRoute = _fullRoute;
     _lastTrimIndex = 0;
     _lastTrimDistanceToTargetMeters = null;
-    final livePos = _vehiclePos ?? widget.driverLocation;
+    // Re-baseline the route trim against the CURRENT rendered marker, but do NOT
+    // move the marker here. Its position is owned solely by the playback engine
+    // (TrackingPlaybackEngine). Previously this re-snapped and ASSIGNED
+    // `_vehiclePos`/`_vehicleBearing` on every ~10s route refetch, which yanked
+    // the car to a fresh snap — the "route refresh causes visual glitch". Now a
+    // route swap only updates the line; the car keeps gliding from the engine.
+    final livePos = _vehiclePos;
     if (livePos != null) {
-      final snapped = _snapAndBearing(livePos);
-      _vehiclePos = snapped.position;
-      _vehicleBearing = snapped.bearing;
-      _maybeTrimRoute(snapped.position, force: true);
+      _maybeTrimRoute(livePos, force: true);
     }
     _maybeStartRouteDraw();
     _rebuildPolylines();
@@ -447,7 +424,15 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     return toExpected < toOther;
   }
 
+  // True once the FIRST full-route fit has happened. After that the camera just
+  // follows the driver; auto-fit never fires again (the rider reframes the full
+  // route manually via the fit button). Stops the "auto zoom-in / re-fit" churn.
+  bool _didInitialFit = false;
+
   void _requestFitBounds({required String reason, bool force = false}) {
+    // Auto-fit ONLY once (the initial overview). Never auto-refit afterwards —
+    // even on mode change (pickup → drop). Manual fitRoute() is unaffected.
+    if (_didInitialFit) return;
     // Fit bounds only when it matters; never on every driver update.
     // Also don't fight the user: pause after user gestures.
     final now = DateTime.now();
@@ -483,9 +468,22 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     _pendingFit = false;
     _lastFitAt = DateTime.now();
 
+    // On the DROP leg, frame the REMAINING route (vehicle -> drop), not the whole
+    // pickup->drop route. The drop route is refreshed periodically (off-route
+    // reroute), and each refit to the full route yanked the camera back to the
+    // whole-trip extent — so the map "stayed zoomed out" near the drop and the
+    // drop point was never clear. _remainingRoute is already trimmed forward as the
+    // car advances, so framing it tightens the view automatically on approach.
+    // Pickup keeps the full-route fit (it was already correct).
+    final routeForFit =
+        (widget.mode == RideMapMode.toDrop && _remainingRoute.length >= 2)
+            ? _remainingRoute
+            : _fullRoute;
     final fitPoints =
-        _fullRoute.length >= 2 ? <LatLng>[..._fullRoute, ...extras] : extras;
+        routeForFit.length >= 2 ? <LatLng>[...routeForFit, ...extras] : extras;
     await _animateBoundsSafe(focusPoints: fitPoints);
+    // Initial overview done → from now on the camera just follows the driver.
+    _didInitialFit = true;
   }
 
   Future<void> _animateBoundsSafe({
@@ -520,7 +518,13 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
             ? 14.4
             : diag <= 6000
             ? 13.7
-            : 13.0;
+            : diag <= 12000
+            ? 12.6
+            : diag <= 25000
+            ? 11.3
+            : diag <= 50000
+            ? 10.2
+            : 9.3;
     try {
       await controller.animateCamera(
         CameraUpdate.newCameraPosition(
@@ -572,7 +576,21 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     final isDrop = widget.mode == RideMapMode.toDrop;
     if (!isPickup && !isDrop) return set;
 
-    final baseActive = _remainingRoute.length >= 2 ? _remainingRoute : _fullRoute;
+    // BOTH legs render the forward-trimmed `_remainingRoute` so the already-
+    // travelled portion progressively disappears behind the car (the Uber/Ola
+    // route-progress feel). Previously the DROP leg drew the FULL route to dodge
+    // an old "route line completes but the car is somewhere else" symptom, but
+    // that left the trip leg showing a static, never-shrinking line.
+    //
+    // Re-enabling the trim on drop is safe now: `_maybeTrimRoute` only advances
+    // the trim to a route point within the snap tolerance of the ALREADY
+    // route-snapped car (and never recedes), so `_remainingRoute.first` always
+    // coincides with the car — it can never be stranded behind a completed line.
+    // The car-anchor just below additionally bridges any small residual gap.
+    // Falls back to the full route until the first trim lands. The camera fit
+    // already uses `_remainingRoute` (with the car in `extras`), unchanged.
+    final baseActive =
+        _remainingRoute.length >= 2 ? _remainingRoute : _fullRoute;
     if (baseActive.length < 2) return set;
 
     // Anchor the route to the live car so the polyline always visually emanates
@@ -602,16 +620,16 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
         startCap: Cap.roundCap,
         endCap: Cap.roundCap,
         jointType: JointType.round,
-        patterns:
-            isPickup
-                ? <PatternItem>[PatternItem.dash(20), PatternItem.gap(10)]
-                : const <PatternItem>[],
+        // Dotted/dashed on BOTH legs now. The drop leg used to be a solid line
+        // with a flowing "comet" animation; per request it now renders as the
+        // same dotted line as pickup (static, no moving animation).
+        patterns: <PatternItem>[PatternItem.dash(20), PatternItem.gap(10)],
       ),
     );
 
-    // Flowing comet — a brand-blue "energy" pulse with a fading tail that runs
-    // toward the destination. Only after the draw-in finishes and the line is
-    // long enough to look intentional (never on a tiny stub near arrival).
+    // Flowing comet — a brand-blue "energy" glow pulse that runs toward the
+    // destination. Enabled on BOTH legs (pickup + drop / in-trip) so the
+    // animated glow shows the whole ride, on single and shared alike.
     if (!revealing && drawn.length >= 6) {
       set.addAll(_flowCometPolylines(drawn));
     }
@@ -959,6 +977,31 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     final pos = _pendingMarkerPos ?? _vehiclePos;
     if (pos == null) return;
 
+    // [LIVETRACK] Ground-truth of what the customer actually SEES: the rendered
+    // car position. `moveM` is how far the icon moved since the last committed
+    // frame; `backward=true` means it moved OPPOSITE to its heading (the
+    // front-and-back step). Filter logs with: adb logcat | grep LIVETRACK
+    final prevDrawn = kDebugMode ? _vehiclePos : null;
+    if (prevDrawn != null) {
+      final moveM = haversineDistanceMeters(prevDrawn, pos);
+      final moveBrg = bearingBetween(prevDrawn, pos);
+      final relToHeading = shortestAngleDelta(_vehicleBearing, moveBrg).abs();
+      final backward = moveM > 0.5 && relToHeading > 110.0;
+      if (backward ||
+          _lastLiveTrackDrawLogAt == null ||
+          now.difference(_lastLiveTrackDrawLogAt!) >=
+              const Duration(milliseconds: 700)) {
+        _lastLiveTrackDrawLogAt = now;
+        AppLogger.log.w(
+          '[LIVETRACK] draw mode=${widget.mode == RideMapMode.toDrop ? "drop" : "pickup"} '
+          'pos=${pos.latitude.toStringAsFixed(6)},${pos.longitude.toStringAsFixed(6)} '
+          'moveM=${moveM.toStringAsFixed(1)} backward=$backward '
+          'brg=${_vehicleBearing.toStringAsFixed(0)} '
+          'routeProg=${_markerRouteProgress.toStringAsFixed(1)}',
+        );
+      }
+    }
+
     _vehiclePos = pos;
     _vehicleBearing = _pendingMarkerBearing ?? _vehicleBearing;
 
@@ -980,23 +1023,6 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     );
     _markers = next;
     if (mounted) setState(() {});
-  }
-
-  /// Point on [route] at a fractional index (segmentIndex + t). Used to render
-  /// the marker exactly on the route at its monotonic forward progress.
-  LatLng _pointAtRouteProgress(List<LatLng> route, double progress) {
-    if (route.isEmpty) return _vehiclePos ?? widget.driverLocation ?? widget.pickup;
-    if (progress <= 0) return route.first;
-    final maxIdx = route.length - 1;
-    if (progress >= maxIdx) return route.last;
-    final i = progress.floor();
-    final t = progress - i;
-    final a = route[i];
-    final b = route[i + 1];
-    return LatLng(
-      a.latitude + (b.latitude - a.latitude) * t,
-      a.longitude + (b.longitude - a.longitude) * t,
-    );
   }
 
   _SnappedPose _snapAndBearing(
@@ -1050,7 +1076,8 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       // DIAGNOSTIC (drop leg, throttled): the marker is being shown at RAW GPS
       // because it is too far from the route to snap. If the drop "dump" is this
       // case, the route doesn't match the road the driver is on (reroute lag).
-      if (widget.mode == RideMapMode.toDrop &&
+      if (kDebugMode &&
+          widget.mode == RideMapMode.toDrop &&
           (_lastDropRenderLogAt == null ||
               now.difference(_lastDropRenderLogAt!) >=
                   const Duration(seconds: 1))) {
@@ -1108,124 +1135,22 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       return _SnappedPose(position: raw, bearing: fallbackBearing);
     }
 
-    // Forward-progress guard (req #13: no backward jump unless a REAL reverse).
-    // A fix that snaps to a route point BEHIND the marker's current progress is
-    // GPS jitter — most visible at a stop/start, where it produced the drop-leg
-    // "front-and-back". Hold the marker (keep position + heading) rather than
-    // stepping it back. Only a raw move large enough to be a genuine reverse /
-    // U-turn is allowed to regress. No-op on pickup (already monotonic forward).
-    final double candProgress = nearest.segmentIndex + nearest.t;
-    final bool wouldRegress =
-        _markerRouteProgress >= 0.0 &&
-        candProgress < _markerRouteProgress - 0.25;
-
-    // DROP LEG renders EXACTLY like the pickup leg (which is flawless): it falls
-    // through to the shared path below, which returns the real snapped GPS
-    // position (`_resolveDisplayPosition` -> `nearest.point`) on forward motion
-    // and only HOLDS the marker on genuine backward jitter at a stop.
+    // Render the SNAPPED GPS point itself (cosmetic lane-alignment onto the
+    // route), NOT a route-vertex "progress" point.
     //
-    // History / why this block was removed: there used to be a drop-only
-    // "forward route-walker" early-return here that rendered a SYNTHETIC point
-    // `_pointAtRouteProgress(_markerRouteProgress)` — a position that only moved
-    // when the snapped floor index strictly increased. On curves / when the
-    // driver was laterally offset, the snap landed "behind" the floor, the floor
-    // did not advance, and the marker FROZE in place while the real driver drove
-    // on; when the floor finally jumped, the marker LEAPT to catch up. That
-    // freeze-then-leap was the production "car stuck moving front-and-back while
-    // the driver already crossed the road" on the drop leg. It also shadowed the
-    // `rawAdvancingToDest` anti-freeze logic right below (early-returned before
-    // it could run). Pickup never had this block — it renders the real snapped
-    // position — which is why pickup was always smooth. Deleting the block makes
-    // drop identical to pickup (the forward-only floor below still guards genuine
-    // backward jitter; the wider drop tolerance + reroute behaviour are kept).
-
-    // Is the RAW fix genuinely advancing toward the destination? A snapped index
-    // BEHIND progress while the raw GPS still moved meaningfully CLOSER to the
-    // drop point is a snap MISLOCK (parallel road / curve / wide drop tolerance),
-    // NOT a reverse — the driver is moving forward. This is the "freezes then
-    // jumps THROUGHOUT the drop": the guard kept holding a moving car because the
-    // snap landed behind, then released into a jump. When the raw fix clearly
-    // advances toward the destination we must NOT hold; show the real forward GPS
-    // and keep the monotonic floor (never step the index back). Only true
-    // stationary jitter (raw not advancing) is held below.
-    final LatLng destPoint = routeForSnap[routeForSnap.length - 1];
-    final double rawToDest = Geolocator.distanceBetween(
-      raw.latitude,
-      raw.longitude,
-      destPoint.latitude,
-      destPoint.longitude,
-    );
-    final double markerToDest = _vehiclePos == null
-        ? double.infinity
-        : Geolocator.distanceBetween(
-            _vehiclePos!.latitude,
-            _vehiclePos!.longitude,
-            destPoint.latitude,
-            destPoint.longitude,
-          );
-    // > 4m of straight-line gain toward the destination in one fix = real travel
-    // (a stationary driver's GPS scatter does not consistently close on the dest).
-    final bool rawAdvancingToDest =
-        _vehiclePos != null && (markerToDest - rawToDest) > 4.0;
-
-    if (wouldRegress && rawAdvancingToDest) {
-      // Forward driving but the snap mislocked BEHIND (curve / parallel road /
-      // wide drop tolerance). Following raw GPS here was the drop-leg
-      // "front and back" — raw jitter wobbles the marker. Instead keep it glued
-      // to the route at its furthest-forward point (forward-only, on-route) with
-      // the route-tangent heading. It resumes advancing the instant the snap
-      // passes the mislock — so the car only ever moves forward, never back.
-      _holdStartedAt = null;
-      _consecutiveSnapMisses = 0;
-      final forwardPoint = _pointAtRouteProgress(
-        routeForSnap,
-        _markerRouteProgress,
-      );
-      return _SnappedPose(position: forwardPoint, bearing: routeBearing);
+    // The driver feed arrives clean and monotonically forward (see [LIVETRACK]
+    // recv: every step is a sane forward move), so projecting it onto the route
+    // (`nearest.point`) follows the driver smoothly and keeps the car ON the line.
+    // The previous approach rendered `_pointAtRouteProgress(forwardOnlyFloor)` —
+    // a point on the COARSE / periodically-refetched route polyline indexed by a
+    // monotonic counter. That counter↔vertex mapping jumped the target around
+    // (and the motion engine animated the jumps), producing the 20-120m
+    // back-and-forth seen in [LIVETRACK] draw (moveM=121 backward). Rendering the
+    // real snapped fix removes that coupling entirely.
+    final double candProgress = nearest.segmentIndex + nearest.t;
+    if (candProgress > _markerRouteProgress) {
+      _markerRouteProgress = candProgress; // tracked for route trimming only
     }
-
-    if (wouldRegress && rawMoveFromCurrent < _kRealReverseMeters) {
-      // Backward jitter: hold the marker — but only for a BOUNDED window. Past
-      // _kMaxMarkerHold we stop holding and fall through to accept the fix so the
-      // car resumes following real GPS (smooth catch-up) instead of freezing
-      // until a >=25m reverse jumps it back.
-      _holdStartedAt ??= now;
-      final heldFor = now.difference(_holdStartedAt!);
-      if (heldFor < _kMaxMarkerHold) {
-        // Throttled to ~1/s so it shows in release logs without flooding.
-        if (_lastHoldLogAt == null ||
-            now.difference(_lastHoldLogAt!) >= const Duration(seconds: 1)) {
-          _lastHoldLogAt = now;
-          AppLogger.log.w(
-            '[track-jerk] marker hold (backward jitter) '
-            'mode=${widget.mode} heldMs=${heldFor.inMilliseconds} '
-            'candIdx=${candProgress.toStringAsFixed(1)} '
-            'markerIdx=${_markerRouteProgress.toStringAsFixed(1)} '
-            'rawMove=${rawMoveFromCurrent.toStringAsFixed(1)}',
-          );
-        }
-        return _SnappedPose(
-          position: _vehiclePos ?? raw,
-          bearing: _vehicleBearing,
-        );
-      }
-      // Held too long — release and re-baseline below so the marker catches up
-      // smoothly rather than waiting for (and then snapping on) a real reverse.
-      AppLogger.log.w(
-        '[track-jerk] marker hold RELEASED after ${heldFor.inMilliseconds}ms '
-        '(catch-up) mode=${widget.mode}',
-      );
-    }
-    // Accept: a forward fix advances the floor; a genuine reverse (or a released
-    // hold) lowers it. The marker is moving again, so clear the hold timer.
-    _holdStartedAt = null;
-    _markerRouteProgress =
-        wouldRegress
-            ? candProgress
-            : (candProgress > _markerRouteProgress
-                ? candProgress
-                : _markerRouteProgress);
-
     _consecutiveSnapMisses = 0;
 
     // Snap the heading toward the route tangent quickly so the vehicle points
@@ -1236,35 +1161,30 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       alpha: 0.5,
     );
 
-    final resolved = _resolveDisplayPosition(
-      raw: raw,
-      snapped: nearest.point,
-      maxSnapMeters: effectiveTol,
-    );
+    final resolved = nearest.point;
 
-    // DIAGNOSTIC (drop leg only, throttled ~1/s): trace what the marker is
-    // actually told to render so a socket+app log shows freeze vs follow vs
-    // jump without guessing. `rawToSnap` = how far the rendered point sits from
-    // the real GPS; `move` = how far the rendered point moved this fix.
-    if (widget.mode == RideMapMode.toDrop) {
-      if (_lastDropRenderLogAt == null ||
-          now.difference(_lastDropRenderLogAt!) >= const Duration(seconds: 1)) {
-        _lastDropRenderLogAt = now;
-        final rawToSnap = Geolocator.distanceBetween(
-          raw.latitude,
-          raw.longitude,
-          resolved.latitude,
-          resolved.longitude,
-        );
-        AppLogger.log.w(
-          '[drop-render] follow snapDist=${nearest.distanceMeters.toStringAsFixed(1)} '
-          'rawToRendered=${rawToSnap.toStringAsFixed(1)} '
-          'rendMove=${snappedMoveFromCurrent.toStringAsFixed(1)} '
-          'rawMove=${rawMoveFromCurrent.toStringAsFixed(1)} '
-          'cand=${candProgress.toStringAsFixed(1)} '
-          'floor=${_markerRouteProgress.toStringAsFixed(1)} tol=${effectiveTol.toStringAsFixed(0)}',
-        );
-      }
+    // [LIVETRACK] snap trace (both legs, throttled ~1/s). Shows how the raw GPS
+    // was projected onto the route: `snapDist` = raw distance to the route,
+    // `rawToRendered` = how far the rendered point is from raw, `cand` vs `floor`
+    // = candidate vs forward-only progress (if cand<floor the raw projection
+    // regressed and was clamped — the back-jitter source). grep LIVETRACK.
+    if (kDebugMode &&
+        (_lastDropRenderLogAt == null ||
+            now.difference(_lastDropRenderLogAt!) >= const Duration(seconds: 1))) {
+      _lastDropRenderLogAt = now;
+      final rawToSnap = Geolocator.distanceBetween(
+        raw.latitude,
+        raw.longitude,
+        resolved.latitude,
+        resolved.longitude,
+      );
+      AppLogger.log.w(
+        '[LIVETRACK] snap mode=${widget.mode == RideMapMode.toDrop ? "drop" : "pickup"} '
+        'snapDist=${nearest.distanceMeters.toStringAsFixed(1)} '
+        'rawToRendered=${rawToSnap.toStringAsFixed(1)} '
+        'cand=${candProgress.toStringAsFixed(1)} '
+        'floor=${_markerRouteProgress.toStringAsFixed(1)} tol=${effectiveTol.toStringAsFixed(0)}',
+      );
     }
 
     return _SnappedPose(position: resolved, bearing: smooth);
@@ -1287,50 +1207,6 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     if (distanceMeters <= MapUiConfig.snapToRouteToleranceMeters + 60.0) return;
     _routeSnapSuspendedUntil = DateTime.now().add(const Duration(seconds: 3));
     _consecutiveSnapMisses = 0;
-  }
-
-  LatLng _resolveDisplayPosition({
-    required LatLng raw,
-    required LatLng snapped,
-    required double maxSnapMeters,
-  }) {
-    final currentDisplay = _vehiclePos;
-    if (currentDisplay == null) return snapped;
-
-    final rawMove = Geolocator.distanceBetween(
-      currentDisplay.latitude,
-      currentDisplay.longitude,
-      raw.latitude,
-      raw.longitude,
-    );
-    final snappedMove = Geolocator.distanceBetween(
-      currentDisplay.latitude,
-      currentDisplay.longitude,
-      snapped.latitude,
-      snapped.longitude,
-    );
-    final rawToSnap = Geolocator.distanceBetween(
-      raw.latitude,
-      raw.longitude,
-      snapped.latitude,
-      snapped.longitude,
-    );
-
-    final likelySnapFreeze =
-        rawMove >= 2.4 &&
-        snappedMove < 0.9 &&
-        rawToSnap <= maxSnapMeters &&
-        rawToSnap >= 1.2;
-
-    if (!likelySnapFreeze) {
-      return snapped;
-    }
-
-    final alpha = rawToSnap <= 6.0 ? 0.35 : 0.55;
-    return LatLng(
-      snapped.latitude + (raw.latitude - snapped.latitude) * alpha,
-      snapped.longitude + (raw.longitude - snapped.longitude) * alpha,
-    );
   }
 
   NearestPointOnPolylineResult? _nearestSnapCandidate(
@@ -1471,9 +1347,11 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     }
     _lastCameraAt = DateTime.now();
 
+    // Steady focus on the driver at a fixed zoom — no adaptive zoom churn. The
+    // rider reframes the whole route only via the fit button.
     final z =
         widget.mode != RideMapMode.idle
-            ? _adaptiveFollowZoom(vehiclePos)
+            ? 16.0
             : CameraUtils.clampZoom(
               _currentZoom,
               min: MapUiConfig.followMinZoom,
@@ -1499,11 +1377,12 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
   Future<void> recenter() async {
     final pos = _vehiclePos ?? widget.driverLocation;
     if (_mapController == null || pos == null) return;
+    // Resume following the driver (cancels a paused/full-route state).
     _pauseFollowUntil = DateTime.fromMillisecondsSinceEpoch(0);
-    // Ensure recenter always feels like a "focus" action (not stuck zoomed out).
+    // Focus the driver at a fixed zoom 16 (not a tight "full zoom").
     final z =
         widget.mode != RideMapMode.idle
-            ? _adaptiveFollowZoom(pos, recenter: true)
+            ? 16.0
             : CameraUtils.clampZoom(
               _currentZoom,
               min: MapUiConfig.followMinZoom,
@@ -1522,6 +1401,9 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
 
   Future<void> fitRoute({double padding = 80}) async {
     if (_mapController == null) return;
+    // Manual "full route" view: pause driver-follow until the user recenters, so
+    // the next location packet can't snap the camera back off the full route.
+    _pauseFollowUntil = DateTime.now().add(const Duration(hours: 24));
     try {
       final activeTarget =
           widget.mode == RideMapMode.toDrop ? widget.drop : widget.pickup;
@@ -1533,8 +1415,14 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
         await recenter();
         return;
       }
+      // Drop leg frames the remaining route (vehicle -> drop) so it tightens on
+      // approach; pickup keeps the full-route fit. See _maybeFitBounds.
+      final routeForFit =
+          (widget.mode == RideMapMode.toDrop && _remainingRoute.length >= 2)
+              ? _remainingRoute
+              : _fullRoute;
       final fitPoints =
-          _fullRoute.length >= 2 ? <LatLng>[..._fullRoute, ...extras] : extras;
+          routeForFit.length >= 2 ? <LatLng>[...routeForFit, ...extras] : extras;
       await _animateBoundsSafe(focusPoints: fitPoints);
     } catch (_) {}
   }
@@ -1596,16 +1484,9 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
             },
           ),
         ),
-        Positioned(
-          top: 102,
-          right: 16,
-          child: MapEtaDistanceCard(
-            etaText: widget.etaText,
-            distanceText: widget.distanceText,
-            statusText: widget.statusText,
-            iconOnlyCollapsed: true,
-          ),
-        ),
+        // (Removed) on-map ETA "clock" card + lat/lng debug readout — the ETA is
+        // already shown in the bottom-sheet status card, and the coordinate pill
+        // was debug-only clutter.
 
         // Ride-complete celebration: confetti burst + "Trip done" banner.
         // Only repaints while the controller animates (cheap, isolated).

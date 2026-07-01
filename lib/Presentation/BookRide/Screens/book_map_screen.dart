@@ -4,6 +4,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:hopper/uitls/transitions/route_transitions.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import 'package:hopper/Presentation/OnBoarding/Controller/home_map_controller.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 
@@ -239,6 +240,17 @@ class _BookMapScreenState extends State<BookMapScreen>
                     background: Stack(
                       children: [
                         Obx(() {
+                          // Reuse Home's LIVE nearby-driver markers (no duplicate
+                          // socket listener — HomeMapController owns the stream).
+                          // Reading markersRevision makes this Obx rebuild as cars move.
+                          final homeC = Get.isRegistered<HomeMapController>()
+                              ? Get.find<HomeMapController>()
+                              : null;
+                          homeC?.markersRevision.value;
+                          final mergedMarkers = <Marker>{
+                            ...mapC.markers,
+                            if (homeC != null) ...homeC.markers,
+                          };
                           return GoogleMap(
                             compassEnabled: false,
                             myLocationEnabled: true,
@@ -262,7 +274,7 @@ class _BookMapScreenState extends State<BookMapScreen>
                             onTap: (_) => mapC.onUserMapGesture(),
 
                             polylines: mapC.polylines.toSet(),
-                            markers: mapC.markers.toSet(),
+                            markers: mergedMarkers,
                             circles: mapC.circles.toSet(),
 
                             gestureRecognizers: {

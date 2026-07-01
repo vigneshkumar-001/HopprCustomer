@@ -10,7 +10,6 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/uitls/map/compact_marker_icons.dart';
-import 'package:hopper/uitls/map/drop_pulse.dart';
 import 'package:hopper/uitls/map/driver_motion_engine.dart';
 import 'package:hopper/uitls/map/map_ui_defaults.dart';
 
@@ -72,15 +71,6 @@ class RideTrackingMapState extends State<RideTrackingMap>
 
   Set<Marker> _markers = const <Marker>{};
   Set<Polyline> _polylines = const <Polyline>{};
-  Set<Circle> _circles = const <Circle>{};
-
-  // Pulsing ripple under the drop/destination pin.
-  late final DropPulse _dropPulse = DropPulse(
-    onUpdate: (circles) {
-      _circles = circles;
-      if (mounted) setState(() {});
-    },
-  );
 
   List<LatLng> _fullRoute = const <LatLng>[];
   List<LatLng> _remainingRoute = const <LatLng>[];
@@ -160,14 +150,11 @@ class RideTrackingMapState extends State<RideTrackingMap>
     final initPos = widget.currentLocation ?? widget.pickupLocation;
     _motion.reset(initPos, bearing: 0.0);
     _displayVehiclePos = initPos;
-
-    _dropPulse.start(widget.destinationLocation);
   }
 
   @override
   void dispose() {
     _driverMarkerFlushTimer?.cancel();
-    _dropPulse.dispose();
     _motion.dispose();
     super.dispose();
   }
@@ -188,7 +175,6 @@ class RideTrackingMapState extends State<RideTrackingMap>
         oldWidget.destinationLocation != widget.destinationLocation) {
       _syncStaticMarkers(force: true);
       _syncRouteFromWidget(force: false);
-      _dropPulse.moveTo(widget.destinationLocation);
     }
 
     if (widget.currentLocation != null &&
@@ -227,16 +213,9 @@ class RideTrackingMapState extends State<RideTrackingMap>
     }
 
     try {
-      // Labeled pin (white bubble + black pin) so pickup is clearly marked.
-      _pickupIcon = await CompactMarkerIcons.labeledPin(
-        label: 'Pickup',
-        assetPath: AppImages.pin,
-        tint: const Color(0xFF000000),
-        bubbleWidthDp: 92,
-        bubbleHeightDp: 38,
-        pinWidthDp: MapUiDefaults.pickupDropPinWidthDp,
-        fontSizeDp: 12,
-        textAlign: TextAlign.center,
+      _pickupIcon = await CompactMarkerIcons.assetPin(
+        assetPath: AppImages.pinLocation,
+        widthDp: MapUiDefaults.pickupDropPinWidthDp,
         dpr: dpr,
       );
     } catch (_) {
@@ -246,21 +225,14 @@ class RideTrackingMapState extends State<RideTrackingMap>
     }
 
     try {
-      // Labeled pin (white bubble + green pin) so drop is clearly marked.
-      _dropIcon = await CompactMarkerIcons.labeledPin(
-        label: 'Drop',
-        assetPath: AppImages.pin,
-        tint: const Color(0xFF15803D),
-        bubbleWidthDp: 92,
-        bubbleHeightDp: 38,
-        pinWidthDp: MapUiDefaults.pickupDropPinWidthDp,
-        fontSizeDp: 12,
-        textAlign: TextAlign.center,
+      _dropIcon = await CompactMarkerIcons.assetPin(
+        assetPath: AppImages.rectangleDest,
+        widthDp: MapUiDefaults.pickupDropPinWidthDp,
         dpr: dpr,
       );
     } catch (_) {
       _dropIcon = BitmapDescriptor.defaultMarkerWithHue(
-        MapUiDefaults.pickupDropMarkerHueGreen,
+        MapUiDefaults.pickupDropMarkerHueRed,
       );
     }
 
@@ -539,7 +511,6 @@ class RideTrackingMapState extends State<RideTrackingMap>
         ),
         markers: _markers,
         polylines: _polylines,
-        circles: _circles,
         minMaxZoomPreference: const MinMaxZoomPreference(
           MapUiDefaults.minZoom,
           MapUiDefaults.maxZoom,

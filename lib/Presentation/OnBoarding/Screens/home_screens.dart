@@ -5,6 +5,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
+import 'package:hopper/Presentation/Drawer/screens/favourites_screen.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import 'package:hopper/Core/Consents/app_colors.dart';
@@ -776,6 +777,15 @@ class _HomeScreensState extends State<HomeScreens>
         () => SharedScreens(
           pickupAddress: ride.pickupAddress,
           destinationAddress: ride.dropAddress,
+          // Carry the fare breakdown into the resumed shared ride. Without these
+          // the Fare Breakdown card rendered all 0.0 on resume (the normal
+          // confirm flow passes them, the resume path previously did not).
+          baseFare: ride.baseFare,
+          serviceFare: ride.serviceFare,
+          distanceFare: ride.distanceFare,
+          pickupFare: ride.pickupFare,
+          bookingFee: ride.bookingFee,
+          timeFare: ride.timeFare,
           initialPosition:
               ride.driverLocation != null
                   ? LatLng(
@@ -1194,10 +1204,15 @@ class _HomeScreensState extends State<HomeScreens>
                                   ),
                                 ),
                                 const SizedBox(width: 8),
-                                const Icon(
-                                  Icons.favorite_border,
-                                  size: 20,
-                                  color: Color(0xFFE53935),
+                                GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onTap: () =>
+                                      Get.to(() => const FavouritesScreen()),
+                                  child: const Icon(
+                                    Icons.favorite_border,
+                                    size: 20,
+                                    color: Color(0xFFE53935),
+                                  ),
                                 ),
                               ],
                             ),
@@ -1628,7 +1643,7 @@ class _HomeBottomSheet extends StatelessWidget {
 
                               // Professional combined list: most-recent first
                               // then nearby popular destinations, deduped,
-                              // capped at 2.
+                              // capped at 4.
                               final items = <Map<String, dynamic>>[];
                               final seen = <String>{};
 
@@ -1638,7 +1653,7 @@ class _HomeBottomSheet extends StatelessWidget {
                                 required double lng,
                                 required String category,
                               }) {
-                                if (items.length >= 2) return;
+                                if (items.length >= 4) return;
                                 final key = title.trim().toLowerCase();
                                 if (key.isEmpty || seen.contains(key)) return;
                                 seen.add(key);
@@ -1650,7 +1665,7 @@ class _HomeBottomSheet extends StatelessWidget {
                                 });
                               }
 
-                              for (final r in recents.take(2)) {
+                              for (final r in recents.take(4)) {
                                 add(
                                   title: r.description,
                                   lat: r.lat,

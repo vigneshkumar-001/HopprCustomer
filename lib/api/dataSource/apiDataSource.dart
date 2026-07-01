@@ -222,6 +222,40 @@ class ApiDataSource extends BaseApiDataSource {
     }
   }
 
+  /// Customer-initiated resend of the start-trip OTP (Ride/Parcel).
+  /// Returns the response body on success (carries `message`, `nextResendInSec`,
+  /// `attemptsLeft`); a Left with the server message otherwise (cooldown/limit).
+  Future<Either<Failure, Map<String, dynamic>>> resendRideOtp(
+    String bookingId,
+  ) async {
+    try {
+      final response = await Request.sendRequest(
+        ApiConsents.resendRideOtp,
+        {'bookingId': bookingId},
+        'POST',
+        true,
+      );
+      final data = (response is Response && response.data is Map)
+          ? Map<String, dynamic>.from(response.data as Map)
+          : <String, dynamic>{};
+      if (response is Response && (response.statusCode ?? 0) == 200) {
+        return Right(data);
+      }
+      return Left(
+        ServerFailure((data['message'] ?? 'Could not resend OTP').toString()),
+      );
+    } on DioException catch (e) {
+      final d = e.response?.data;
+      final msg = (d is Map && d['message'] != null)
+          ? d['message'].toString()
+          : 'Could not resend OTP';
+      return Left(ServerFailure(msg));
+    } catch (e) {
+      AppLogger.log.e(e);
+      return Left(ServerFailure('Something went wrong'));
+    }
+  }
+
   Future<Either<Failure, ActiveBookingResponse>> getActiveBooking() async {
     try {
       final url = ApiConsents.activeBooking;
@@ -1166,6 +1200,45 @@ class ApiDataSource extends BaseApiDataSource {
     }
   }
 
+  /// Emails the ride invoice/receipt to the customer's registered email.
+  /// Returns the success message on success, a Failure with the server message
+  /// otherwise. Works for both single and shared rides.
+  Future<Either<Failure, String>> sendRideReceipt({
+    required String bookingId,
+  }) async {
+    try {
+      final id = bookingId.trim();
+      if (id.isEmpty) {
+        return Left(ServerFailure('Booking id missing'));
+      }
+      final url = ApiConsents.sendRideReceipt(id);
+      AppLogger.log.i(url);
+
+      final response = await Request.sendRequest(url, {}, 'POST', true);
+
+      if (response is Response &&
+          response.statusCode == 200 &&
+          response.data is Map &&
+          (response.data['success'] == true ||
+              response.data['success']?.toString() == 'true')) {
+        return Right(
+          response.data['message']?.toString() ?? 'Invoice sent successfully',
+        );
+      }
+      if (response is Response && response.data is Map) {
+        return Left(
+          ServerFailure(
+            response.data['message']?.toString() ?? 'Could not send invoice',
+          ),
+        );
+      }
+      return Left(ServerFailure('Could not send invoice'));
+    } catch (e) {
+      AppLogger.log.e(e);
+      return Left(ServerFailure('Could not send invoice'));
+    }
+  }
+
   Future<Either<Failure, ChatHistoryResponse>> chatHistory({
     required String bookingId,
     required String pickupLatitude,
@@ -1231,9 +1304,18 @@ class ApiDataSource extends BaseApiDataSource {
         {"bookingId": bookingId, "imageUrl": imageUrl},
         'POST',
         false,
+        // Booking-image confirmation does heavier server-side work (face
+        // verification), so the default 15s receiveTimeout was too short and the
+        // upload failed with a [receive timeout]. Give it room to finish.
+        receiveTimeout: const Duration(seconds: 60),
+        sendTimeout: const Duration(seconds: 60),
       );
 
-      if (response.statusCode == 200) {
+      // `sendRequest` returns a `Response` on success OR the caught
+      // `DioException` on a timeout/error. Guard `is Response` BEFORE reading
+      // `.statusCode` — calling `.statusCode` on a DioException throws
+      // NoSuchMethodError and masked the real timeout as "Something went wrong".
+      if (response is Response && response.statusCode == 200) {
         final data = response.data as Map<String, dynamic>;
         final rawSuccess = data['success'] ?? data['status'];
         final success =
@@ -1247,8 +1329,22 @@ class ApiDataSource extends BaseApiDataSource {
           );
         }
       } else if (response is Response) {
+        final data = response.data;
+        final msg = (data is Map && data['message'] != null)
+            ? data['message'].toString()
+            : "Unexpected error";
+        return Left(ServerFailure(msg));
+      } else if (response is DioException) {
+        final isTimeout =
+            response.type == DioExceptionType.receiveTimeout ||
+            response.type == DioExceptionType.sendTimeout ||
+            response.type == DioExceptionType.connectionTimeout;
         return Left(
-          ServerFailure(response.data['message'] ?? "Unexpected error"),
+          ServerFailure(
+            isTimeout
+                ? "Upload timed out. Please check your connection and try again."
+                : (response.message ?? "Network error"),
+          ),
         );
       } else {
         return Left(ServerFailure("Unknown error occurred"));

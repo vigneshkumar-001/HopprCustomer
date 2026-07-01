@@ -1,6 +1,7 @@
 import 'package:hopper/Core/Utility/app_toasts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:async';
+import 'package:hopper/api/dataSource/apiDataSource.dart';
 import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -110,6 +111,12 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   String _estimateStt1 = '';
   String _estimateStt2 = '';
   String otp = '';
+  // Customer "Didn't get it? / Resend" support (Package). Client cooldown + busy
+  // flag mirror the server's 30s / 5-attempt policy.
+  final ApiDataSource _otpApi = ApiDataSource();
+  bool _otpResending = false;
+  int _otpResendCooldown = 0;
+  Timer? _otpCooldownTimer;
   LatLng? _currentDriverLatLng;
   // Raw (un-smoothed) driver location fed to CustomerRideMapView, which owns
   // all marker animation / snap / trim / camera follow. The package screen no
@@ -929,6 +936,29 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                   'Share this OTP when the driver reaches pickup.',
                   style: TextStyle(color: Colors.white70, fontSize: 11),
                 ),
+                const SizedBox(height: 6),
+                InkWell(
+                  onTap: (_otpResending || _otpResendCooldown > 0)
+                      ? null
+                      : _resendRideOtp,
+                  child: Text(
+                    _otpResendCooldown > 0
+                        ? 'Resend OTP in ${_otpResendCooldown}s'
+                        : (_otpResending
+                            ? 'Resending…'
+                            : "Didn't get it? Resend OTP"),
+                    style: TextStyle(
+                      color: (_otpResending || _otpResendCooldown > 0)
+                          ? Colors.white54
+                          : Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      decoration: (_otpResending || _otpResendCooldown > 0)
+                          ? TextDecoration.none
+                          : TextDecoration.underline,
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
@@ -1330,6 +1360,10 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
       // Ensure we are in booking room so server pushes joined-booking + updates
       socketService.joinBookingRoom(bookingId: widget.bookingId);
+
+      // Fallback source of truth: seed the PIN from the active-booking record in
+      // case the live `otp-generated` socket event was missed.
+      unawaited(_seedOtpFromActiveBooking());
     } catch (_) {}
   }
 
@@ -2647,8 +2681,66 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
   // (Driver motion is handled by DriverMotionEngine.)
 
+  /// Seed the start-trip OTP from the persistent active-booking record (HTTP)
+  /// so a missed `otp-generated` socket event never leaves the customer without
+  /// the PIN. Only fills when we don't already have one.
+  Future<void> _seedOtpFromActiveBooking() async {
+    try {
+      final res = await _otpApi.getActiveBooking();
+      res.fold((_) {}, (active) {
+        final code = (active.data?.otpCode ?? '').toString().trim();
+        final verified = active.data?.otpVerified == true;
+        if (code.isNotEmpty && !verified && otp.isEmpty && mounted) {
+          setState(() => otp = code);
+        }
+      });
+    } catch (_) {}
+  }
+
+  /// Customer-initiated "Didn't get it? / Resend" for the package OTP.
+  Future<void> _resendRideOtp() async {
+    if (_otpResending || _otpResendCooldown > 0) return;
+    final id = widget.bookingId.trim();
+    if (id.isEmpty) return;
+    setState(() => _otpResending = true);
+    _startOtpCooldown(30); // immediate client cooldown; server is source of truth
+    try {
+      final res = await _otpApi.resendRideOtp(id);
+      if (!mounted) return;
+      res.fold(
+        (fail) => AppToasts.showError(context, fail.message),
+        (data) => AppToasts.showSuccess(
+          context,
+          (data['message'] ?? 'OTP resent to your device').toString(),
+        ),
+      );
+    } catch (_) {
+      // network error — client cooldown already running; user can retry after it
+    } finally {
+      if (mounted) setState(() => _otpResending = false);
+    }
+  }
+
+  void _startOtpCooldown(int seconds) {
+    _otpCooldownTimer?.cancel();
+    if (mounted) setState(() => _otpResendCooldown = seconds);
+    _otpCooldownTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) {
+        t.cancel();
+        return;
+      }
+      if (_otpResendCooldown <= 1) {
+        setState(() => _otpResendCooldown = 0);
+        t.cancel();
+      } else {
+        setState(() => _otpResendCooldown -= 1);
+      }
+    });
+  }
+
   @override
   void dispose() {
+    _otpCooldownTimer?.cancel();
     try {
       socketService.off('booking-update');
       socketService.off('joined-booking');

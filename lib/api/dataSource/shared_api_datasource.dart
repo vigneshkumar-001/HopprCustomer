@@ -4,6 +4,7 @@ import 'package:hopper/Presentation/BookRide/Models/driver_search_models.dart';
 import 'package:hopper/Presentation/BookRide/Models/send_driver_request_models.dart';
 import 'package:hopper/Presentation/BookRide/Models/shared_create_booking_response.dart';
 import 'package:hopper/Presentation/BookRide/Models/shared_driver_search_response.dart';
+import 'package:hopper/Presentation/BookRide/Models/shared_my_state.dart';
 import 'package:hopper/api/repository/api_consents.dart';
 import 'package:hopper/api/repository/failure.dart';
 import 'package:dartz/dartz.dart';
@@ -11,6 +12,49 @@ import 'package:dio/dio.dart';
 import 'package:hopper/api/repository/request.dart';
 
 class SharedApiDatasource {
+  /// Phase B recovery: fetch this customer's privacy-safe shared-ride state.
+  /// Returns null on any failure (the socket `shared_my_state` is the primary feed).
+  Future<SharedMyState?> getMySharedState(String bookingId) async {
+    try {
+      final url = ApiConsents.sharedMyState(bookingId);
+      final dynamic response = await Request.sendGetRequest(url, {}, 'Get', true);
+      if (response is Response && response.statusCode == 200) {
+        final data = response.data;
+        if (data is Map && data['success'] == true && data['data'] is Map) {
+          return SharedMyState.fromJson(Map<String, dynamic>.from(data['data']));
+        }
+      }
+    } catch (e) {
+      AppLogger.log.e('getMySharedState error: $e');
+    }
+    return null;
+  }
+
+  /// Save (or clear, when [instruction] is empty) the customer's pickup
+  /// instruction. Backend is the source of truth + notifies the driver live.
+  /// Returns true only on a confirmed 200 success.
+  Future<bool> updatePickupInstruction({
+    required String bookingId,
+    required String instruction,
+  }) async {
+    try {
+      final url = ApiConsents.updatePickupInstruction(bookingId);
+      final response = await Request.sendRequest(
+        url,
+        {'pickupInstruction': instruction},
+        'POST',
+        false,
+      );
+      if (response is Response && response.statusCode == 200) {
+        final data = response.data;
+        if (data is Map && data['success'] == true) return true;
+      }
+    } catch (e) {
+      AppLogger.log.e('updatePickupInstruction error: $e');
+    }
+    return false;
+  }
+
   Future<Either<Failure, SharedDriverSearchResponse>> driverSearchShared({
     required double pickupLat,
     required double pickupLng,

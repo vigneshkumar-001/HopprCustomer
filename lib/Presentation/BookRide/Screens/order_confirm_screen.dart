@@ -7,6 +7,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Core/Utility/phone_launcher.dart';
 import 'package:hopper/Presentation/BookRide/Controllers/order_confrim_controller.dart';
+import 'package:hopper/Presentation/OnBoarding/Controller/home_map_controller.dart';
 import 'package:hopper/uitls/map/customer/customer_ride_map_view.dart';
 import 'package:hopper/uitls/map/customer/marker_icon_cache.dart' as icon_cache;
 import 'package:share_plus/share_plus.dart';
@@ -122,8 +123,16 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
     _destController.text = widget.destinationAddress;
 
     c = Get.put(OrderConfirmController(), tag: widget.bookingId);
-    // Map UI/camera is owned by RideTrackingMap for consistent behavior.
+    // Map UI/camera is owned by CustomerRideMapView for consistent behavior.
     c.externalCameraControl = true;
+
+    // Home map stays mounted UNDER this tracking screen (routes are pushed, not
+    // replaced). Pause its GPS stream + nearby-driver animations so they don't
+    // contend for CPU/battery on the device rendering the live driver marker.
+    // Reversed in dispose(). Guarded so it's a no-op if home isn't registered.
+    if (Get.isRegistered<HomeMapController>()) {
+      Get.find<HomeMapController>().pauseForActiveTrip();
+    }
 
     final pickupLat =
         _toDouble(widget.pickupData['lat']) ??
@@ -349,6 +358,11 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
     _waitTimer?.cancel();
     _setKeepScreenOn(false);
     WidgetsBinding.instance.removeObserver(this);
+    // Re-arm the home map's GPS stream + nearby animations now that tracking
+    // is leaving the foreground.
+    if (Get.isRegistered<HomeMapController>()) {
+      Get.find<HomeMapController>().resumeFromActiveTrip();
+    }
     Get.delete<OrderConfirmController>(tag: widget.bookingId, force: true);
     super.dispose();
   }
@@ -383,7 +397,7 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
       builder:
-          (_) => _SafetySheet(
+          (_) => SafetySheet(
             trackUrl: _trackUrl,
             driverName: c.driverName.value,
           ),
@@ -441,6 +455,7 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                               ? icon_cache.VehicleType.bike
                               : icon_cache.VehicleType.car,
                       driverLocation: c.driverLocation.value,
+                      driverLocationTs: c.driverLocationServerTs.value,
                       // Ensure Obx rebuilds when route points mutate.
                       routePoints: c.activeRoutePoints.toList(growable: false),
                       pickup: c.customerLatLng ?? _pickupLatLng,
@@ -561,20 +576,34 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
               ),
 
               // Bottom sheet
-              Obx(
-                () => DraggableScrollableSheet(
-                  key: ValueKey(
-                    '${c.isDriverConfirmed.value}-${c.isWaitingForDriver.value}-${c.noDriverFound.value}',
-                  ),
-                  initialChildSize: c.isDriverConfirmed.value ? 0.65 : 0.5,
-                  minChildSize: 0.4,
-                  maxChildSize: c.isDriverConfirmed.value ? 0.9 : 0.80,
-                  builder: (context, scrollController) {
+              DraggableScrollableSheet(
+                // No `key` → the sheet is NEVER recreated on phase change (no
+                // rebuild / no "new screen" flash). The inner AnimatedSwitcher
+                // morphs the content; the map underneath stays alive. One size
+                // config for every phase — this sheet has no controller, so
+                // dropping the key is fully safe (never a double-attach risk).
+                initialChildSize: 0.5,
+                minChildSize: 0.4,
+                maxChildSize: 0.9,
+                builder: (context, scrollController) {
                     return Obx(() {
                       final sheetStateKey =
                           '${c.isDriverConfirmed.value}-${c.isWaitingForDriver.value}-${c.noDriverFound.value}-${c.isTripCancelled.value}';
                       return AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 220),
+                        duration: const Duration(milliseconds: 280),
+                        switchInCurve: Curves.easeOut,
+                        switchOutCurve: Curves.easeIn,
+                        // Clean cross-fade (no default scale/zoom) so phases morph
+                        // smoothly — matches the shared-ride sheet.
+                        transitionBuilder: (child, anim) =>
+                            FadeTransition(opacity: anim, child: child),
+                        layoutBuilder: (currentChild, previousChildren) => Stack(
+                          alignment: Alignment.topCenter,
+                          children: [
+                            ...previousChildren,
+                            if (currentChild != null) currentChild,
+                          ],
+                        ),
                         child: Container(
                           key: ValueKey(sheetStateKey),
                           padding: const EdgeInsets.symmetric(horizontal: 5),
@@ -621,7 +650,6 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                     });
                   },
                 ),
-              ),
             ],
           ),
         ),
@@ -939,28 +967,66 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
     }
 
     return Obx(() {
+      final reason = c.cancelReason.value.trim();
       return Container(
-        padding: const EdgeInsets.all(10),
-        margin: const EdgeInsets.all(8),
-        decoration: BoxDecoration(
-          color: Colors.red.shade50,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Colors.red.shade200),
-        ),
-        child: Row(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 36),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(Icons.cancel, color: Colors.red),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                c.cancelReason.value.isEmpty
-                    ? "Your trip has been cancelled"
-                    : c.cancelReason.value,
-                style: const TextStyle(
-                  color: Colors.red,
-                  fontWeight: FontWeight.bold,
-                ),
+            Container(
+              width: 84,
+              height: 84,
+              decoration: BoxDecoration(
+                color: Colors.red.shade50,
+                shape: BoxShape.circle,
               ),
+              child: Icon(
+                Icons.cancel_rounded,
+                color: Colors.red.shade400,
+                size: 48,
+              ),
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              'Ride cancelled',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.w700,
+                color: AppColors.commonBlack,
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              reason.isEmpty
+                  ? "Your driver had to cancel this ride. You haven't been charged for the trip."
+                  : reason,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 14,
+                height: 1.4,
+                color: Colors.grey.shade700,
+              ),
+            ),
+            const SizedBox(height: 28),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.grey.shade500,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Text(
+                  'Taking you back home…',
+                  style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
+                ),
+              ],
             ),
           ],
         ),
@@ -1200,6 +1266,28 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                   'Share this OTP when the driver reaches pickup.',
                   style: TextStyle(color: Colors.white70, fontSize: 11),
                 ),
+                const SizedBox(height: 6),
+                Obx(() {
+                  final cd = c.otpResendCooldown.value;
+                  final busy = c.otpResending.value;
+                  final disabled = busy || cd > 0;
+                  return InkWell(
+                    onTap: disabled ? null : c.resendRideOtp,
+                    child: Text(
+                      cd > 0
+                          ? 'Resend OTP in ${cd}s'
+                          : (busy ? 'Resending…' : "Didn't get it? Resend OTP"),
+                      style: TextStyle(
+                        color: disabled ? Colors.white54 : Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        decoration: disabled
+                            ? TextDecoration.none
+                            : TextDecoration.underline,
+                      ),
+                    ),
+                  );
+                }),
               ],
             ),
           ),
@@ -2177,17 +2265,17 @@ class _DriverPhotoPreview extends StatelessWidget {
 
 /// A5 + A4: Safety toolkit bottom sheet — emergency call, share live trip,
 /// and trusted contacts (one-tap share the live link via SMS).
-class _SafetySheet extends StatefulWidget {
+class SafetySheet extends StatefulWidget {
   final String trackUrl;
   final String driverName;
 
-  const _SafetySheet({required this.trackUrl, required this.driverName});
+  const SafetySheet({required this.trackUrl, required this.driverName});
 
   @override
-  State<_SafetySheet> createState() => _SafetySheetState();
+  State<SafetySheet> createState() => SafetySheetState();
 }
 
-class _SafetySheetState extends State<_SafetySheet> {
+class SafetySheetState extends State<SafetySheet> {
   final TrustedContactsStore _store = const TrustedContactsStore();
   List<TrustedContact> _contacts = const [];
 

@@ -267,7 +267,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
     socketService.on("typing", (data) {
       if (!mounted) return;
-      final senderType = (data["senderType"] ?? '').toString().toLowerCase();
+      final payload = _coerceSocketPayload(data);
+      final senderType =
+          (payload["senderType"] ?? '').toString().toLowerCase();
       if (senderType == 'customer') return; // ignore my own typing
 
       setState(() {
@@ -293,18 +295,23 @@ class _ChatScreenState extends State<ChatScreen> {
     });
 
     _bookingMessageHandler = (data) {
+      // socket.io can deliver the payload as the Map itself OR as a List of args
+      // ([payload, ackId, ...]). Indexing a List with a String key throws
+      // "String is not a subtype of int of 'index'". Normalize to a Map first.
+      final payload = _coerceSocketPayload(data);
       // Ignore echo: if server mirrors my sent message back
-      final senderId = (data['senderId'] ?? '').toString();
+      final senderId = (payload['senderId'] ?? '').toString();
       if (senderId == customerId) return;
 
-      final List<dynamic> contents = data['contents'] ?? [];
+      final List<dynamic> contents =
+          (payload['contents'] is List) ? payload['contents'] as List : const [];
       if (contents.isEmpty || !mounted) return;
 
       // Not me.
       const bool isMe = false;
 
       // Prefer socket senderImage, else controller driverImage, else person icon
-      final socketImg = _normalizeUrl((data['senderImage'] ?? '').toString());
+      final socketImg = _normalizeUrl((payload['senderImage'] ?? '').toString());
       final controllerDriverImg = _normalizeUrl(
         chatController.driverImage.value,
       );
@@ -339,6 +346,24 @@ class _ChatScreenState extends State<ChatScreen> {
     };
 
     socketService.on('booking-message', _bookingMessageHandler);
+  }
+
+  /// Normalize a socket.io event payload into a `Map<String, dynamic>`.
+  /// `data` can arrive as the Map itself OR as a List of args
+  /// (e.g. `[payload, ackId]`). Returns an empty map for anything unexpected so
+  /// callers can safely use `payload['key']` without a runtime type crash.
+  Map<String, dynamic> _coerceSocketPayload(dynamic data) {
+    dynamic d = data;
+    if (d is List) {
+      d = d.firstWhere(
+        (e) => e is Map,
+        orElse: () => const <String, dynamic>{},
+      );
+    }
+    if (d is Map) {
+      return d.map((key, value) => MapEntry(key.toString(), value));
+    }
+    return <String, dynamic>{};
   }
 
   Future<void> _loadCustomerAndDriverInfo() async {

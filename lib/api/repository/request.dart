@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:hopper/Core/Utility/shared_pref_helper.dart';
 import 'package:flutter/foundation.dart';
 
 import 'package:hopper/Core/Consents/app_logger.dart';
@@ -112,8 +113,7 @@ class Request {
       return false;
     }
 
-    final prefs = await SharedPreferences.getInstance();
-    final localToken = prefs.getString('token');
+    final localToken = await SharedPrefHelper.getToken();
     final hasLocalToken = localToken != null && localToken.isNotEmpty;
     final statusCode = response.statusCode;
 
@@ -145,7 +145,7 @@ class Request {
 
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.remove('token');
+      await SharedPrefHelper.clearToken();
       await prefs.remove('refreshToken');
       await prefs.remove('sessionToken');
       await prefs.remove('role');
@@ -191,10 +191,16 @@ class Request {
     Map<String, dynamic> body,
     String? method,
 
-    bool isTokenRequired  ,
-  ) async {
-    final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('token');
+    bool isTokenRequired, {
+    // Per-request timeout overrides. The default 15s receiveTimeout is fine for
+    // light JSON calls but too short for endpoints that do heavier server-side
+    // work (e.g. booking-image confirmation triggering face verification),
+    // which would otherwise fail with a [receive timeout]. Pass a larger value
+    // only for those calls so normal requests keep failing fast.
+    Duration? receiveTimeout,
+    Duration? sendTimeout,
+  }) async {
+    final token = await SharedPrefHelper.getToken();
 
     final dio = Dio(_baseOptions());
     dio.interceptors.add(
@@ -241,18 +247,24 @@ class Request {
         body: body,
       );
 
+      final requestOptions = Options(
+        headers: headers,
+        receiveTimeout: receiveTimeout,
+        sendTimeout: sendTimeout,
+      );
+
       late final Response response;
       if (upperMethod == 'GET') {
         response = await dio.get(
           url,
           queryParameters: body,
-          options: Options(headers: headers),
+          options: requestOptions,
         );
       } else {
         response = await dio.post(
           url,
           data: body,
-          options: Options(headers: headers),
+          options: requestOptions,
         );
       }
 
@@ -295,8 +307,7 @@ class Request {
     String? method,
     bool isTokenRequired,
   ) async {
-    final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('token');
+    final token = await SharedPrefHelper.getToken();
 
     final dio = Dio(_baseOptions());
     dio.interceptors.add(
@@ -364,8 +375,7 @@ class Request {
     String method,
     bool isTokenRequired,
   ) async {
-    final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString('token');
+    final token = await SharedPrefHelper.getToken();
 
     final headers = _buildHeaders(
       token: token,
@@ -540,7 +550,7 @@ class Request {
 //     }
 
 //     final prefs = await SharedPreferences.getInstance();
-//     final localToken = prefs.getString('token');
+//     final localToken = await SharedPrefHelper.getToken();
 //     final hasLocalToken = localToken != null && localToken.isNotEmpty;
 //     final statusCode = response.statusCode;
 
@@ -572,7 +582,7 @@ class Request {
 
 //     try {
 //       final prefs = await SharedPreferences.getInstance();
-//       await prefs.remove('token');
+//       await SharedPrefHelper.clearToken();
 //       await prefs.remove('refreshToken');
 //       await prefs.remove('sessionToken');
 //       await prefs.remove('role');
@@ -616,7 +626,7 @@ class Request {
 //     bool isTokenRequired,
 //   ) async {
 //     final prefs = await SharedPreferences.getInstance();
-//     final token = prefs.getString('token');
+//     final token = await SharedPrefHelper.getToken();
 
 //     final dio = Dio(_baseOptions());
 //     dio.interceptors.add(
@@ -690,7 +700,7 @@ class Request {
 //     bool isTokenRequired,
 //   ) async {
 //     final prefs = await SharedPreferences.getInstance();
-//     final token = prefs.getString('token');
+//     final token = await SharedPrefHelper.getToken();
 
 //     final dio = Dio(_baseOptions());
 //     dio.interceptors.add(
@@ -754,7 +764,7 @@ class Request {
 //     bool isTokenRequired,
 //   ) async {
 //     final prefs = await SharedPreferences.getInstance();
-//     final token = prefs.getString('token');
+//     final token = await SharedPrefHelper.getToken();
 //     final headers = _buildHeaders(
 //       token: token,
 //       isTokenRequired: true,

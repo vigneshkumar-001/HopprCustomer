@@ -6,6 +6,7 @@ import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:hopper/Presentation/Drawer/models/ride_history_response.dart';
 import 'package:hopper/Presentation/Drawer/utils/ride_history_format.dart';
+import 'package:hopper/api/dataSource/apiDataSource.dart';
 import 'package:hopper/api/repository/api_consents.dart';
 import 'package:hopper/uitls/map/direction_helper.dart';
 
@@ -21,6 +22,8 @@ class RideDetailsScreen extends StatefulWidget {
 class _RideDetailsScreenState extends State<RideDetailsScreen> {
   GoogleMapController? _mapController;
   List<LatLng> _routePoints = const [];
+  bool _sendingInvoice = false;
+  final ApiDataSource _apiDataSource = ApiDataSource();
 
   LatLng? get _pickup {
     final r = widget.ride;
@@ -429,7 +432,7 @@ class _RideDetailsScreenState extends State<RideDetailsScreen> {
                 ),
               ),
               OutlinedButton(
-                onPressed: _onSendInvoice,
+                onPressed: _sendingInvoice ? null : _onSendInvoice,
                 style: OutlinedButton.styleFrom(
                   side: const BorderSide(color: Color(0xFFE53935)),
                   shape: RoundedRectangleBorder(
@@ -440,13 +443,24 @@ class _RideDetailsScreenState extends State<RideDetailsScreen> {
                     vertical: 13,
                   ),
                 ),
-                child: const Text(
-                  'Send Invoice',
-                  style: TextStyle(
-                    color: Color(0xFFE53935),
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
+                child: _sendingInvoice
+                    ? const SizedBox(
+                        height: 18,
+                        width: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation<Color>(
+                            Color(0xFFE53935),
+                          ),
+                        ),
+                      )
+                    : const Text(
+                        'Send Invoice',
+                        style: TextStyle(
+                          color: Color(0xFFE53935),
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
               ),
             ],
           ),
@@ -455,15 +469,48 @@ class _RideDetailsScreenState extends State<RideDetailsScreen> {
     );
   }
 
-  void _onSendInvoice() {
-    Get.snackbar(
-      'Invoice',
-      'Your invoice will be sent to your registered email shortly.',
-      snackPosition: SnackPosition.BOTTOM,
-      margin: const EdgeInsets.all(14),
-      backgroundColor: Colors.black87,
-      colorText: Colors.white,
-      duration: const Duration(seconds: 3),
+  Future<void> _onSendInvoice() async {
+    if (_sendingInvoice) return;
+    final bookingId = (widget.ride.bookingId ?? '').trim();
+    if (bookingId.isEmpty) {
+      Get.snackbar(
+        'Invoice',
+        'This ride does not have an invoice yet.',
+        snackPosition: SnackPosition.BOTTOM,
+        margin: const EdgeInsets.all(14),
+        backgroundColor: Colors.black87,
+        colorText: Colors.white,
+        duration: const Duration(seconds: 3),
+      );
+      return;
+    }
+
+    setState(() => _sendingInvoice = true);
+    final result = await _apiDataSource.sendRideReceipt(bookingId: bookingId);
+    if (!mounted) return;
+    setState(() => _sendingInvoice = false);
+
+    result.fold(
+      (failure) => Get.snackbar(
+        'Invoice',
+        failure.message.isNotEmpty
+            ? failure.message
+            : 'Could not send invoice. Please try again.',
+        snackPosition: SnackPosition.BOTTOM,
+        margin: const EdgeInsets.all(14),
+        backgroundColor: Colors.black87,
+        colorText: Colors.white,
+        duration: const Duration(seconds: 3),
+      ),
+      (message) => Get.snackbar(
+        'Invoice',
+        message,
+        snackPosition: SnackPosition.BOTTOM,
+        margin: const EdgeInsets.all(14),
+        backgroundColor: Colors.black87,
+        colorText: Colors.white,
+        duration: const Duration(seconds: 3),
+      ),
     );
   }
 

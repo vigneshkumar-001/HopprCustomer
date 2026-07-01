@@ -13,10 +13,22 @@ class RideShareSocketService {
 
   String? _userId;
   String? _bookingId;
+  String? _authToken; // optional JWT for the handshake (gated backend auth)
 
   // track rooms so we can rejoin on reconnect
   final List<String> _joinedRooms = [];
   List<String> get joinedRooms => _joinedRooms;
+
+  // track shared-ride rooms separately so reconnect restores ALL shared legs
+  final List<String> _sharedRideRooms = [];
+
+  /// Set/clear the JWT used for the socket handshake. Safe to call before
+  /// initSocket; when set, identity can be verified server-side once
+  /// SOCKET_REQUIRE_AUTH is enabled. No effect on the current (unauthenticated)
+  /// flow until the backend flag is flipped.
+  void setAuthToken(String? token) {
+    _authToken = token;
+  }
 
   // store listeners so they can be re-registered after reconnect
   final Map<String, Function(dynamic)> _callbacks = {};
@@ -34,16 +46,24 @@ class RideShareSocketService {
 
     _initialized = true;
 
-    _socket = IO.io(
-      url,
-      IO.OptionBuilder()
-          .setTransports(['websocket'])
-          .enableAutoConnect()
-          .enableReconnection()
-          .setReconnectionDelay(2000)
-          .setReconnectionAttempts(10)
-          .build(),
-    );
+    // Transport + reconnect parity with the (already-hardened) single-ride
+    // SocketService: websocket-ONLY stalls the live feed and freezes the car
+    // marker on flaky mobile networks where the WS upgrade is blocked, and
+    // giving up after 10 attempts kills tracking mid-ride. Allow polling
+    // fallback and effectively-unlimited reconnection with capped backoff.
+    final optionBuilder = IO.OptionBuilder()
+        .setTransports(['websocket', 'polling'])
+        .enableAutoConnect()
+        .enableReconnection()
+        .setReconnectionDelay(2000)
+        .setReconnectionDelayMax(10000)
+        .setReconnectionAttempts(1 << 30)
+        .setTimeout(20000);
+    if (_authToken != null && _authToken!.isNotEmpty) {
+      optionBuilder.setAuth({'token': _authToken, 'type': 'customer'});
+    }
+
+    _socket = IO.io(url, optionBuilder.build());
 
     _socket!.connect();
 
@@ -55,7 +75,7 @@ class RideShareSocketService {
         registerUser(_userId!, bookingId: _bookingId);
       }
 
-      // restore all rooms
+      // restore all booking rooms
       for (final room in _joinedRooms) {
         AppLogger.log.i("📡 [RIDE] Rejoining room: $room");
         emit("join-booking", {
@@ -65,11 +85,26 @@ class RideShareSocketService {
         });
       }
 
+      // restore ALL shared-ride rooms (so a reconnect doesn't lose tracking on
+      // a multi-leg pooled ride).
+      for (final sharedRideId in _sharedRideRooms) {
+        AppLogger.log.i("📡 [RIDE] Rejoining shared ride: $sharedRideId");
+        emit("customer:sharedRide:join", {
+          "sharedRideId": sharedRideId,
+          "userId": _userId,
+          "customerId": _userId,
+        });
+      }
+
       // rebind all event listeners
       _callbacks.forEach((event, cb) {
         _socket?.off(event);
         _socket?.on(event, cb);
       });
+
+      // C7: invoke the single STORED external connect callback (set via
+      // onConnect()) — never re-registered, so it can't stack on reconnect.
+      _externalConnectCb?.call();
 
       AppLogger.log.i("🔄 [RIDE] Listeners rebound, rooms rejoined");
     });
@@ -78,6 +113,8 @@ class RideShareSocketService {
     _socket!.onDisconnect((_) {
       AppLogger.log.e("❌ [RIDE] Disconnected from $url");
     });
+    // C7: one internal reconnect handler fans out to the stored external one.
+    _socket?.onReconnect((_) => _externalReconnectCb?.call());
     _socket?.onReconnectAttempt(
           (attempt) => AppLogger.log.w("🔁 Reconnect attempt #$attempt"),
     );
@@ -142,11 +179,35 @@ class RideShareSocketService {
   }
 
   // ---------------------------------------------------------
+  // Shared-ride room (Phase 3 backend rooms). Tracks the id so reconnect
+  // restores it. Safe to call once the shared ride / sharedId is known.
+  // ---------------------------------------------------------
+  void joinSharedRide(String sharedRideId) {
+    if (sharedRideId.isEmpty) return;
+    if (!_sharedRideRooms.contains(sharedRideId)) {
+      _sharedRideRooms.add(sharedRideId);
+    }
+    if (connected && _userId != null) {
+      emit("customer:sharedRide:join", {
+        "sharedRideId": sharedRideId,
+        "userId": _userId,
+        "customerId": _userId,
+      });
+      AppLogger.log.i("📡 [RIDE] Joined shared ride: $sharedRideId");
+    }
+  }
+
+  // ---------------------------------------------------------
   // Emit & Listen
   // ---------------------------------------------------------
-  void onConnect(Function() callback) => _socket?.onConnect((_) => callback());
-  void onReconnect(Function() callback) =>
-      _socket?.onReconnect((_) => callback());
+  // C7: external connect/reconnect callbacks are STORED (single slot each) and
+  // fanned out from the internal handlers in initSocket — never re-registered on
+  // the socket, so reconnect / screen reopen / controller recreate can't stack them.
+  Function()? _externalConnectCb;
+  Function()? _externalReconnectCb;
+
+  void onConnect(Function() callback) => _externalConnectCb = callback;
+  void onReconnect(Function() callback) => _externalReconnectCb = callback;
   void on(String event, Function(dynamic data) callback) {
     // Unwrap a leading Map when the backend emits extra trailing args
     // (socket.io then delivers the whole emit as a List [payload, id, ...]).
@@ -161,21 +222,44 @@ class RideShareSocketService {
     }
 
     _callbacks[event] = wrapped;
+    // C7: off-before-on so re-registering the same event REPLACES the live
+    // listener instead of stacking another one (matches the reconnect rebind).
+    _socket?.off(event);
     _socket?.on(event, wrapped);
   }
 
   void onAck(String event, Function(dynamic data, Function? ack) callback) {
-    _callbacks[event] = (data) => callback(data, null);
+    // socket.io (socket_io_client) delivers an event to the handler in two
+    // shapes depending on how the backend emitted it:
+    //   * single payload arg          -> handler receives the payload directly
+    //   * payload + extra/ack args     -> handler receives the WHOLE List
+    //                                     [payload, ...trailingArgs, maybeAck]
+    // The ack callback (when present) is always the LAST element and is a
+    // Function. The real payload is the FIRST element; any middle args (e.g. a
+    // trailing id) are ignored, matching `on()`'s normalization. Without this,
+    // a trailing-arg emit (no ack) leaks the raw List into the handler and
+    // `data['latitude']` throws "String is not a subtype of int of 'index'".
+    void wrapped(dynamic incoming) {
+      dynamic payload = incoming;
+      Function? ackFn;
 
-    _socket?.on(event, (dynamic incoming) {
-      if (incoming is List && incoming.length == 2 && incoming[1] is Function) {
-        final payload = incoming[0];
-        final ackFn = incoming[1] as Function;
-        callback(payload, ackFn);
-      } else {
-        callback(incoming, null);
+      if (incoming is List) {
+        final args = List<dynamic>.from(incoming);
+        if (args.isNotEmpty && args.last is Function) {
+          ackFn = args.removeLast() as Function;
+        }
+        payload = args.isNotEmpty ? args.first : null;
       }
-    });
+
+      callback(payload, ackFn);
+    }
+
+    // Store the SAME wrapped handler so reconnect re-attach (in onConnect)
+    // preserves normalization and the ack instead of dropping them.
+    _callbacks[event] = wrapped;
+    // C7: off-before-on so re-registering this event REPLACES the live listener.
+    _socket?.off(event);
+    _socket?.on(event, wrapped);
   }
   void emitWithAck(String event, dynamic data, Function(dynamic)? ack) =>
       _socket?.emitWithAck(event, data, ack: ack);
@@ -199,6 +283,8 @@ class RideShareSocketService {
     _bookingId = null;
     _callbacks.clear();
     _joinedRooms.clear();
+    _sharedRideRooms.clear();
+    _authToken = null;
   }
 }
 

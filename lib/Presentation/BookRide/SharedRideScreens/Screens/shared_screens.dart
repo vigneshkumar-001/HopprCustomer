@@ -18,18 +18,21 @@ import 'package:hopper/Core/Utility/phone_launcher.dart';
 import 'package:hopper/Core/Utility/app_toasts.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textFields.dart';
 import 'package:hopper/Presentation/BookRide/Controllers/driver_search_controller.dart';
+import 'package:hopper/Presentation/BookRide/Screens/order_confirm_screen.dart'
+    show SafetySheet;
 import 'package:hopper/Presentation/BookRide/SharedRideScreens/Controller/share_ride_controller.dart';
 import 'package:hopper/Presentation/BookRide/SharedRideScreens/Screens/shared_chat_screens.dart';
 import 'package:hopper/Presentation/OnBoarding/Screens/home_screens.dart';
 
 import 'package:hopper/Presentation/OnBoarding/Screens/payment_screen.dart';
 import 'package:hopper/api/repository/api_consents.dart';
+import 'package:hopper/Presentation/BookRide/Models/shared_my_state.dart';
+import 'package:hopper/api/dataSource/shared_api_datasource.dart';
 import 'package:hopper/uitls/netWorkHandling/network_handling_screen.dart';
 import 'package:hopper/uitls/websocket/shared_web_socket.dart';
 import 'package:hopper/uitls/map/customer/customer_ride_map_view.dart';
 import 'package:hopper/uitls/map/customer/marker_icon_cache.dart' as icon_cache;
 import 'package:share_plus/share_plus.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:hopper/Presentation/CustomerSupport/screens/customer_support_list_screen.dart';
 
 import 'package:http/http.dart' as http;
@@ -60,6 +63,10 @@ class SharedScreens extends StatefulWidget {
   /// Optional initial route (decoded polyline from previous page)
   final List<LatLng> routePoints;
 
+  /// Seat number(s) this customer booked, shown as a "Your seat" card on the
+  /// live tracking screen. Empty on a resumed ride where seats aren't known.
+  final List<int> selectedSeats;
+
   final VoidCallback? onCancel;
 
   const SharedScreens({
@@ -81,6 +88,7 @@ class SharedScreens extends StatefulWidget {
     this.resumeDriverId,
     this.initialDriverPosition,
     this.routePoints = const [],
+    this.selectedSeats = const [],
     this.onCancel,
     required this.carType,
   });
@@ -108,11 +116,34 @@ class _SharedScreensState extends State<SharedScreens>
   final GlobalKey<CustomerRideMapViewState> _mapKey =
       GlobalKey<CustomerRideMapViewState>();
 
+  // Map-first sheet: collapsed by default so most of the map/route is visible.
+  // Three snap states (collapsed / half / full) + programmatic auto-expand to
+  // "half" exactly once when the driver arrives or an OTP is needed (only while
+  // the user is still collapsed, so it never fights a manual drag).
+  final DraggableScrollableController _sheetController =
+      DraggableScrollableController();
+  bool _didAutoExpandArrival = false;
+  bool _didAutoExpandOtp = false;
+
+  // Just-saved pickup instruction (immediate UX); falls back to the DB-sourced
+  // value carried in `_myState.pickupInstruction` until the next save.
+  String? _pickupInstructionLocal;
+
+  // Single map control with two toggling actions. true => next tap fits the
+  // whole route (shows the fit icon); false => next tap recenters on the driver
+  // (shows the locate icon). The icon flips after each tap.
+  bool _mapShowFit = true;
+
   // ---------- RIDE STATE ----------
   bool isWaitingForDriver = true;
   bool noDriverFound = false;
   bool isTripCancelled = false;
   String _waitingServerMessage = '';
+  // STRICT seat dispatch: when the backend skips every car because the chosen seat
+  // is taken in all of them, it emits booking-update {SEAT_NOT_AVAILABLE}. We show
+  // this message in the terminal state and offer "Choose another seat" (back to the
+  // seat picker) — never auto-fallback to a different seat.
+  String _seatUnavailableMessage = '';
 
   final RideShareSocketService rideShareSocket = RideShareSocketService();
   final DriverSearchController driverSearchController =
@@ -136,6 +167,12 @@ class _SharedScreensState extends State<SharedScreens>
   String CarExteriorPhotos = '';
   bool isExpanded = false;
 
+  // Customer's seat(s). Prefer the backend value (joined-booking payload, which
+  // works on resume); fall back to the seats threaded from booking.
+  List<int> _mySeatsFromServer = [];
+  List<int> get _effectiveSeats =>
+      _mySeatsFromServer.isNotEmpty ? _mySeatsFromServer : widget.selectedSeats;
+
   bool isDriverConfirmed = false;
   bool driverStartedRide = false;
   bool destinationReached = false;
@@ -145,6 +182,10 @@ class _SharedScreensState extends State<SharedScreens>
   DateTime _lastMetricsAt = DateTime.fromMillisecondsSinceEpoch(0);
   final Duration _metricsInterval = const Duration(milliseconds: 1200);
   bool _didExitToHome = false;
+  // Guards the one-time navigation to PaymentScreen. Payment opens ONLY on the
+  // per-booking 'ride-completed' event (the driver's manual Complete swipe), never
+  // on GPS arrival — so a shared drop can't bounce every rider to payment at once.
+  bool _didGoToPayment = false;
 
   // ---------- POSITIONS ----------
   LatLng? _customerPickupLatLng;
@@ -164,6 +205,60 @@ class _SharedScreensState extends State<SharedScreens>
   String _etaChipText = '';
   String _distanceChipText = '';
 
+  // Phase B: privacy-safe per-customer shared-ride state (from `shared_my_state`
+  // socket event + GET recovery). Drives the Uber-style "X pickups before you".
+  SharedMyState? _myState;
+
+  Future<void> _fetchMySharedState() async {
+    final bId = _effectiveBookingId();
+    if (bId.isEmpty) return;
+    final state = await SharedApiDatasource().getMySharedState(bId);
+    if (!mounted || state == null) return;
+    setState(() {
+      _myState = state;
+      // Persist the DB-sourced pickup instruction locally so it survives active-
+      // booking RESUME and the live `shared_my_state` socket updates (which don't
+      // carry it) — otherwise the entered "Directions to reach" disappears.
+      if (state.pickupInstruction.trim().isNotEmpty) {
+        _pickupInstructionLocal = state.pickupInstruction;
+      }
+    });
+    // RESUME/RECONNECT recovery: if the backend says MY booking is already
+    // completed (driver dropped me while the app was dead), go straight to payment.
+    _maybeGoToPaymentFromMyState(state);
+  }
+
+  /// Backend status is the source of truth for completion. Opens payment when MY
+  /// booking is completed — via the reliable booking-doc flag (`myBookingCompleted`,
+  /// from the my-state HTTP API) or the aggregate's DROPPED status (live socket).
+  /// Used on resume/reconnect AND as a backup if the per-booking 'ride-completed'
+  /// event is missed. NEVER GPS-based, and strictly scoped to MY bookingId.
+  void _maybeGoToPaymentFromMyState(SharedMyState? state) {
+    if (state == null) return;
+    final bool completed =
+        state.myBookingCompleted || state.myStatus == 'DROPPED';
+    if (!completed) return;
+    final String myBookingId = _effectiveBookingId();
+    if (myBookingId.isEmpty) return;
+    // Not my booking → ignore (defensive; my-state is already scoped to me).
+    if (state.customerBookingId.isNotEmpty &&
+        state.customerBookingId != myBookingId) {
+      return;
+    }
+    if (!mounted || _didGoToPayment) return;
+    _didGoToPayment = true;
+    setState(() {
+      destinationReached = true;
+      _nearDestination = false;
+    });
+    AppLogger.log.i(
+        "my-state completed (backend) -> payment: ${state.customerBookingId}");
+    Future.delayed(const Duration(milliseconds: 500), () {
+      if (!mounted) return;
+      Get.to(() => PaymentScreen(bookingId: myBookingId, amount: Amount));
+    });
+  }
+
   /// Are we routing driver → pickup (before ride-started)?
   bool _isRoutingToPickup = false;
 
@@ -182,7 +277,24 @@ class _SharedScreensState extends State<SharedScreens>
   // ---------- SMOOTH MOTION STATE ----------
   DateTime _lastDriverLocationLogAt = DateTime.fromMillisecondsSinceEpoch(0);
 
-  // Camera follow is handled by [RideTrackingMap].
+  // Camera follow is handled by [CustomerRideMapView].
+
+  // Normalize an image field that may be a List, a "[url1,url2]" string, or a
+  // plain URL → the first usable URL (mirrors single ride's order_confirm helper).
+  String _firstImageUrl(dynamic value) {
+    if (value is List && value.isNotEmpty) {
+      return (value.first ?? '').toString().trim();
+    }
+    final raw = (value ?? '').toString().trim();
+    if (raw.isEmpty) return '';
+    final normalized =
+        raw.replaceAll('[', '').replaceAll(']', '').replaceAll('"', '');
+    for (final part in normalized.split(',')) {
+      final url = part.trim();
+      if (url.isNotEmpty) return url;
+    }
+    return normalized;
+  }
 
   String _effectiveBookingId() {
     final fromSocket = _bookingId.trim();
@@ -259,6 +371,15 @@ class _SharedScreensState extends State<SharedScreens>
       updatePickup(pickup);
     });
 
+    _restartNoDriverFoundTimer();
+  }
+
+  /// (Re)start the 60s "no driver found" fallback. Called when searching begins
+  /// AND each time the backend REDISPATCHES (DRIVER_REJECTED via `booking-update`)
+  /// — a redispatch means a fresh driver is now deciding, so we extend the window
+  /// instead of prematurely declaring "no driver".
+  void _restartNoDriverFoundTimer() {
+    _noDriverFoundTimer?.cancel();
     _noDriverFoundTimer = Timer(const Duration(seconds: 60), () async {
       if (!mounted) return;
       if (isDriverConfirmed) return;
@@ -303,6 +424,9 @@ class _SharedScreensState extends State<SharedScreens>
 
     _setupSocketListeners();
 
+    // Phase B: pull the privacy-safe shared state on open (socket fills live after).
+    _fetchMySharedState();
+
     _startController.text = widget.pickupAddress;
     _destController.text = widget.destinationAddress;
 
@@ -312,18 +436,66 @@ class _SharedScreensState extends State<SharedScreens>
     }
   }
 
+  /// Auto-expand the sheet to the "half" state. No-op if the sheet is already at
+  /// or past half, so it never overrides a manual drag — only lifts a collapsed
+  /// sheet when there's something the rider must see (arrival / OTP).
+  void _autoExpandSheetToHalf() {
+    void run() {
+      if (!mounted || !_sheetController.isAttached) return;
+      const target = 0.52;
+      if (_sheetController.size >= target - 0.03) return;
+      _sheetController.animateTo(
+        target,
+        duration: const Duration(milliseconds: 320),
+        curve: Curves.easeOutCubic,
+      );
+    }
+
+    // If the event also flipped isDriverConfirmed, the confirmed sheet (and its
+    // controller) attaches on the next frame — defer so animateTo has a target.
+    if (_sheetController.isAttached) {
+      run();
+    } else {
+      WidgetsBinding.instance.addPostFrameCallback((_) => run());
+    }
+  }
+
   @override
   void dispose() {
     _searchingElapsedTimer?.cancel();
     _noDriverFoundTimer?.cancel();
     _searchingElapsedSecondsVN?.dispose();
+    _sheetController.dispose();
+    // CRITICAL FIX: remove every socket listener registered in
+    // _setupSocketListeners(). The socket is a process-wide singleton, so
+    // without this the disposed State stays retained via the captured closures
+    // and stale callbacks fire setState/Navigator after dispose (and the chat
+    // screen's listeners on the same singleton collide with these). Mirrors the
+    // single-ride screen's teardown.
+    for (final event in const [
+      'connect',
+      'shared_my_state',
+      'joined-booking',
+      'otp-generated',
+      'ride-started',
+      'driver-reached-destination',
+      'ride-completed',
+      'driver-arrived',
+      'customer-cancelled',
+      'driver-cancelled',
+      'booking-update',
+      'driver-location',
+      'pickup_instruction_updated',
+    ]) {
+      rideShareSocket.off(event);
+    }
     super.dispose();
   }
 
   // ---------- ASSET → BITMAP (resize) ----------
   // ignore: unused_element
   Future<void> _loadMarkerIcons() async {
-    // Deprecated: map rendering is owned by RideTrackingMap.
+    // Deprecated: map rendering is owned by CustomerRideMapView.
     _initRouteAndMarkers();
     if (mounted) setState(() {});
   }
@@ -712,6 +884,275 @@ class _SharedScreensState extends State<SharedScreens>
     return (meters / metersPerSecond).round();
   }
 
+  /// Bottom-sheet editor for the pickup instruction ("Directions to reach").
+  /// Saves to the backend (source of truth); on success updates local state so
+  /// the card reflects it immediately. Clear/Remove sends an empty instruction.
+  void _openPickupInstructionSheet() {
+    final bookingId = _effectiveBookingId();
+    if (bookingId.isEmpty) {
+      AppToasts.showError(context, 'Booking not ready yet. Try again.');
+      return;
+    }
+    final existing =
+        (_pickupInstructionLocal ?? (_myState?.pickupInstruction ?? '')).trim();
+    final controller = TextEditingController(text: existing);
+    bool saving = false;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (sheetCtx) {
+        return StatefulBuilder(
+          builder: (sheetCtx, setSheet) {
+            Future<void> submit({required bool clear}) async {
+              final text = clear ? '' : controller.text.trim();
+              setSheet(() => saving = true);
+              final ok = await SharedApiDatasource().updatePickupInstruction(
+                bookingId: bookingId,
+                instruction: text,
+              );
+              if (!mounted) return;
+              if (ok) {
+                setState(() => _pickupInstructionLocal = text);
+                Navigator.of(sheetCtx).pop();
+              } else {
+                setSheet(() => saving = false);
+                AppToasts.showError(context, 'Could not save. Try again.');
+              }
+            }
+
+            return Padding(
+              padding: EdgeInsets.only(
+                left: 18,
+                right: 18,
+                top: 18,
+                bottom: MediaQuery.of(sheetCtx).viewInsets.bottom + 18,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Directions to reach',
+                    style:
+                        TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'Help your driver reach you faster',
+                    style: TextStyle(fontSize: 12.5, color: Color(0xFF6B7280)),
+                  ),
+                  const SizedBox(height: 14),
+                  TextField(
+                    controller: controller,
+                    maxLength: 160,
+                    maxLines: 3,
+                    textCapitalization: TextCapitalization.sentences,
+                    decoration: InputDecoration(
+                      hintText: 'e.g. Waiting near the main gate, blue shirt',
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                  Row(
+                    children: [
+                      if (existing.isNotEmpty)
+                        TextButton(
+                          onPressed: saving ? null : () => submit(clear: true),
+                          child: const Text(
+                            'Remove',
+                            style: TextStyle(color: Color(0xFFD93025)),
+                          ),
+                        ),
+                      const Spacer(),
+                      ElevatedButton(
+                        onPressed: saving ? null : () => submit(clear: false),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF006FD0),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                        child: saving
+                            ? const SizedBox(
+                                height: 18,
+                                width: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Text('Save',
+                                style: TextStyle(color: Colors.white)),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// Fixed bottom app bar (Call + Message), pinned at the very bottom of the
+  /// screen and always visible while the draggable sheet scrolls. Only rendered
+  /// once a driver is assigned (call/chat targets exist).
+  Widget _buildFixedDriverActionBar() {
+    if (!isDriverConfirmed) return const SizedBox.shrink();
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.10),
+            blurRadius: 16,
+            offset: const Offset(0, -4),
+          ),
+        ],
+      ),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+          child: Row(
+            children: [
+              // Call — small rounded brand button.
+              GestureDetector(
+                onTap: _callDriverFromBar,
+                child: Container(
+                  height: 50,
+                  width: 56,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF000000),
+                    borderRadius: BorderRadius.circular(14),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.25),
+                        blurRadius: 8,
+                        offset: const Offset(0, 3),
+                      ),
+                    ],
+                  ),
+                  child: const Icon(Icons.call_rounded,
+                      color: Colors.white, size: 24),
+                ),
+              ),
+              const SizedBox(width: 12),
+              // Message — wider rounded outlined button.
+              Expanded(
+                child: GestureDetector(
+                  onTap: _messageDriverFromBar,
+                  child: Container(
+                    height: 50,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: AppColors.containerColor1,
+                      borderRadius: BorderRadius.circular(14),
+                      border:
+                          Border.all(color: Colors.black.withOpacity(0.06)),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(Icons.chat_bubble_outline_rounded,
+                            size: 20, color: Color(0xFF1A1A1A)),
+                        const SizedBox(width: 8),
+                        CustomTextFields.textWithStylesSmall(
+                          'Message your driver',
+                          colors: AppColors.commonBlack,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// SOS → open the same Safety sheet the single-ride screen uses (emergency
+  /// call + trusted contacts + share live trip). Reuses the shared SafetySheet.
+  void _openSafetySheet() {
+    final bookingId = _effectiveBookingId();
+    final trackUrl =
+        'https://hoppr-admin-e7bebfb9fb05.herokuapp.com/ride-tracker/$bookingId';
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (_) => SafetySheet(trackUrl: trackUrl, driverName: driverName),
+    );
+  }
+
+  /// Dial the driver (used by the bottom action bar). Same logic that used to
+  /// live in the under-driver-card call button.
+  Future<void> _callDriverFromBar() async {
+    HapticFeedback.mediumImpact();
+    try {
+      final rawNumber = _driverPhone.trim();
+      if (rawNumber.isEmpty) {
+        AppToasts.showError(context, 'Number Not set ');
+        return;
+      }
+      final hasPlus = rawNumber.startsWith('+');
+      final digitsOnly = rawNumber.replaceAll(RegExp(r'[^0-9]'), '');
+      final normalized = hasPlus ? '+$digitsOnly' : digitsOnly;
+      if (normalized.isEmpty) {
+        AppToasts.showError(context, 'Invalid number');
+        return;
+      }
+      final ok = await launchPhoneDialer(normalized);
+      if (!ok) AppToasts.showError(context, 'Could not open dialer');
+    } catch (e) {
+      AppToasts.showError(context, 'Failed to start call');
+    }
+  }
+
+  /// Open the driver chat (used by the bottom action bar).
+  void _messageDriverFromBar() {
+    HapticFeedback.mediumImpact();
+    final chatBookingId = _effectiveBookingId();
+    if (chatBookingId.isEmpty) {
+      AppToasts.showError(context, 'Booking id missing. Please try again.');
+      return;
+    }
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => SharedChatScreens(bookingId: chatBookingId),
+      ),
+    );
+  }
+
+  /// Full-screen Hero preview of the driver's photo. Safe no-op when the photo
+  /// URL is empty; reuses the same ProfilePic source as the avatar.
+  void _openDriverPhotoPreview() {
+    final url = ProfilePic.trim();
+    if (url.isEmpty) return;
+    Navigator.of(context).push(
+      PageRouteBuilder(
+        opaque: false,
+        barrierColor: Colors.black,
+        transitionDuration: const Duration(milliseconds: 280),
+        pageBuilder: (_, __, ___) => _DriverPhotoPreview(imageUrl: url),
+      ),
+    );
+  }
+
   String _formatEta(int? seconds) {
     if (seconds == null || seconds <= 0) return '';
     final mins = (seconds / 60).ceil();
@@ -726,6 +1167,363 @@ class _SharedScreensState extends State<SharedScreens>
     if (meters < 1000) return '${meters.round()} m';
     final km = meters / 1000.0;
     return '${km.toStringAsFixed(km < 10 ? 1 : 0)} km';
+  }
+
+  /// MAP overlay for a WAITING rider when the driver is serving ANOTHER rider
+  /// first — so the driver dot moving "away" never confuses them. Hidden once the
+  /// driver is coming to THIS rider (amINextPickup), arrived, onboard, or for a
+  /// single ride (no shared state). Privacy-safe: counts + generic action only,
+  /// never the other rider's location / identity.
+  Widget _buildDriverBusyMapBanner() {
+    final ms = _myState;
+    if (ms == null) return const SizedBox.shrink();
+    if (driverStartedRide || _driverArrived || destinationReached) {
+      return const SizedBox.shrink();
+    }
+    if (ms.isOnboard || ms.amINextPickup) return const SizedBox.shrink();
+
+    String title;
+    if (ms.driverCurrentAction == 'DROPPING_OTHER_RIDER') {
+      title = 'Driver is dropping another rider first';
+    } else if (ms.driverCurrentAction == 'PICKING_OTHER_RIDER') {
+      title = 'Driver is picking up another rider first';
+    } else if (ms.stopsBeforeMe > 0) {
+      final s = ms.stopsBeforeMe;
+      title = '$s stop${s == 1 ? '' : 's'} before you';
+    } else {
+      return const SizedBox.shrink();
+    }
+    final eta = ms.etaToMyPickupMinutes;
+    final sub = eta != null
+        ? "You're next after · ~$eta min to your pickup"
+        : "You're next after — hang tight";
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+      decoration: BoxDecoration(
+        color: const Color(0xFF111418).withOpacity(0.92),
+        borderRadius: BorderRadius.circular(14),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.20),
+            blurRadius: 14,
+            offset: const Offset(0, 5),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 34,
+            height: 34,
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(
+              Icons.directions_car_filled_rounded,
+              size: 18,
+              color: Color(0xFF111418),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.white,
+                    height: 1.15,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  sub,
+                  style: const TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFFB7BBC2),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Live "Direction to reach" status card. Reuses the already-computed ETA
+  /// (_etaChipText) and distance (_distanceChipText) — phase-aware: before
+  /// pickup it shows the driver reaching the customer, after pickup it shows the
+  /// trip to the drop. No extra Directions calls; it only reflects current state.
+  Widget _buildReachStatusCard() {
+    String title;
+    IconData icon;
+    String badge; // short uppercase stage tag for instant scannability
+    // Phase B: privacy-safe shared context overrides the generic message + ETA
+    // for the pickup-pending and onboard phases (sequence-aware "X before you").
+    final ms = _myState;
+    String? sharedDetail;
+    if (destinationReached) {
+      icon = Icons.flag_rounded;
+      title = 'You have reached your destination';
+      badge = 'COMPLETED';
+    } else if (driverStartedRide) {
+      icon = Icons.navigation_rounded;
+      badge = _nearDestination ? 'ALMOST THERE' : 'ON TRIP';
+      if (ms != null) {
+        title = ms.primaryTitle;
+        sharedDetail = ms.primaryDetail;
+      } else {
+        title = _nearDestination
+            ? 'Almost at your destination'
+            : 'On the way to your destination';
+      }
+    } else if (_driverArrived && (ms == null || ms.amINextPickup)) {
+      // "Arrived" ONLY for the rider the driver is actually at (I'm next pickup),
+      // or for a single ride (ms == null). In a shared ride the driver can only be
+      // at ONE pickup — co-riders must NOT all show "arrived"; they fall through to
+      // their privacy-safe sequence message below ("1 pickup before you", etc.).
+      icon = Icons.local_taxi_rounded;
+      title = 'Driver has arrived at pickup';
+      badge = 'ARRIVED';
+    } else {
+      icon = Icons.directions_car_filled_rounded;
+      // Shared ride: lead with the sequence context so each rider knows whether
+      // the driver is coming to THEM or to another rider first.
+      if (ms != null) {
+        badge = ms.amINextPickup ? 'YOU ARE NEXT' : 'IN QUEUE';
+        title = ms.primaryTitle;
+        sharedDetail = ms.primaryDetail;
+      } else {
+        badge = 'PICKUP';
+        title = 'Driver is reaching you';
+      }
+    }
+
+    final detail = (sharedDetail != null && sharedDetail.trim().isNotEmpty)
+        ? sharedDetail
+        : [_etaChipText, _distanceChipText]
+            .where((s) => s.trim().isNotEmpty)
+            .join('  ·  ');
+
+    // "Action needed" stages get a slightly stronger accent so OTP/arrival pops.
+    final bool emphasise = _driverArrived && !driverStartedRide;
+
+    // Uber-style morph: cross-fade the content + ease the height whenever the
+    // stage changes (PICKUP → ARRIVED → ON TRIP → COMPLETED). One screen, no
+    // rebuild, theme colors unchanged — only the card content animates.
+    final String stageKey = '$badge|$title|$detail';
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 320),
+      curve: Curves.easeOutCubic,
+      alignment: Alignment.topCenter,
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 300),
+        switchInCurve: Curves.easeOut,
+        switchOutCurve: Curves.easeIn,
+        transitionBuilder: (child, anim) =>
+            FadeTransition(opacity: anim, child: child),
+        layoutBuilder: (currentChild, previousChildren) => Stack(
+          alignment: Alignment.topCenter,
+          children: [
+            ...previousChildren,
+            if (currentChild != null) currentChild,
+          ],
+        ),
+        child: Container(
+          key: ValueKey<String>(stageKey),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+          decoration: BoxDecoration(
+            color: const Color(0xFF111418).withOpacity(0.90),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: Colors.white.withOpacity(emphasise ? 0.22 : 0.10),
+          width: emphasise ? 1.4 : 1,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.18),
+            blurRadius: 14,
+            offset: const Offset(0, 5),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, color: const Color(0xFF111418), size: 21),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.16),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    badge,
+                    style: const TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.5,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.white,
+                    height: 1.15,
+                  ),
+                ),
+                if (detail.isNotEmpty) ...[
+                  const SizedBox(height: 3),
+                  Text(
+                    detail,
+                    style: const TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFFB7BBC2),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+        ),
+      ),
+    );
+  }
+
+  /// Phase B polish: privacy-safe "Shared ride progress" card. Shows only this
+  /// customer's counts/ETA/seats + GENERIC stop labels (no other-passenger data).
+  Widget _buildSharedProgressCard() {
+    final ms = _myState;
+    if (ms == null) return const SizedBox.shrink();
+    final eta = ms.isOnboard ? ms.etaToMyDropMinutes : ms.etaToMyPickupMinutes;
+    final etaLabel = ms.isOnboard ? 'Drop ETA' : 'Pickup ETA';
+    final beforeWhat = ms.isOnboard ? 'your drop' : 'your pickup';
+
+    Widget row(IconData ic, String text, {bool mine = false}) => Padding(
+          padding: const EdgeInsets.only(bottom: 6),
+          child: Row(children: [
+            Icon(ic,
+                size: 16,
+                color: mine ? const Color(0xFF006FD0) : const Color(0xFF6B7280)),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                text,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: mine ? FontWeight.w700 : FontWeight.w500,
+                  color: mine ? const Color(0xFF0C447C) : const Color(0xFF374151),
+                ),
+              ),
+            ),
+          ]),
+        );
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF6F8FA),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.black.withOpacity(0.06)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.04),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.groups_rounded,
+                  size: 18, color: Color(0xFF006FD0)),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text(
+                  'Shared ride progress',
+                  style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF1A1A1A)),
+                ),
+              ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 2.5),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF006FD0).withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: const Text(
+                  'SHARED',
+                  style: TextStyle(
+                    fontSize: 9.5,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.5,
+                    color: Color(0xFF0C447C),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          row(
+            Icons.alt_route_rounded,
+            ms.stopsBeforeMe > 0
+                ? '${ms.stopsBeforeMe} stop${ms.stopsBeforeMe == 1 ? '' : 's'} before $beforeWhat'
+                : (ms.isOnboard ? 'You are the next drop' : 'You are the next pickup'),
+          ),
+          if (eta != null) row(Icons.schedule_rounded, '$etaLabel: $eta min'),
+          if (ms.mySeatNumbers.isNotEmpty)
+            row(Icons.event_seat_rounded, 'Seat ${ms.mySeatNumbers.join(', ')}'),
+          if (ms.privacySafeStops.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            ...ms.privacySafeStops.map((s) {
+              final mine = s.type == 'MY_PICKUP' || s.type == 'MY_DROP';
+              return row(
+                mine ? Icons.my_location_rounded : Icons.circle_outlined,
+                s.label,
+                mine: mine,
+              );
+            }),
+          ],
+        ],
+      ),
+    );
   }
 
   void _updateLiveMetrics(LatLng driverPos) {
@@ -1013,6 +1811,72 @@ class _SharedScreensState extends State<SharedScreens>
     rideShareSocket.on('connect', (_) {
       if (!mounted) return;
       AppLogger.log.i("✅ Shared socket connected on shared screen");
+      // Recover the latest privacy-safe shared state on (re)connect.
+      _fetchMySharedState();
+    });
+
+    // Phase B: per-customer privacy-safe shared state (live). Updates the
+    // "X pickups before you / you are next / stops before your drop" message.
+    rideShareSocket.on('shared_my_state', (data) {
+      if (!mounted || data is! Map) return;
+      try {
+        setState(() =>
+            _myState = SharedMyState.fromJson(Map<String, dynamic>.from(data)));
+        // Backup completion path: if the live state says MY leg is DROPPED and the
+        // 'ride-completed' event was somehow missed, still route to payment (once).
+        _maybeGoToPaymentFromMyState(_myState);
+      } catch (_) {}
+    });
+
+    // BUG 3 — dispatch feedback (REUSES the existing backend `booking-update`
+    // event). On a driver DECLINE the backend emits DRIVER_REJECTED and instantly
+    // redispatches to the next eligible driver (emitBookingRequest), so the
+    // customer must STAY searching ("Finding another driver"), NOT go home. When
+    // truly no driver remains it emits NO_DRIVERS_AVAILABLE → show the no-driver
+    // state. Ignored once a driver is confirmed.
+    rideShareSocket.on('booking-update', (data) {
+      if (!mounted || data is! Map) return;
+      if (isDriverConfirmed || isTripCancelled) return;
+      final status = (data['status'] ?? '').toString().toUpperCase();
+      if (status == 'DRIVER_REJECTED' || status == 'SEARCHING_NEXT_DRIVER') {
+        setState(() {
+          isWaitingForDriver = true;
+          noDriverFound = false;
+          _waitingServerMessage = 'Finding another driver…';
+        });
+        // A fresh driver is now deciding → extend the no-driver window.
+        _restartNoDriverFoundTimer();
+      } else if (status == 'SEAT_NOT_AVAILABLE') {
+        // STRICT: chosen seat taken in every eligible car. Stop searching and ask
+        // the rider to pick another seat (no automatic fallback).
+        _noDriverFoundTimer?.cancel();
+        setState(() {
+          isWaitingForDriver = false;
+          noDriverFound = true;
+          _seatUnavailableMessage =
+              (data['message'] ?? '').toString().trim().isNotEmpty
+                  ? data['message'].toString()
+                  : 'Sorry, your selected seat is not currently available. Please choose another seat.';
+        });
+      } else if (status == 'NO_DRIVERS_AVAILABLE' ||
+          status == 'NO_DRIVER_AVAILABLE') {
+        _noDriverFoundTimer?.cancel();
+        setState(() {
+          isWaitingForDriver = false;
+          noDriverFound = true;
+          _seatUnavailableMessage = '';
+        });
+      }
+    });
+
+    // Live pickup-instruction updates — kept in _pickupInstructionLocal so they
+    // persist independently of the shared_my_state payload (which omits it).
+    rideShareSocket.on('pickup_instruction_updated', (data) {
+      if (!mounted || data is! Map) return;
+      final bId = (data['bookingId'] ?? '').toString();
+      if (bId.isNotEmpty && bId != _effectiveBookingId()) return;
+      setState(() =>
+          _pickupInstructionLocal = (data['pickupInstruction'] ?? '').toString());
     });
 
     // When booking is joined and driver accepted
@@ -1034,6 +1898,17 @@ class _SharedScreensState extends State<SharedScreens>
               ? (payload['vehicle'] as Map)
               : const <String, dynamic>{};
 
+      // Customer's seat(s) from the backend — resume-safe source for the
+      // "Your seat" card.
+      final seatsRaw = payload['seats'];
+      if (seatsRaw is List) {
+        final parsed = seatsRaw
+            .map((e) => int.tryParse(e.toString()))
+            .whereType<int>()
+            .toList();
+        if (parsed.isNotEmpty) _mySeatsFromServer = parsed;
+      }
+
       final String driverId = (payload['driverId'] ?? '').toString();
       final String driverFullName = (payload['driverName'] ?? '').toString();
       final double rating =
@@ -1043,14 +1918,18 @@ class _SharedScreensState extends State<SharedScreens>
       final String brand = (vehicle['brand'] ?? '').toString();
       final String model = (vehicle['model'] ?? '').toString();
       final String plate = (vehicle['plateNumber'] ?? '').toString();
+      // Use _firstImageUrl (same as single ride) — these fields can arrive as an
+      // ARRAY or a "[url]" string; a plain .toString() produced an invalid URL
+      // ("[https://…]") so CachedNetworkImage showed a broken-image icon.
       final String profilePic =
-          (payload['profilePic'] ?? vehicle['profilePic'] ?? '').toString();
+          _firstImageUrl(payload['profilePic'] ?? vehicle['profilePic']);
       final double amount =
           (payload['amount'] is num)
               ? (payload['amount'] as num).toDouble()
               : 0.0;
-      final String carExteriorPhotos =
-          (payload['carExteriorPhotos'] ?? '').toString();
+      final String carExteriorPhotos = _firstImageUrl(
+        payload['carExteriorPhotos'] ?? vehicle['carExteriorPhotos'],
+      );
 
       final String driverPhone = (payload['driverPhone'] ?? '').toString();
       final String bookingId = (payload['bookingId'] ?? '').toString();
@@ -1107,11 +1986,13 @@ class _SharedScreensState extends State<SharedScreens>
         isDriverConfirmed = hasDriver;
         isWaitingForDriver = !hasDriver;
         noDriverFound = false;
-        if (serverDestinationReached) destinationReached = true;
+        // M1: the GPS-derived 'destinationReached' flag NEVER flips the COMPLETED
+        // text in a shared ride (co-riders share the drop). It only means "almost
+        // there"; real completion comes from ride-completed / my-state DROPPED.
         if (serverRideStarted || serverDestinationReached) {
           driverStartedRide = true;
           _driverArrived = true;
-          _nearDestination = false;
+          _nearDestination = serverDestinationReached;
         }
         driverName =
             rating > 0
@@ -1165,6 +2046,7 @@ class _SharedScreensState extends State<SharedScreens>
     // OTP generated
     rideShareSocket.on('otp-generated', (data) {
       if (!mounted) return;
+      if (data is! Map) return; // guard against unexpected payload shapes
       final otpGenerated = (data['otpCode'] ?? '').toString().trim();
       if (otpGenerated.isEmpty) return;
       setState(() {
@@ -1173,6 +2055,10 @@ class _SharedScreensState extends State<SharedScreens>
         isDriverConfirmed = true;
         isWaitingForDriver = false;
       });
+      if (!_didAutoExpandOtp) {
+        _didAutoExpandOtp = true;
+        _autoExpandSheetToHalf(); // surface the OTP without hiding the map
+      }
       if (_customerPickupLatLng != null) {
         updatePickup(_customerPickupLatLng!);
       }
@@ -1181,6 +2067,7 @@ class _SharedScreensState extends State<SharedScreens>
 
     // Ride started (OTP success)
     rideShareSocket.on('ride-started', (data) async {
+      if (data is! Map) return; // guard against unexpected payload shapes
       final bool status = data['status'] == true;
       AppLogger.log.i("ride-started: $data");
 
@@ -1203,27 +2090,62 @@ class _SharedScreensState extends State<SharedScreens>
       }
     });
 
+    // GPS proximity only: the driver's CAR reached the drop area (backend fires
+    // this at <50m). It ONLY updates the UI to "you've reached your destination" —
+    // it does NOT open payment. Critical for shared rides: 3 riders sharing one
+    // drop sit in booking rooms whose drop is the same point, so this event reaches
+    // ALL of them; navigating here would open payment for everyone at once.
     rideShareSocket.on('driver-reached-destination', (data) {
-      final String bookingId =
-          shareRideController.sharedBooking.value?.bookingId ?? '';
+      if (data is! Map) return; // guard against unexpected payload shapes
       final status = data['status'];
       if (status == true) {
         if (!mounted) return;
         setState(() {
-          destinationReached = true;
-          _nearDestination = false;
+          // M1: do NOT flip to "you have reached your destination" on a GPS
+          // proximity event — at a shared drop this fires for co-riders who are
+          // NOT dropped yet. Show "Almost there" instead; the COMPLETED text +
+          // payment come ONLY from the per-booking 'ride-completed' / my-state
+          // DROPPED (backend-confirmed for THIS bookingId).
+          _nearDestination = true;
         });
         final drop = _customerDropLatLng ?? widget.dropPosition;
         updateDrop(drop);
         final p = _driverLatLng;
         if (p != null) _updateLiveMetrics(p);
-        Future.delayed(const Duration(seconds: 2), () {
-          if (!mounted) return;
-          // Replace with your actual PaymentScreen import
-          Get.to(() => PaymentScreen(bookingId: bookingId, amount: Amount));
-        });
-        AppLogger.log.i("driver_reached,$data");
+        AppLogger.log.i("driver_reached_area (almost-there UI only): $data");
       }
+    });
+
+    // PAYMENT opens ONLY here. The backend emits 'ride-completed' to THIS booking's
+    // room exclusively from completeRide() — i.e. when the driver MANUALLY swipes
+    // "Complete stop" for THIS passenger. Per-booking + backend-confirmed, so each
+    // rider pays only when their OWN drop is finished; pending co-riders keep
+    // waiting instead of all jumping to payment at a shared drop.
+    rideShareSocket.on('ride-completed', (data) {
+      if (data is! Map) return;
+      final String myBookingId = _effectiveBookingId();
+      final String evtBookingId = (data['bookingId'] ?? '').toString();
+      // The event is already room-scoped to this booking; this id check is a
+      // belt-and-braces guard so a stray broadcast can never pay the wrong rider.
+      if (evtBookingId.isNotEmpty &&
+          myBookingId.isNotEmpty &&
+          evtBookingId != myBookingId) {
+        return;
+      }
+      if (!mounted || _didGoToPayment) return;
+      _didGoToPayment = true;
+      setState(() {
+        destinationReached = true;
+        _nearDestination = false;
+      });
+      final num evtAmount =
+          data['tripAmount'] is num ? data['tripAmount'] as num : Amount;
+      final double payAmount = evtAmount.toDouble();
+      AppLogger.log.i("ride-completed (manual swipe) -> payment: $data");
+      Future.delayed(const Duration(milliseconds: 600), () {
+        if (!mounted) return;
+        Get.to(() => PaymentScreen(bookingId: myBookingId, amount: payAmount));
+      });
     });
 
     rideShareSocket.on('driver-arrived', (data) {
@@ -1232,13 +2154,17 @@ class _SharedScreensState extends State<SharedScreens>
       setState(() {
         _driverArrived = true;
       });
+      if (!_didAutoExpandArrival) {
+        _didAutoExpandArrival = true;
+        _autoExpandSheetToHalf(); // lift the sheet so the rider sees "arrived"
+      }
       final p = _driverLatLng;
       if (p != null) _updateLiveMetrics(p);
     });
 
     rideShareSocket.on('customer-cancelled', (data) async {
       AppLogger.log.i('customer-cancelled : $data');
-      if (data != null && data['status'] == true) {
+      if (data is Map && data['status'] == true) {
         if (!mounted) return;
         setState(() {
           isTripCancelled = true;
@@ -1256,7 +2182,7 @@ class _SharedScreensState extends State<SharedScreens>
 
     rideShareSocket.on('driver-cancelled', (data) async {
       AppLogger.log.i('driver-cancelled : $data');
-      if (data != null && data['status'] == true) {
+      if (data is Map && data['status'] == true) {
         if (!mounted) return;
         setState(() {
           isTripCancelled = true;
@@ -1278,7 +2204,10 @@ class _SharedScreensState extends State<SharedScreens>
         ack({"status": true, "message": "Driver location $ack"});
       }
 
-      if (data == null) return;
+      // Defensive: onAck normalizes payloads to a Map, but guard against any
+      // unexpected delivery shape so a stray List/primitive can't crash the
+      // ride isolate with a "String is not a subtype of int of 'index'" error.
+      if (data is! Map) return;
 
       final double lat =
           (data['latitude'] as num?)?.toDouble() ??
@@ -1504,6 +2433,7 @@ class _SharedScreensState extends State<SharedScreens>
     return points;
   }
 
+  // ignore: unused_element
   Widget _rideTypePill({required bool shared}) {
     final icon = shared ? Icons.group_rounded : Icons.person_rounded;
     final label = shared ? 'Shared ride' : 'Solo ride';
@@ -1529,6 +2459,8 @@ class _SharedScreensState extends State<SharedScreens>
     );
   }
 
+  // Kept (currently unrendered) so the 6-step stepper can be re-enabled easily.
+  // ignore: unused_element
   Widget _rideStatusTimeline() {
     const steps = [
       'Driver accepted',
@@ -1673,42 +2605,42 @@ class _SharedScreensState extends State<SharedScreens>
                         driverStartedRide
                             ? 'Ride in progress'
                             : 'Driver reaching pickup',
-                    mapPadding: const EdgeInsets.only(bottom: 210),
+                    mapPadding: const EdgeInsets.only(bottom: 110),
                   ),
                 ),
               ),
 
+              // SHARED-RIDE CLARITY: when the driver is serving ANOTHER rider
+              // first, the driver dot moving "away" confuses a waiting rider who's
+              // watching the MAP (not the sheet). This map banner explains it —
+              // privacy-safe (counts + generic action only, never the other rider).
+              Positioned(
+                top: 10,
+                left: 12,
+                right: 12,
+                child: SafeArea(
+                  bottom: false,
+                  child: _buildDriverBusyMapBanner(),
+                ),
+              ),
+
+              // Single map control, two toggling actions (Uber/Ola style):
+              // tap fits the whole route, then the icon flips to "recenter"; tap
+              // again recenters on the driver, icon flips back to "fit".
               Positioned(
                 top: 350,
                 right: 10,
                 child: SafeArea(
                   child: GestureDetector(
-                    onTap: _onLocationFabTap,
-                    onLongPress: () {
-                      final mapState = _mapKey.currentState;
-                      if (mapState == null) return;
-
-                      final driverPos = _driverLatLng;
-
-                      // Long-press: fit driver ↔ (pickup/drop) if driver exists,
-                      // otherwise fit pickup ↔ drop.
-                      final a =
-                          driverPos ??
-                          _customerPickupLatLng ??
-                          widget.pickupPosition;
-                      final b =
-                          driverPos != null
-                              ? (driverStartedRide
-                                  ? (_customerDropLatLng ?? widget.dropPosition)
-                                  : (_customerPickupLatLng ??
-                                      widget.pickupPosition))
-                              : (_customerDropLatLng ?? widget.dropPosition);
-
-                      if (a.latitude == b.latitude &&
-                          a.longitude == b.longitude) {
-                        return;
+                    onTap: () {
+                      // Manual only: tap = full-route view (stays), tap again =
+                      // focus the driver at zoom 16. No auto-toggling.
+                      if (_mapShowFit) {
+                        _mapKey.currentState?.fitRoute(padding: 120);
+                      } else {
+                        _onLocationFabTap();
                       }
-                      _mapKey.currentState?.fitRoute(padding: 120);
+                      if (mounted) setState(() => _mapShowFit = !_mapShowFit);
                     },
                     child: Container(
                       height: 42,
@@ -1723,12 +2655,11 @@ class _SharedScreensState extends State<SharedScreens>
                             offset: Offset(0, 3),
                           ),
                         ],
-                        border: Border.all(
-                          color: Colors.black.withOpacity(0.05),
-                        ),
+                        border:
+                            Border.all(color: Colors.black.withOpacity(0.05)),
                       ),
                       child: Icon(
-                        Icons.my_location,
+                        _mapShowFit ? Icons.crop_free : Icons.gps_fixed,
                         size: 22,
                         color: Colors.black87,
                       ),
@@ -1741,56 +2672,35 @@ class _SharedScreensState extends State<SharedScreens>
 
               // (Location FAB is unified above; no duplicate button in confirmed state.)
 
-              // EMERGENCY BUTTON
+              // EMERGENCY (SOS) — same white icon-button style as the locate
+              // button below it. These two are the only map controls.
               Positioned(
-                top: 50,
-                right: 15,
-                child: GestureDetector(
-                  onTap: () async {
-                    try {
-                      final prefs = await SharedPreferences.getInstance();
-                      String? sosNumber = prefs.getString('sosNumber');
-
-                      if (sosNumber == null || sosNumber.trim().isEmpty) {
-                        AppToasts.showError(context, 'SOS number not set');
-                        return;
-                      }
-
-                      sosNumber = sosNumber.trim();
-                      final hasPlus = sosNumber.startsWith('+');
-                      final digitsOnly = sosNumber.replaceAll(
-                        RegExp(r'[^0-9]'),
-                        '',
-                      );
-                      final normalized = hasPlus ? '+$digitsOnly' : digitsOnly;
-
-                      if (normalized.isEmpty) {
-                        AppToasts.showError(context, 'Invalid SOS number');
-                        return;
-                      }
-
-                      final ok = await launchPhoneDialer(normalized);
-
-                      if (!ok) {
-                        AppToasts.showError(context, 'Could not open dialer');
-                      }
-                    } catch (e) {
-                      AppToasts.showError(context, 'Failed to start call');
-                    }
-                  },
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 2,
-                    ),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(15),
-                      color: AppColors.emergencyColor,
-                    ),
-                    child: CustomTextFields.textWithStyles600(
-                      'Emergency',
-                      color: AppColors.commonWhite,
-                      fontSize: 16,
+                top: 302,
+                right: 10,
+                child: SafeArea(
+                  child: GestureDetector(
+                    onTap: _openSafetySheet,
+                    child: Container(
+                      height: 42,
+                      width: 42,
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(10),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Colors.black12,
+                            blurRadius: 8,
+                            offset: Offset(0, 3),
+                          ),
+                        ],
+                        border:
+                            Border.all(color: Colors.black.withOpacity(0.05)),
+                      ),
+                      child: Icon(
+                        Icons.sos_rounded,
+                        size: 22,
+                        color: AppColors.emergencyColor,
+                      ),
                     ),
                   ),
                 ),
@@ -1798,10 +2708,21 @@ class _SharedScreensState extends State<SharedScreens>
 
               // DRAGGABLE SHEET
               DraggableScrollableSheet(
-                key: ValueKey(isDriverConfirmed),
-                initialChildSize: isDriverConfirmed ? 0.65 : 0.5,
-                minChildSize: 0.4,
-                maxChildSize: isDriverConfirmed ? 0.9 : 0.80,
+                // ONE sheet for the whole journey (Uber-style): no `key`, so it is
+                // NEVER recreated when waiting→confirmed flips — the content morphs
+                // in place instead (no rebuild, no "new screen" flash). The
+                // controller is ALWAYS attached, so there is only ever ONE live
+                // attachment; the old double-attach crash came from the ValueKey
+                // rebuilding the sheet with two controllers at the same instant.
+                controller: _sheetController,
+                // One size config for both phases. We don't switch initialChildSize
+                // on confirm (that needs a recreate) — the sheet just stays where
+                // the rider left it while the content cross-fades.
+                initialChildSize: 0.5,
+                minChildSize: 0.30,
+                maxChildSize: 0.9,
+                snap: true,
+                snapSizes: const <double>[0.42, 0.5, 0.65, 0.9],
                 builder: (context, scrollController) {
                   return Container(
                     padding: const EdgeInsets.symmetric(horizontal: 15),
@@ -1824,299 +2745,444 @@ class _SharedScreensState extends State<SharedScreens>
                       children: [
                         Center(
                           child: Container(
-                            width: 40,
-                            height: 4,
+                            margin: const EdgeInsets.only(top: 4),
+                            width: 44,
+                            height: 5,
                             decoration: BoxDecoration(
-                              color: Colors.black12,
-                              borderRadius: BorderRadius.circular(2),
+                              color: Colors.black.withOpacity(0.14),
+                              borderRadius: BorderRadius.circular(3),
                             ),
                           ),
                         ),
-                        const SizedBox(height: 16),
+                        const SizedBox(height: 14),
+
+                        // Phase B polish: compact privacy-safe shared summary —
+                        // visible when the sheet is collapsed.
+                        if (_myState != null &&
+                            isDriverConfirmed &&
+                            !isTripCancelled &&
+                            _myState!.collapsedText.trim().isNotEmpty) ...[
+                          Row(
+                            children: [
+                              const Icon(Icons.groups_rounded,
+                                  size: 18, color: Color(0xFF006FD0)),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  _myState!.collapsedText,
+                                  style: const TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFF0C447C),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                        ],
 
                         if (!isDriverConfirmed && isWaitingForDriver) ...[
                           waitingForDriverUI(),
                         ] else if (!isDriverConfirmed && noDriverFound) ...[
                           noDriverFoundUI(),
                         ] else ...[
-                          if (isTripCancelled)
-                            Container(
-                              padding: const EdgeInsets.all(10),
-                              margin: const EdgeInsets.all(8),
-                              decoration: BoxDecoration(
-                                color: Colors.red.shade50,
-                                borderRadius: BorderRadius.circular(8),
-                                border: Border.all(color: Colors.red.shade200),
-                              ),
-                              child: Row(
-                                children: [
-                                  const Icon(Icons.cancel, color: Colors.red),
-                                  const SizedBox(width: 8),
-                                  Expanded(
-                                    child: Text(
-                                      cancelReason.trim().isEmpty
-                                          ? "Your trip has been cancelled"
-                                          : cancelReason,
-                                      style: const TextStyle(
-                                        color: Colors.red,
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            )
-                          else
-                            Center(
-                              child: CustomTextFields.textWithImage(
-                                fontSize: 20,
-                                imageSize: 24,
-                                fontWeight: FontWeight.w600,
-                                text:
-                                    destinationReached
-                                        ? 'Ride Completed'
-                                        : driverStartedRide
-                                        ? 'Ride in Progress'
-                                        : 'Your ride is confirmed',
-                                colors: AppColors.commonBlack,
-                                rightImagePath: AppImages.clrTick,
-                              ),
-                            ),
-
+                          // Strong live trip summary FIRST, at the top of the sheet.
                           if (!isTripCancelled) ...[
-                            const SizedBox(height: 6),
-                            Center(child: _rideTypePill(shared: true)),
-                          ],
-                          const SizedBox(height: 12),
-                          if (!isTripCancelled) ...[
-                            _rideStatusTimeline(),
+                            _buildReachStatusCard(),
                             const SizedBox(height: 14),
                           ],
-                          Row(
-                            children: [
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
+                          // (Seat + shared-route progress are rendered BELOW the
+                          // driver card so the collapsed sheet leads with the
+                          // status card + driver detail.)
+                          if (isTripCancelled)
+                            Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 24,
+                                vertical: 36,
+                              ),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                mainAxisAlignment: MainAxisAlignment.center,
                                 children: [
-                                  CustomTextFields.textWithStylesSmall(
-                                    plateNumber,
-                                    colors: AppColors.commonBlack,
-                                    fontWeight: FontWeight.w500,
+                                  Container(
+                                    width: 84,
+                                    height: 84,
+                                    decoration: BoxDecoration(
+                                      color: Colors.red.shade50,
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: Icon(
+                                      Icons.cancel_rounded,
+                                      color: Colors.red.shade400,
+                                      size: 48,
+                                    ),
                                   ),
+                                  const SizedBox(height: 20),
+                                  const Text(
+                                    'Ride cancelled',
+                                    style: TextStyle(
+                                      fontSize: 20,
+                                      fontWeight: FontWeight.w700,
+                                      color: AppColors.commonBlack,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 10),
+                                  Text(
+                                    cancelReason.trim().isEmpty
+                                        ? "Your driver had to cancel this ride. You haven't been charged for the trip."
+                                        : cancelReason,
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      height: 1.4,
+                                      color: Colors.grey.shade700,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 28),
                                   Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
                                     children: [
-                                      Container(
-                                        decoration: BoxDecoration(
-                                          borderRadius: BorderRadius.circular(
-                                            50,
-                                          ),
-                                          color: AppColors.containerColor1,
-                                        ),
-                                        child: Padding(
-                                          padding: const EdgeInsets.all(8.0),
-                                          child:
-                                              (ProfilePic.isNotEmpty)
-                                                  ? CachedNetworkImage(
-                                                    imageUrl: ProfilePic,
-                                                    height: 20,
-                                                    width: 20,
-                                                    placeholder:
-                                                        (
-                                                          context,
-                                                          url,
-                                                        ) => const SizedBox(
-                                                          height: 16,
-                                                          width: 16,
-                                                          child:
-                                                              CircularProgressIndicator(
-                                                                strokeWidth: 2,
-                                                              ),
-                                                        ),
-                                                    errorWidget:
-                                                        (context, url, error) =>
-                                                            const Icon(
-                                                              Icons.person,
-                                                              size: 20,
-                                                            ),
-                                                  )
-                                                  : const Icon(
-                                                    Icons.person,
-                                                    size: 20,
-                                                  ),
+                                      SizedBox(
+                                        width: 16,
+                                        height: 16,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: Colors.grey.shade500,
                                         ),
                                       ),
                                       const SizedBox(width: 10),
-                                      CustomTextFields.textWithStylesSmall(
-                                        driverName,
-                                        colors: AppColors.commonBlack,
-                                        fontWeight: FontWeight.w500,
+                                      Text(
+                                        'Taking you back home…',
+                                        style: TextStyle(
+                                          fontSize: 13,
+                                          color: Colors.grey.shade600,
+                                        ),
                                       ),
                                     ],
                                   ),
-                                  CustomTextFields.textWithStylesSmall(
-                                    carDetails,
-                                    fontSize: 12,
-                                    colors: AppColors.carTypeColor,
-                                  ),
                                 ],
                               ),
-                              const Spacer(),
-                              CarExteriorPhotos.isNotEmpty
-                                  ? ClipRRect(
-                                    borderRadius: BorderRadius.circular(12),
-                                    child: CachedNetworkImage(
-                                      fit: BoxFit.fill,
-                                      height: 80,
-                                      width: 100,
-                                      imageUrl: CarExteriorPhotos,
-                                      placeholder:
-                                          (context, url) => const Center(
+                            ),
+                          const SizedBox(height: 12),
+                          // (Removed) 6-step ride-status timeline — the live
+                          // summary card at the top now carries the ride stage.
+                          // OTP black card — before ride starts (urgent pre-ride
+                          // action), above the driver card. Hidden after start; a
+                          // blue OTP chip then shows in the Total Fare card.
+                          // OTP card morphs in/out (no pop): eases open before the
+                          // ride starts, then smoothly collapses away once started.
+                          AnimatedSize(
+                            duration: const Duration(milliseconds: 300),
+                            curve: Curves.easeOutCubic,
+                            alignment: Alignment.topCenter,
+                            child: AnimatedSwitcher(
+                              duration: const Duration(milliseconds: 280),
+                              switchInCurve: Curves.easeOut,
+                              switchOutCurve: Curves.easeIn,
+                              transitionBuilder: (child, anim) =>
+                                  FadeTransition(opacity: anim, child: child),
+                              child: (otp.isNotEmpty &&
+                                      !driverStartedRide &&
+                                      !destinationReached)
+                                  ? Padding(
+                                      key: const ValueKey('otp-card'),
+                                      padding: const EdgeInsets.only(bottom: 16),
+                                      child: _otpHighlightCard(),
+                                    )
+                                  : const SizedBox.shrink(
+                                      key: ValueKey('otp-none'),
+                                    ),
+                            ),
+                          ),
+                          // DRIVER CARD — bordered. Photo left; name, rating and
+                          // plate stacked vertically; car image on the right.
+                          Builder(
+                            builder: (_) {
+                              final rawName = driverName.trim();
+                              final starIdx = rawName.indexOf('⭐');
+                              final nameOnly = (starIdx >= 0
+                                      ? rawName.substring(0, starIdx)
+                                      : rawName)
+                                  .trim();
+                              final ratingOnly = starIdx >= 0
+                                  ? rawName.substring(starIdx + 1).trim()
+                                  : '';
+                              return Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.all(14),
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: BorderRadius.circular(14),
+                                  border: Border.all(
+                                      color: Colors.black.withOpacity(0.12)),
+                                ),
+                                child: Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    // Driver photo (tap → Hero preview).
+                                    GestureDetector(
+                                      onTap: ProfilePic.trim().isEmpty
+                                          ? null
+                                          : _openDriverPhotoPreview,
+                                      child: Container(
+                                        height: 52,
+                                        width: 52,
+                                        clipBehavior: Clip.antiAlias,
+                                        decoration: BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          color: AppColors.containerColor1,
+                                          border: Border.all(
+                                            color: const Color(0xFF006FD0)
+                                                .withOpacity(0.35),
+                                            width: 2,
+                                          ),
+                                        ),
+                                        child: (ProfilePic.isNotEmpty)
+                                            ? Hero(
+                                                tag: 'driver-photo-hero',
+                                                child: CachedNetworkImage(
+                                                  imageUrl: ProfilePic,
+                                                  fit: BoxFit.cover,
+                                                  placeholder: (context, url) =>
+                                                      const Center(
+                                                    child: SizedBox(
+                                                      height: 16,
+                                                      width: 16,
+                                                      child:
+                                                          CircularProgressIndicator(
+                                                              strokeWidth: 2),
+                                                    ),
+                                                  ),
+                                                  errorWidget:
+                                                      (context, url, error) =>
+                                                          const Icon(
+                                                              Icons.person,
+                                                              size: 26),
+                                                ),
+                                              )
+                                            : const Icon(Icons.person, size: 26),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    // Name → rating → plate, each on its own line.
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            nameOnly.isEmpty
+                                                ? 'Your driver'
+                                                : nameOnly,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              fontSize: 15,
+                                              fontWeight: FontWeight.w700,
+                                              color: Color(0xFF1A1A1A),
+                                            ),
+                                          ),
+                                          if (ratingOnly.isNotEmpty) ...[
+                                            const SizedBox(height: 3),
+                                            Row(
+                                              children: [
+                                                const Icon(Icons.star_rounded,
+                                                    size: 15,
+                                                    color: Color(0xFFF5A623)),
+                                                const SizedBox(width: 3),
+                                                Text(
+                                                  ratingOnly,
+                                                  style: const TextStyle(
+                                                    fontSize: 12.5,
+                                                    fontWeight: FontWeight.w600,
+                                                    color: Color(0xFF6B7280),
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ],
+                                          const SizedBox(height: 7),
+                                          // Number plate.
+                                          Container(
+                                            padding:
+                                                const EdgeInsets.symmetric(
+                                                    horizontal: 9, vertical: 4),
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xFFF1F3F5),
+                                              borderRadius:
+                                                  BorderRadius.circular(7),
+                                              border: Border.all(
+                                                  color: Colors.black
+                                                      .withOpacity(0.08)),
+                                            ),
+                                            child: Text(
+                                              plateNumber.isEmpty
+                                                  ? '—'
+                                                  : plateNumber,
+                                              style: const TextStyle(
+                                                fontSize: 12.5,
+                                                fontWeight: FontWeight.w800,
+                                                letterSpacing: 1.0,
+                                                color: Color(0xFF1A1A1A),
+                                              ),
+                                            ),
+                                          ),
+                                          if (carDetails.trim().isNotEmpty) ...[
+                                            const SizedBox(height: 6),
+                                            Text(
+                                              carDetails,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                fontSize: 12,
+                                                color: AppColors.carTypeColor,
+                                              ),
+                                            ),
+                                          ],
+                                        ],
+                                      ),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    // Car image (right).
+                                    if (CarExteriorPhotos.isNotEmpty)
+                                      ClipRRect(
+                                        borderRadius: BorderRadius.circular(12),
+                                        child: CachedNetworkImage(
+                                          fit: BoxFit.cover,
+                                          height: 66,
+                                          width: 86,
+                                          imageUrl: CarExteriorPhotos,
+                                          placeholder: (context, url) =>
+                                              const Center(
                                             child: SizedBox(
                                               height: 16,
                                               width: 16,
                                               child: CircularProgressIndicator(
-                                                strokeWidth: 2,
-                                              ),
+                                                  strokeWidth: 2),
                                             ),
                                           ),
-                                      errorWidget:
-                                          (context, url, error) => Container(
-                                            height: 80,
-                                            width: 100,
+                                          errorWidget: (context, url, error) =>
+                                              Container(
+                                            height: 66,
+                                            width: 86,
                                             alignment: Alignment.center,
                                             color: Colors.grey.shade200,
-                                            child: const Icon(
-                                              Icons.broken_image,
-                                              color: Colors.grey,
-                                              size: 28,
-                                            ),
+                                            child: Icon(Icons.directions_car,
+                                                color: Colors.grey.shade500,
+                                                size: 26),
                                           ),
-                                    ),
-                                  )
-                                  : const SizedBox.shrink(),
-                            ],
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              );
+                            },
                           ),
                           const SizedBox(height: 20),
 
-                          // CALL + CHAT
-                          Row(
-                            children: [
-                              Container(
-                                decoration: BoxDecoration(
-                                  borderRadius: BorderRadius.circular(50),
-                                  color: AppColors.containerColor1,
-                                ),
-                                child: Padding(
-                                  padding: const EdgeInsets.all(8.0),
-                                  child: InkWell(
-                                    onTap: () async {
-                                      try {
-                                        var rawNumber = _driverPhone.trim();
-                                        if (rawNumber.isEmpty) {
-                                          AppToasts.showError(
-                                            context,
-                                            'Number Not set ',
-                                          );
-                                          return;
-                                        }
-
-                                        final hasPlus = rawNumber.startsWith(
-                                          '+',
-                                        );
-                                        final digitsOnly = rawNumber.replaceAll(
-                                          RegExp(r'[^0-9]'),
-                                          '',
-                                        );
-                                        final normalized =
-                                            hasPlus
-                                                ? '+$digitsOnly'
-                                                : digitsOnly;
-
-                                        if (normalized.isEmpty) {
-                                          AppToasts.showError(
-                                            context,
-                                            'Invalid number',
-                                          );
-                                          return;
-                                        }
-
-                                        final ok = await launchPhoneDialer(
-                                          normalized,
-                                        );
-
-                                        if (!ok) {
-                                          AppToasts.showError(
-                                            context,
-                                            'Could not open dialer',
-                                          );
-                                        }
-                                      } catch (e) {
-                                        AppToasts.showError(
-                                          context,
-                                          'Failed to start call',
-                                        );
-                                      }
-                                    },
-                                    child: Image.asset(
-                                      AppImages.call,
-                                      height: 20,
-                                      width: 20,
-                                    ),
+                          // Shared-ride tag + your seat as two clean styled pills.
+                          if (!isTripCancelled) ...[
+                            Row(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 10, vertical: 6),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFFEDF3FF),
+                                    borderRadius: BorderRadius.circular(9),
+                                  ),
+                                  child: const Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(Icons.groups_rounded,
+                                          size: 15, color: Color(0xFF006FD0)),
+                                      SizedBox(width: 6),
+                                      Text(
+                                        'Shared ride',
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w700,
+                                          color: Color(0xFF0C447C),
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
-                              ),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: InkWell(
-                                  onTap: () {
-                                    Navigator.push(
-                                      context,
-                                      MaterialPageRoute(
-                                        builder:
-                                            (context) => SharedChatScreens(
-                                              bookingId:
-                                                  shareRideController
-                                                      .sharedBooking
-                                                      .value
-                                                      ?.bookingId
-                                                      .toString() ??
-                                                  '',
-                                            ),
-                                      ),
-                                    );
-                                  },
-                                  child: Container(
+                                if (_effectiveSeats.isNotEmpty) ...[
+                                  const SizedBox(width: 8),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 10, vertical: 6),
                                     decoration: BoxDecoration(
-                                      borderRadius: BorderRadius.circular(20),
-                                      color: AppColors.containerColor1,
+                                      color: const Color(0xFFF5F5F7),
+                                      borderRadius: BorderRadius.circular(9),
                                     ),
-                                    child: Padding(
-                                      padding: const EdgeInsets.all(8.0),
-                                      child: Row(
-                                        children: [
-                                          CustomTextFields.textWithStylesSmall(
-                                            'Message your driver',
-                                            colors: AppColors.commonBlack,
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const Icon(Icons.event_seat_rounded,
+                                            size: 15, color: Color(0xFF1A1A1A)),
+                                        const SizedBox(width: 6),
+                                        Text(
+                                          'Seat ${_effectiveSeats.join(', ')}',
+                                          style: const TextStyle(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w700,
+                                            color: Color(0xFF1A1A1A),
                                           ),
-                                          const Spacer(),
-                                          Image.asset(
-                                            AppImages.send,
-                                            height: 16,
-                                            width: 16,
-                                          ),
-                                        ],
-                                      ),
+                                        ),
+                                      ],
                                     ),
                                   ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 20),
-                          if (otp.isNotEmpty &&
-                              !driverStartedRide &&
-                              !destinationReached) ...[
-                            _otpHighlightCard(),
-                            const SizedBox(height: 16),
+                                ],
+                                // Payment type pill — real paymentMode from the
+                                // booking (Cash / Online / Wallet), once it's set.
+                                if ((_myState?.paymentLabel ?? '').isNotEmpty) ...[
+                                  const SizedBox(width: 8),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 10, vertical: 6),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFFF5F5F7),
+                                      borderRadius: BorderRadius.circular(9),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          _myState!.paymentLabel == 'Cash'
+                                              ? Icons.payments_outlined
+                                              : _myState!.paymentLabel ==
+                                                      'Wallet'
+                                                  ? Icons
+                                                      .account_balance_wallet_outlined
+                                                  : Icons.credit_card_rounded,
+                                          size: 15,
+                                          color: const Color(0xFF1A1A1A),
+                                        ),
+                                        const SizedBox(width: 6),
+                                        Text(
+                                          _myState!.paymentLabel,
+                                          style: const TextStyle(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w700,
+                                            color: Color(0xFF1A1A1A),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
+                            const SizedBox(height: 14),
+                          ],
+                          // Privacy-safe shared-route progress (moved below).
+                          if (!isTripCancelled && _myState != null) ...[
+                            _buildSharedProgressCard(),
+                            const SizedBox(height: 14),
                           ],
 
                           // FARE BOX
@@ -2153,33 +3219,91 @@ class _SharedScreensState extends State<SharedScreens>
                                                   AppImages.nBlackCurrency,
                                               rightImagePathText: ' $Amount',
                                             ),
+                                            const SizedBox(width: 8),
+                                            // Real payment type (DB-sourced via
+                                            // my-state): Cash / Online / Wallet.
+                                            if ((_myState?.paymentLabel ?? '')
+                                                .isNotEmpty)
+                                              Container(
+                                                padding:
+                                                    const EdgeInsets.symmetric(
+                                                        horizontal: 9,
+                                                        vertical: 4),
+                                                decoration: BoxDecoration(
+                                                  color: const Color(0xFFF5F5F7),
+                                                  borderRadius:
+                                                      BorderRadius.circular(8),
+                                                ),
+                                                child: Row(
+                                                  mainAxisSize:
+                                                      MainAxisSize.min,
+                                                  children: [
+                                                    Icon(
+                                                      _myState!.paymentLabel ==
+                                                              'Cash'
+                                                          ? Icons
+                                                              .payments_outlined
+                                                          : _myState!
+                                                                      .paymentLabel ==
+                                                                  'Wallet'
+                                                              ? Icons
+                                                                  .account_balance_wallet_outlined
+                                                              : Icons
+                                                                  .credit_card_rounded,
+                                                      size: 14,
+                                                      color: const Color(
+                                                          0xFF1A1A1A),
+                                                    ),
+                                                    const SizedBox(width: 5),
+                                                    Text(
+                                                      _myState!.paymentLabel,
+                                                      style: const TextStyle(
+                                                        fontSize: 11.5,
+                                                        fontWeight:
+                                                            FontWeight.w700,
+                                                        color:
+                                                            Color(0xFF1A1A1A),
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
                                             const Spacer(),
-                                            otp.isEmpty
-                                                ? const SizedBox.shrink()
-                                                : Container(
+                                            // Small blue OTP chip — only AFTER the
+                                            // ride has started (the black OTP card
+                                            // handles the pre-start phase, so the
+                                            // two never show together).
+                                            (driverStartedRide &&
+                                                    otp.isNotEmpty)
+                                                ? Container(
                                                   padding:
                                                       const EdgeInsets.symmetric(
                                                         horizontal: 10,
-                                                        vertical: 6,
+                                                        vertical: 5,
                                                       ),
                                                   decoration: BoxDecoration(
                                                     borderRadius:
-                                                        BorderRadius.circular(
-                                                          6,
-                                                        ),
-                                                    color:
-                                                        AppColors
-                                                            .userChatContainerColor,
+                                                        BorderRadius.circular(8),
+                                                    color: const Color(
+                                                      0xFFE6F1FB,
+                                                    ),
+                                                    border: Border.all(
+                                                      color: const Color(
+                                                        0xFF378ADD,
+                                                      ).withOpacity(0.35),
+                                                    ),
                                                   ),
-                                                  child:
-                                                      CustomTextFields.textWithStyles600(
-                                                        'OTP - $otp',
-                                                        fontSize: 16,
-                                                        color:
-                                                            AppColors
-                                                                .commonWhite,
-                                                      ),
-                                                ),
+                                                  child: Text(
+                                                    'OTP • $otp',
+                                                    style: const TextStyle(
+                                                      fontSize: 13,
+                                                      fontWeight: FontWeight.w700,
+                                                      letterSpacing: 0.5,
+                                                      color: Color(0xFF185FA5),
+                                                    ),
+                                                  ),
+                                                )
+                                                : const SizedBox.shrink(),
                                           ],
                                         ),
                                         Padding(
@@ -2408,39 +3532,81 @@ class _SharedScreensState extends State<SharedScreens>
                           ),
                           const SizedBox(height: 20),
 
-                          // DIRECTIONS CARD
-                          GestureDetector(
-                            onTap: () {},
-                            child: Container(
-                              decoration: BoxDecoration(
-                                color: AppColors.containerColor1,
-                                borderRadius: BorderRadius.circular(5),
-                              ),
-                              child: Padding(
-                                padding: const EdgeInsets.all(15),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    CustomTextFields.textWithStyles600(
-                                      'Directions to reach',
-                                      fontSize: 14,
+                          // DIRECTIONS CARD — only useful BEFORE pickup is done
+                          // (driver coming / arrived). Hidden once the ride starts.
+                          if (isDriverConfirmed &&
+                              !driverStartedRide &&
+                              !destinationReached) ...[
+                            Builder(
+                              builder: (_) {
+                                final instr = (_pickupInstructionLocal ??
+                                        (_myState?.pickupInstruction ?? ''))
+                                    .trim();
+                                final hasInstr = instr.isNotEmpty;
+                                return GestureDetector(
+                                  onTap: _openPickupInstructionSheet,
+                                  child: Container(
+                                    width: double.infinity,
+                                    decoration: BoxDecoration(
+                                      color: AppColors.containerColor1,
+                                      borderRadius: BorderRadius.circular(12),
+                                      border: Border.all(
+                                          color: Colors.black.withOpacity(0.05)),
                                     ),
-                                    CustomTextFields.textWithStylesSmall(
-                                      'Help your driver partner reach you faster',
-                                      fontSize: 12,
+                                    child: Padding(
+                                      padding: const EdgeInsets.all(15),
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Row(
+                                            children: [
+                                              const Icon(Icons.explore_outlined,
+                                                  size: 18,
+                                                  color: Color(0xFF374151)),
+                                              const SizedBox(width: 8),
+                                              CustomTextFields.textWithStyles600(
+                                                'Directions to reach',
+                                                fontSize: 14,
+                                              ),
+                                            ],
+                                          ),
+                                          const SizedBox(height: 2),
+                                          CustomTextFields.textWithStylesSmall(
+                                            'Help your driver reach you faster',
+                                            fontSize: 12,
+                                          ),
+                                          if (hasInstr) ...[
+                                            const SizedBox(height: 8),
+                                            Text(
+                                              instr,
+                                              maxLines: 2,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: const TextStyle(
+                                                fontSize: 12.5,
+                                                fontWeight: FontWeight.w500,
+                                                color: Color(0xFF1A1A1A),
+                                              ),
+                                            ),
+                                          ],
+                                          const SizedBox(height: 8),
+                                          CustomTextFields.textWithStylesSmall(
+                                            hasInstr
+                                                ? 'Edit Direction'
+                                                : 'Add Direction',
+                                            fontSize: 12,
+                                            colors: AppColors.resendBlue,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ],
+                                      ),
                                     ),
-                                    CustomTextFields.textWithStylesSmall(
-                                      'Add Direction',
-                                      fontSize: 12,
-                                      colors: AppColors.resendBlue,
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                                  ],
-                                ),
-                              ),
+                                  ),
+                                );
+                              },
                             ),
-                          ),
-                          const SizedBox(height: 20),
+                            const SizedBox(height: 20),
+                          ],
 
                           // PICKUP & DROP READONLY FIELDS + ACTIONS
                           Container(
@@ -2618,10 +3784,22 @@ class _SharedScreensState extends State<SharedScreens>
                           ),
                           const SizedBox(height: 20),
                         ],
+                        // Bottom padding so the fixed Call/Message bar never
+                        // hides the last sheet content (Cancel/Support/Share).
+                        const SizedBox(height: 104),
                       ],
                     ),
                   );
                 },
+              ),
+
+              // FIXED BOTTOM BAR — Call + Message, always visible above the
+              // draggable sheet (drawn last in the Stack so it sits on top).
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: _buildFixedDriverActionBar(),
               ),
             ],
           ),
@@ -2959,19 +4137,23 @@ class _SharedScreensState extends State<SharedScreens>
             fit: BoxFit.contain,
           ),
           const SizedBox(height: 20),
-          const Text(
-            "No drivers found",
-            style: TextStyle(
+          Text(
+            _seatUnavailableMessage.isNotEmpty
+                ? "Seat not available"
+                : "No drivers found",
+            style: const TextStyle(
               fontSize: 16,
               fontWeight: FontWeight.w700,
               color: Color(0xFF14213A),
             ),
           ),
           const SizedBox(height: 8),
-          const Text(
-            "We couldn't find any available drivers nearby.\nPlease try again in a few minutes",
+          Text(
+            _seatUnavailableMessage.isNotEmpty
+                ? _seatUnavailableMessage
+                : "We couldn't find any available drivers nearby.\nPlease try again in a few minutes",
             textAlign: TextAlign.center,
-            style: TextStyle(
+            style: const TextStyle(
               fontSize: 13,
               fontWeight: FontWeight.w400,
               color: Color(0xFF667085),
@@ -2982,8 +4164,17 @@ class _SharedScreensState extends State<SharedScreens>
           AppButtons.button(
             buttonColor: Colors.blue,
             textColor: Colors.white,
-            text: "Try Again",
+            text: _seatUnavailableMessage.isNotEmpty
+                ? "Choose another seat"
+                : "Try Again",
             onTap: () async {
+              // STRICT seat dispatch: "Try Again" would re-request the SAME taken
+              // seat and fail again — so for a seat conflict we send the rider back
+              // to the seat picker to choose a different seat (no auto-fallback).
+              if (_seatUnavailableMessage.isNotEmpty) {
+                if (mounted) Navigator.pop(context);
+                return;
+              }
               setState(() {
                 isWaitingForDriver = true;
                 noDriverFound = false;
@@ -3053,6 +4244,68 @@ class _SharedScreensState extends State<SharedScreens>
                   fontSize: 16,
                   fontWeight: FontWeight.bold,
                 ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Full-screen driver-photo preview with a Hero transition from the avatar.
+/// Tap anywhere or the close button to dismiss. Safe on a missing/bad URL.
+class _DriverPhotoPreview extends StatelessWidget {
+  final String imageUrl;
+  const _DriverPhotoPreview({required this.imageUrl});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.transparent,
+      body: Stack(
+        children: [
+          Positioned.fill(
+            child: GestureDetector(
+              onTap: () => Navigator.of(context).maybePop(),
+              child: Center(
+                child: Hero(
+                  tag: 'driver-photo-hero',
+                  child: InteractiveViewer(
+                    minScale: 1,
+                    maxScale: 4,
+                    child: CachedNetworkImage(
+                      imageUrl: imageUrl,
+                      fit: BoxFit.contain,
+                      placeholder: (context, url) => const Center(
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      ),
+                      errorWidget: (context, url, error) => const Icon(
+                        Icons.person,
+                        color: Colors.white,
+                        size: 120,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          Positioned(
+            top: MediaQuery.of(context).padding.top + 10,
+            right: 14,
+            child: GestureDetector(
+              onTap: () => Navigator.of(context).maybePop(),
+              child: Container(
+                padding: const EdgeInsets.all(8),
+                decoration: const BoxDecoration(
+                  color: Colors.black54,
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.close, color: Colors.white, size: 24),
               ),
             ),
           ),

@@ -35,6 +35,7 @@ class SharedDriverData {
   final String? carType;
   final int? estimatedTime;
   final int? maxSeats;
+  final int? maxSeatsPerBooking;
   final List<SharedSeat>? seats;
   final List<SharedFareByLocation> faresByLocation;
 
@@ -46,6 +47,7 @@ class SharedDriverData {
     this.carType,
     this.estimatedTime,
     this.maxSeats,
+    this.maxSeatsPerBooking,
     this.seats,
     this.faresByLocation = const [],
   });
@@ -64,6 +66,7 @@ class SharedDriverData {
       carType: json['carType'] as String?,
       estimatedTime: json['estimatedTime'] as int?,
       maxSeats: json['maxSeats'] as int?, // may be null / absent
+      maxSeatsPerBooking: json['maxSeatsPerBooking'] as int?,
       seats:
           (json['seats'] as List<dynamic>?)
               ?.map((e) => SharedSeat.fromJson(e as Map<String, dynamic>))
@@ -85,6 +88,7 @@ class SharedDriverData {
       'carType': carType,
       'estimatedTime': estimatedTime,
       'maxSeats': maxSeats,
+      'maxSeatsPerBooking': maxSeatsPerBooking,
       'seats': seats?.map((e) => e.toJson()).toList(),
       'faresByLocation': faresByLocation.map((e) => e.toJson()).toList(),
     };

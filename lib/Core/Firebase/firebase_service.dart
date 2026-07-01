@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:hopper/Core/Utility/shared_pref_helper.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -179,7 +180,7 @@ class FirebaseService {
 
   Future<bool> _isUserAuthenticated() async {
     final prefs = await SharedPreferences.getInstance();
-    final authToken = prefs.getString('token');
+    final authToken = await SharedPrefHelper.getToken();
     return authToken != null && authToken.isNotEmpty;
   }
 

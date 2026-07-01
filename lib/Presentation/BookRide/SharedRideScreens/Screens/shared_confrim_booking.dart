@@ -27,6 +27,7 @@ class SharedConfrimBooking extends StatefulWidget {
   final String destinationAddress;
   final String? carType;
   final List<LatLng> routePoints;
+  final List<int> selectedSeats;
   const SharedConfrimBooking({
     super.key,
     this.selectedCarType,
@@ -37,6 +38,7 @@ class SharedConfrimBooking extends StatefulWidget {
     required this.pickupAddress,
     required this.destinationAddress,
     required this.routePoints, // 🔹 NEW
+    this.selectedSeats = const [],
   });
 
   @override
@@ -57,14 +59,18 @@ class _SharedConfrimBookingState extends State<SharedConfrimBooking> {
   void initState() {
     super.initState();
 
+    // Safe coercion: pickupData/destinationData are dynamic maps; values may
+    // arrive as int/String/null. A raw cast to double here threw in initState
+    // and crashed the screen. Use the same num?->double pattern as the rest of
+    // this file.
     _pickupPosition = LatLng(
-      widget.pickupData['lat'],
-      widget.pickupData['lng'],
+      (widget.pickupData['lat'] as num?)?.toDouble() ?? 0.0,
+      (widget.pickupData['lng'] as num?)?.toDouble() ?? 0.0,
     );
 
     _destinationPosition = LatLng(
-      widget.destinationData['lat'],
-      widget.destinationData['lng'],
+      (widget.destinationData['lat'] as num?)?.toDouble() ?? 0.0,
+      (widget.destinationData['lng'] as num?)?.toDouble() ?? 0.0,
     );
   }
 
@@ -950,6 +956,7 @@ class _SharedConfrimBookingState extends State<SharedConfrimBooking> {
                                     pickupPosition: pickupPos,
                                     dropPosition: destPos,
                                     carType: widget.carType ?? '',
+                                    selectedSeats: widget.selectedSeats,
                                   ),
                             ),
                           );
@@ -1013,8 +1020,11 @@ class _SharedConfrimBookingState extends State<SharedConfrimBooking> {
         bookingId: allData?.bookingId.toString() ?? '',
         context: context,
       );
-      return true;
-      // return result != null;
+      // BUGFIX: previously returned true unconditionally, so a FAILED driver
+      // request still navigated the user to live tracking (infinite "searching"
+      // with no driver dispatched). sendSharedDriverRequest returns 'success'
+      // only on success (null / 'An error occurred' otherwise).
+      return result == 'success';
     } catch (e) {
       debugPrint("Error uploading photo or sending booking: $e");
       return false;

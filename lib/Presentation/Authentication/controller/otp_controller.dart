@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:hopper/Core/Utility/shared_pref_helper.dart';
 import 'dart:async' show unawaited;
 import 'package:get/get.dart';
 import 'package:hopper/Core/Consents/app_logger.dart';
@@ -44,7 +45,7 @@ class OtpController extends GetxController {
           AppLogger.log.i(response.data.toString());
 
           final prefs = await SharedPreferences.getInstance();
-          await prefs.setString('token', response.data.token);
+          await SharedPrefHelper.setToken(response.data.token);
           await prefs.setString('customer_Id', response.data.customer.id);
           // New-user / profile-completion flags decide whether the post-OTP
           // "One last step" details screen is shown.
@@ -57,7 +58,7 @@ class OtpController extends GetxController {
           accessToken = response.data.token;
           customerId = response.data.customer.id;
           AppLogger.log.i('Response = $accessToken');
-          final savedToken = prefs.getString('token');
+          final savedToken = await SharedPrefHelper.getToken();
           final savedCustomerId = prefs.getString('customer_Id');
           AppLogger.log.i('token = $savedToken');
           AppLogger.log.i('token = $savedCustomerId');

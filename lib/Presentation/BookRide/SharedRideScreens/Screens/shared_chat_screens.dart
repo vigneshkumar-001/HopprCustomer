@@ -20,6 +20,7 @@ import 'package:hopper/uitls/websocket/socket_io_client.dart';
 import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Core/Consents/app_logger.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
+import 'package:hopper/Core/Utility/app_toasts.dart';
 import 'package:hopper/Core/Utility/app_loader.dart';
 import 'package:hopper/Core/Utility/typing_animate.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
@@ -246,13 +247,33 @@ class _SharedChatScreensState extends State<SharedChatScreens> {
 
     rideShareSocket.initSocket(ApiConsents.sharedBaseUrl);
 
+    // Register WITH the bookingId so the backend `register` handler joins this
+    // socket to `booking-<id>`. Without it the customer was not guaranteed to
+    // be in the chat room, so the driver's replies didn't arrive instantly.
+    final String roomBookingId = widget.bookingId.trim();
+    final String? bookingIdOrNull =
+        roomBookingId.isEmpty ? null : roomBookingId;
+
+    void joinChatRoom() {
+      rideShareSocket.registerUser(customerId, bookingId: bookingIdOrNull);
+      if (bookingIdOrNull != null) {
+        rideShareSocket.setBooking(bookingIdOrNull);
+      }
+    }
+
     rideShareSocket.onConnect(() {
-      rideShareSocket.registerUser(customerId);
+      joinChatRoom();
       rideShareSocket.onReconnect(() {
         AppLogger.log.i("🔄 Reconnected");
-        rideShareSocket.registerUser(customerId);
+        joinChatRoom();
       });
     });
+
+    // The shared socket is a singleton and is usually ALREADY connected from
+    // the ride screen, so `onConnect` won't fire again here — join explicitly.
+    if (rideShareSocket.connected) {
+      joinChatRoom();
+    }
 
     rideShareSocket.on('registered', (data) {
       AppLogger.log.i("✅ Registered → $data");
@@ -260,7 +281,9 @@ class _SharedChatScreensState extends State<SharedChatScreens> {
 
     rideShareSocket.on("typing", (data) {
       if (!mounted) return;
-      final senderType = (data["senderType"] ?? '').toString().toLowerCase();
+      final payload = _coerceSocketPayload(data);
+      final senderType =
+          (payload["senderType"] ?? '').toString().toLowerCase();
       if (senderType == 'customer') return; // ignore my own typing
 
       setState(() {
@@ -286,18 +309,23 @@ class _SharedChatScreensState extends State<SharedChatScreens> {
     });
 
     _bookingMessageHandler = (data) {
+      // socket.io can deliver the payload as the Map itself OR as a List of args
+      // ([payload, ackId, ...]). Indexing a List with a String key throws
+      // "String is not a subtype of int of 'index'". Normalize to a Map first.
+      final payload = _coerceSocketPayload(data);
       // Ignore echo: if server mirrors my sent message back
-      final senderId = (data['senderId'] ?? '').toString();
+      final senderId = (payload['senderId'] ?? '').toString();
       if (senderId == customerId) return;
 
-      final List<dynamic> contents = data['contents'] ?? [];
+      final List<dynamic> contents =
+          (payload['contents'] is List) ? payload['contents'] as List : const [];
       if (contents.isEmpty || !mounted) return;
 
       // Not me.
       const bool isMe = false;
 
       // Prefer socket senderImage, else controller driverImage, else person icon
-      final socketImg = _normalizeUrl((data['senderImage'] ?? '').toString());
+      final socketImg = _normalizeUrl((payload['senderImage'] ?? '').toString());
       final controllerDriverImg = _normalizeUrl(
         chatController.driverImage.value,
       );
@@ -332,6 +360,24 @@ class _SharedChatScreensState extends State<SharedChatScreens> {
     };
 
     rideShareSocket.on('booking-message', _bookingMessageHandler);
+  }
+
+  /// Normalize a socket.io event payload into a `Map<String, dynamic>`.
+  /// `data` can arrive as the Map itself OR as a List of args
+  /// (e.g. `[payload, ackId]`). Returns an empty map for anything unexpected so
+  /// callers can safely use `payload['key']` without a runtime type crash.
+  Map<String, dynamic> _coerceSocketPayload(dynamic data) {
+    dynamic d = data;
+    if (d is List) {
+      d = d.firstWhere(
+        (e) => e is Map,
+        orElse: () => const <String, dynamic>{},
+      );
+    }
+    if (d is Map) {
+      return d.map((key, value) => MapEntry(key.toString(), value));
+    }
+    return <String, dynamic>{};
   }
 
   Future<void> _loadCustomerAndDriverInfo() async {
@@ -396,14 +442,22 @@ class _SharedChatScreensState extends State<SharedChatScreens> {
   }
 
   Future<void> _sendMessage(String message, {String? imageUrl}) async {
-    if (message.trim().isEmpty && imageUrl == null) return;
+    final String text = message.trim();
+    if (text.isEmpty && imageUrl == null) return;
 
-    // placeholder for TEXT (RIGHT)
-    if (message.trim().isNotEmpty) {
+    final String bookingId = widget.bookingId.trim();
+    if (bookingId.isEmpty) {
+      AppToasts.showErrorGlobal('Booking id missing. Cannot send message.');
+      return;
+    }
+
+    // placeholder for TEXT (RIGHT). Image sends already added their own
+    // optimistic bubble in _pickAndSendImage, so don't add a second one.
+    if (text.isNotEmpty) {
       setState(() {
         messages.add(
           ChatMessage(
-            message: message,
+            message: text,
             imageUrl: imageUrl,
             isMe: true,
             time: 'now',
@@ -412,41 +466,67 @@ class _SharedChatScreensState extends State<SharedChatScreens> {
           ),
         );
       });
+      // Clear the field IMMEDIATELY (optimistic) so the customer can keep
+      // typing without waiting for the server round-trip. Previously the clear
+      // lived inside the ack callback, so a slow/lost ack left the typed text
+      // stuck and the message "unsent".
+      _textController.clear();
       _scrollToBottom();
     }
 
     final contents = <Map<String, String>>[];
-    if (message.trim().isNotEmpty) {
-      contents.add({"type": "text", "value": message});
+    if (text.isNotEmpty) {
+      contents.add({"type": "text", "value": text});
     }
     if (imageUrl != null) {
       contents.add({"type": "image", "value": imageUrl});
     }
 
     final payload = {
-      'bookingId': widget.bookingId,
+      'bookingId': bookingId,
       'senderId': customerId,
       'senderType': "customer",
       'contents': contents,
     };
 
+    // The shared socket can drop (websocket-only); make sure it's live and in
+    // the room before emitting, otherwise the emit is silently dropped.
+    if (!rideShareSocket.connected) {
+      rideShareSocket.initSocket(ApiConsents.sharedBaseUrl);
+      rideShareSocket.setBooking(bookingId);
+    }
+
+    var settled = false;
+    void finalizeSending() {
+      if (settled || !mounted) return;
+      settled = true;
+      final index = messages.lastIndexWhere((m) => m.isMe && m.isSending);
+      if (index == -1) return;
+      setState(() {
+        messages[index] = ChatMessage(
+          message: text,
+          imageUrl: imageUrl,
+          isMe: true,
+          time: _relativeFromDateTime(DateTime.now()),
+          avatar: myAvatarUrl,
+          isSending: false,
+        );
+      });
+      _scrollToBottom();
+    }
+
     rideShareSocket.emitWithAck("booking-message", payload, (ack) {
-      final index = messages.lastIndexWhere((m) => m.isSending);
-      if (ack != null && ack['success'] == true && index != -1) {
-        setState(() {
-          messages[index] = ChatMessage(
-            message: message,
-            imageUrl: imageUrl,
-            isMe: true,
-            time: _relativeFromDateTime(DateTime.now()),
-            avatar: myAvatarUrl,
-            isSending: false,
-          );
-        });
-        _textController.clear();
-        _scrollToBottom();
-      } else {
-        AppLogger.log.e("Message send failed: $ack");
+      final ok = ack != null && ack['success'] == true;
+      if (!ok) AppLogger.log.e("Message send failed: $ack");
+      finalizeSending();
+    });
+
+    // Safety net: never leave the bubble spinning forever if the ack is lost
+    // (the server has almost always saved + relayed the message by now).
+    Future.delayed(const Duration(seconds: 6), () {
+      if (!settled) {
+        AppLogger.log.w("booking-message ack timeout; clearing sending state");
+        finalizeSending();
       }
     });
   }
