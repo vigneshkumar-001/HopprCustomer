@@ -144,6 +144,12 @@ class ApiConsents {
   static final String sharedSendRequest =
       '$sharedBaseUrl/api/shared/customer/send-driver-request';
 
+  // Customer confirms the ALTERNATE seat(s) offered when their chosen seat was
+  // taken in every eligible car; backend updates selectedSeats, then the app
+  // re-calls sharedSendRequest to start a fresh dispatch cycle.
+  static final String sharedConfirmAlternateSeats =
+      '$sharedBaseUrl/api/shared/customer/confirm-alternate-seats';
+
   // Phase A/B: per-customer privacy-safe shared-ride state (recovery on open/reconnect).
   static String sharedMyState(String bookingId) =>
       '$sharedBaseUrl/api/shared/customer/my-state/$bookingId';

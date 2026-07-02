@@ -334,15 +334,38 @@ class _SharedScreensState extends State<SharedScreens>
     }
     if (!mounted || _didGoToPayment) return;
     _didGoToPayment = true;
+    if (mounted) {
+      setState(() {
+        destinationReached = true;
+        _nearDestination = false;
+      });
+    }
+    AppLogger.log.i(
+        "my-state completed (backend) -> payment: ${state.customerBookingId}");
+    Future.delayed(const Duration(milliseconds: 300), () {
+      if (!mounted) return;
+      Get.offAll(() => PaymentScreen(bookingId: myBookingId, amount: Amount));
+    });
+  }
+
+  void _goToPaymentOnce({
+    required String bookingId,
+    required num amount,
+    required String source,
+  }) {
+    if (!mounted || _didGoToPayment) return;
+    _didGoToPayment = true;
     setState(() {
       destinationReached = true;
       _nearDestination = false;
     });
-    AppLogger.log.i(
-        "my-state completed (backend) -> payment: ${state.customerBookingId}");
-    Future.delayed(const Duration(milliseconds: 500), () {
+    AppLogger.log.i("$source -> payment: bookingId=$bookingId amount=$amount");
+    Future.delayed(const Duration(milliseconds: 300), () {
       if (!mounted) return;
-      Get.to(() => PaymentScreen(bookingId: myBookingId, amount: Amount));
+      Get.offAll(() => PaymentScreen(
+            bookingId: bookingId,
+            amount: amount.toDouble(),
+          ));
     });
   }
 
@@ -500,6 +523,148 @@ class _SharedScreensState extends State<SharedScreens>
         isWaitingForDriver = false;
         noDriverFound = !hasDriver;
       });
+    });
+  }
+
+  /// ALTERNATE_SEATS_AVAILABLE confirmation popup. The backend found rides but
+  /// the chosen seat is taken in all of them; other seats are free. Only after
+  /// the customer confirms do we update the booking's seats and re-dispatch —
+  /// never a silent reassignment. On "No thanks" the booking closes safely via
+  /// the same no-driver flow the search timeout uses.
+  bool _alternateSeatsDialogShowing = false;
+
+  void _showAlternateSeatsDialog(List<int> altSeats, String message) {
+    if (!mounted || _alternateSeatsDialogShowing) return;
+    if (isDriverConfirmed || isTripCancelled) return;
+    _alternateSeatsDialogShowing = true;
+
+    // Keep the searching UI paused (not failed) while the customer decides.
+    setState(() {
+      isWaitingForDriver = false;
+      noDriverFound = false;
+    });
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text(
+          'Seat not available',
+          style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
+        ),
+        content: Text(
+          message,
+          style: const TextStyle(fontSize: 14, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.of(dialogContext).pop();
+              _onAlternateSeatsRejected();
+            },
+            child: const Text('No, cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.blue),
+            onPressed: () {
+              Navigator.of(dialogContext).pop();
+              _onAlternateSeatsConfirmed(altSeats);
+            },
+            child: Text(
+              'Continue with seat${altSeats.length == 1 ? '' : 's'} ${altSeats.join(', ')}',
+              style: const TextStyle(color: Colors.white),
+            ),
+          ),
+        ],
+      ),
+    ).whenComplete(() => _alternateSeatsDialogShowing = false);
+  }
+
+  Future<void> _onAlternateSeatsConfirmed(List<int> altSeats) async {
+    if (!mounted) return;
+    final bookingId = _bookingId.trim().isNotEmpty
+        ? _bookingId.trim()
+        : (shareRideController.sharedBooking.value?.bookingId ?? '')
+            .toString()
+            .trim();
+    if (bookingId.isEmpty) {
+      setState(() {
+        isWaitingForDriver = false;
+        noDriverFound = true;
+      });
+      return;
+    }
+
+    setState(() {
+      isWaitingForDriver = true;
+      noDriverFound = false;
+      _waitingServerMessage = 'Confirming seats…';
+    });
+
+    final confirmed = await shareRideController.confirmAlternateSeats(
+      bookingId: bookingId,
+      seats: altSeats,
+      context: context,
+    );
+    if (!mounted) return;
+
+    if (!confirmed) {
+      setState(() {
+        isWaitingForDriver = false;
+        noDriverFound = true;
+      });
+      return;
+    }
+
+    // Seats updated server-side — start a fresh dispatch cycle (same path as the
+    // "Try Again" button), which resets declined-driver exclusions on the backend.
+    final pickup = _customerPickupLatLng ?? widget.pickupPosition;
+    final drop = _customerDropLatLng ?? widget.dropPosition;
+    final result = await shareRideController.sendSharedDriverRequest(
+      carType: widget.carType,
+      pickupLatitude: pickup.latitude,
+      pickupLongitude: pickup.longitude,
+      dropLatitude: drop.latitude,
+      dropLongitude: drop.longitude,
+      bookingId: bookingId,
+      context: context,
+    );
+    if (!mounted) return;
+
+    if (result == 'success') {
+      setState(() => _waitingServerMessage = 'Finding your driver…');
+      startDriverSearch();
+    } else {
+      setState(() {
+        isWaitingForDriver = false;
+        noDriverFound = true;
+      });
+    }
+  }
+
+  Future<void> _onAlternateSeatsRejected() async {
+    if (!mounted) return;
+    final bookingId = _bookingId.trim().isNotEmpty
+        ? _bookingId.trim()
+        : (shareRideController.sharedBooking.value?.bookingId ?? '')
+            .toString()
+            .trim();
+
+    // Close the booking safely server-side (same call the 60s search timeout
+    // uses), then show the no-driver state so the customer can go home.
+    if (bookingId.isNotEmpty) {
+      try {
+        await driverSearchController
+            .noDriverFound(context: context, bookingId: bookingId, status: true)
+            .timeout(const Duration(seconds: 12), onTimeout: () => false);
+      } catch (_) {}
+    }
+    if (!mounted) return;
+    setState(() {
+      isWaitingForDriver = false;
+      noDriverFound = true;
+      _seatUnavailableMessage = '';
     });
   }
 
@@ -1138,7 +1303,10 @@ class _SharedScreensState extends State<SharedScreens>
             children: [
               // Call — small rounded brand button.
               GestureDetector(
-                onTap: _callDriverFromBar,
+                onTap: () {
+                  HapticFeedback.mediumImpact();
+                  _callDriverFromBar();
+                },
                 child: Container(
                   height: 50,
                   width: 56,
@@ -1161,7 +1329,10 @@ class _SharedScreensState extends State<SharedScreens>
               // Message — wider rounded outlined button.
               Expanded(
                 child: GestureDetector(
-                  onTap: _messageDriverFromBar,
+                  onTap: () {
+                    HapticFeedback.mediumImpact();
+                    _messageDriverFromBar();
+                  },
                   child: Container(
                     height: 50,
                     alignment: Alignment.center,
@@ -1358,7 +1529,10 @@ class _SharedScreensState extends State<SharedScreens>
     required VoidCallback onTap,
   }) {
     return InkWell(
-      onTap: onTap,
+      onTap: () {
+        HapticFeedback.mediumImpact(); // nice tap feedback
+        onTap();
+      },
       borderRadius: BorderRadius.circular(10),
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 10),
@@ -1387,6 +1561,31 @@ class _SharedScreensState extends State<SharedScreens>
           width: 1,
           thickness: 1,
           color: Colors.black.withOpacity(0.08),
+        ),
+      );
+
+  /// One fare-breakdown line: label left, currency + value right. Uniform rows.
+  Widget _fareRow(String label, String value) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 5),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                label,
+                style: const TextStyle(fontSize: 13, color: Color(0xFF6B7280)),
+              ),
+            ),
+            Image.asset(AppImages.nBlackCurrency, height: 12),
+            const SizedBox(width: 3),
+            Text(
+              value,
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF14213A),
+              ),
+            ),
+          ],
         ),
       );
 
@@ -1571,11 +1770,21 @@ class _SharedScreensState extends State<SharedScreens>
       curve: Curves.easeOutCubic,
       alignment: Alignment.topCenter,
       child: AnimatedSwitcher(
-        duration: const Duration(milliseconds: 300),
-        switchInCurve: Curves.easeOut,
+        duration: const Duration(milliseconds: 340),
+        switchInCurve: Curves.easeOutCubic,
         switchOutCurve: Curves.easeIn,
-        transitionBuilder: (child, anim) =>
-            FadeTransition(opacity: anim, child: child),
+        // Slide-up + fade so a status change (e.g. "You are next" →
+        // "Driver is picking up another rider first") visibly animates in.
+        transitionBuilder: (child, anim) {
+          final slide = Tween<Offset>(
+            begin: const Offset(0, 0.10),
+            end: Offset.zero,
+          ).animate(anim);
+          return FadeTransition(
+            opacity: anim,
+            child: SlideTransition(position: slide, child: child),
+          );
+        },
         layoutBuilder: (currentChild, previousChildren) => Stack(
           alignment: Alignment.topCenter,
           children: [
@@ -1930,6 +2139,31 @@ class _SharedScreensState extends State<SharedScreens>
         });
         // A fresh driver is now deciding → extend the no-driver window.
         _restartNoDriverFoundTimer();
+      } else if (status == 'ALTERNATE_SEATS_AVAILABLE') {
+        // Chosen seat taken in every eligible car, but OTHER seats are free.
+        // Backend never reassigns silently — ask the customer to confirm the
+        // alternate seat(s); on confirm we update the booking and re-dispatch.
+        _noDriverFoundTimer?.cancel();
+        final altSeats = (data['availableSeats'] is List)
+            ? (data['availableSeats'] as List)
+                .map((s) => int.tryParse(s.toString()) ?? -1)
+                .where((s) => s >= 2)
+                .toList()
+            : <int>[];
+        final message = (data['message'] ?? '').toString().trim().isNotEmpty
+            ? data['message'].toString()
+            : 'Your selected seat is not available. Are you okay to continue with the available seats?';
+        if (altSeats.isEmpty) {
+          // Defensive: no usable alternates in the payload -> same as strict
+          // seat-unavailable ("choose another seat").
+          setState(() {
+            isWaitingForDriver = false;
+            noDriverFound = true;
+            _seatUnavailableMessage = message;
+          });
+        } else {
+          _showAlternateSeatsDialog(altSeats, message);
+        }
       } else if (status == 'SEAT_NOT_AVAILABLE') {
         // STRICT: chosen seat taken in every eligible car. Stop searching and ask
         // the rider to pick another seat (no automatic fallback).
@@ -2216,20 +2450,13 @@ class _SharedScreensState extends State<SharedScreens>
           evtBookingId != myBookingId) {
         return;
       }
-      if (!mounted || _didGoToPayment) return;
-      _didGoToPayment = true;
-      setState(() {
-        destinationReached = true;
-        _nearDestination = false;
-      });
       final num evtAmount =
           data['tripAmount'] is num ? data['tripAmount'] as num : Amount;
-      final double payAmount = evtAmount.toDouble();
-      AppLogger.log.i("ride-completed (manual swipe) -> payment: $data");
-      Future.delayed(const Duration(milliseconds: 600), () {
-        if (!mounted) return;
-        Get.to(() => PaymentScreen(bookingId: myBookingId, amount: payAmount));
-      });
+      _goToPaymentOnce(
+        bookingId: myBookingId,
+        amount: evtAmount,
+        source: "ride-completed (manual swipe)",
+      );
     });
 
     rideShareSocket.on('driver-arrived', (data) {
@@ -2659,9 +2886,9 @@ class _SharedScreensState extends State<SharedScreens>
                         driverStartedRide
                             ? 'Ride in progress'
                             : 'Driver reaching pickup',
-                    // Keep the route/car above the collapsed sheet peek.
+                    // Keep the route/car above the collapsed sheet peek (0.55).
                     mapPadding: EdgeInsets.only(
-                      bottom: MediaQuery.of(context).size.height * 0.32,
+                      bottom: MediaQuery.of(context).size.height * 0.55,
                     ),
                     // Blue solid = "your route"; grey dashed while the driver is
                     // serving another rider (matches the on-map legend).
@@ -2797,13 +3024,12 @@ class _SharedScreensState extends State<SharedScreens>
                 // One size config for both phases. We don't switch initialChildSize
                 // on confirm (that needs a recreate) — the sheet just stays where
                 // the rider left it while the content cross-fades.
-                // Uber-style: small peek by default so the FULL map shows;
-                // drag up to expand. Min is a thin handle-height peek.
-                initialChildSize: 0.34,
-                minChildSize: 0.16,
+                // Minimum peek is 0.55 of the screen; drag up to expand to full.
+                initialChildSize: 0.50,
+                minChildSize: 0.45,
                 maxChildSize: 0.92,
                 snap: true,
-                snapSizes: const <double>[0.16, 0.34, 0.62, 0.92],
+                snapSizes: const <double>[0.55, 0.75, 0.92],
                 builder: (context, scrollController) {
                   return Container(
                     padding: const EdgeInsets.symmetric(horizontal: 15),
@@ -3391,75 +3617,54 @@ class _SharedScreensState extends State<SharedScreens>
                                                 ),
                                               ),
                                             const Spacer(),
-                                            // Small blue OTP chip — only AFTER the
-                                            // ride has started (the black OTP card
-                                            // handles the pre-start phase, so the
-                                            // two never show together).
-                                            (driverStartedRide &&
-                                                    otp.isNotEmpty)
-                                                ? Container(
-                                                  padding:
-                                                      const EdgeInsets.symmetric(
-                                                        horizontal: 10,
-                                                        vertical: 5,
-                                                      ),
-                                                  decoration: BoxDecoration(
-                                                    borderRadius:
-                                                        BorderRadius.circular(8),
-                                                    color: const Color(
-                                                      0xFFF2F3F5,
-                                                    ),
-                                                    border: Border.all(
-                                                      color: const Color(
-                                                        0xFF111418,
-                                                      ).withOpacity(0.20),
-                                                    ),
-                                                  ),
-                                                  child: Text(
-                                                    'OTP • $otp',
-                                                    style: const TextStyle(
-                                                      fontSize: 13,
-                                                      fontWeight: FontWeight.w700,
-                                                      letterSpacing: 0.5,
-                                                      color: Color(0xFF111418),
-                                                    ),
-                                                  ),
-                                                )
-                                                : const SizedBox.shrink(),
+                                            InkWell(
+                                              onTap: () {
+                                                HapticFeedback.selectionClick();
+                                                setState(() =>
+                                                    isExpanded = !isExpanded);
+                                              },
+                                              child: AnimatedRotation(
+                                                turns: isExpanded ? 0.5 : 0,
+                                                duration: const Duration(
+                                                    milliseconds: 300),
+                                                child: Image.asset(
+                                                    AppImages.dropDown,
+                                                    height: 18),
+                                              ),
+                                            ),
                                           ],
                                         ),
-                                        Padding(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 8.0,
-                                          ),
+                                        Align(
+                                          alignment: Alignment.centerLeft,
                                           child: InkWell(
-                                            onTap:
-                                                () => setState(
-                                                  () =>
-                                                      isExpanded = !isExpanded,
-                                                ),
-                                            child: Row(
-                                              children: [
-                                                CustomTextFields.textWithStylesSmall(
-                                                  'View Details',
-                                                  colors:
-                                                      AppColors
-                                                          .changeButtonColor,
-                                                  fontSize: 13,
-                                                  fontWeight: FontWeight.w500,
-                                                ),
-                                                const SizedBox(width: 10),
-                                                AnimatedRotation(
-                                                  turns: isExpanded ? 0.5 : 0,
-                                                  duration: const Duration(
-                                                    milliseconds: 300,
+                                            onTap: () {
+                                              HapticFeedback.selectionClick();
+                                              setState(() =>
+                                                  isExpanded = !isExpanded);
+                                            },
+                                            child: Padding(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                      vertical: 4),
+                                              child: Row(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  CustomTextFields
+                                                      .textWithStylesSmall(
+                                                    'View Details',
+                                                    colors: AppColors
+                                                        .changeButtonColor,
+                                                    fontSize: 13,
+                                                    fontWeight: FontWeight.w600,
                                                   ),
-                                                  child: Image.asset(
-                                                    AppImages.dropDown,
-                                                    height: 16,
+                                                  Icon(
+                                                    Icons.chevron_right_rounded,
+                                                    size: 18,
+                                                    color: AppColors
+                                                        .changeButtonColor,
                                                   ),
-                                                ),
-                                              ],
+                                                ],
+                                              ),
                                             ),
                                           ),
                                         ),
@@ -3530,106 +3735,31 @@ class _SharedScreensState extends State<SharedScreens>
                                                             const SizedBox(
                                                               height: 5,
                                                             ),
-                                                            Row(
-                                                              children: [
-                                                                CustomTextFields.textWithStylesSmall(
-                                                                  'Base Fare',
-                                                                ),
-                                                                const Spacer(),
-                                                                CustomTextFields.textWithImage(
-                                                                  colors:
-                                                                      AppColors
-                                                                          .commonBlack,
-                                                                  text:
-                                                                      (widget.baseFare ??
-                                                                              0)
-                                                                          .toString(),
-                                                                  imagePath:
-                                                                      AppImages
-                                                                          .nBlackCurrency,
-                                                                ),
-                                                              ],
-                                                            ),
-                                                            Row(
-                                                              children: [
-                                                                CustomTextFields.textWithStylesSmall(
-                                                                  'Distance Fare',
-                                                                ),
-                                                                const Spacer(),
-                                                                CustomTextFields.textWithImage(
-                                                                  colors:
-                                                                      AppColors
-                                                                          .commonBlack,
-                                                                  text:
-                                                                      (widget.distanceFare ??
-                                                                              0)
-                                                                          .toString(),
-                                                                  imagePath:
-                                                                      AppImages
-                                                                          .nBlackCurrency,
-                                                                ),
-                                                              ],
-                                                            ),
-                                                            Row(
-                                                              children: [
-                                                                CustomTextFields.textWithStylesSmall(
-                                                                  'Pickup Fare',
-                                                                ),
-                                                                const Spacer(),
-                                                                CustomTextFields.textWithImage(
-                                                                  colors:
-                                                                      AppColors
-                                                                          .commonBlack,
-                                                                  text:
-                                                                      (widget.pickupFare ??
-                                                                              0)
-                                                                          .toString(),
-                                                                  imagePath:
-                                                                      AppImages
-                                                                          .nBlackCurrency,
-                                                                ),
-                                                              ],
-                                                            ),
-                                                            Row(
-                                                              children: [
-                                                                CustomTextFields.textWithStylesSmall(
-                                                                  'Booking Fee',
-                                                                ),
-                                                                const Spacer(),
-                                                                CustomTextFields.textWithImage(
-                                                                  colors:
-                                                                      AppColors
-                                                                          .commonBlack,
-                                                                  text:
-                                                                      (widget.bookingFee ??
-                                                                              0)
-                                                                          .toString(),
-                                                                  imagePath:
-                                                                      AppImages
-                                                                          .nBlackCurrency,
-                                                                ),
-                                                              ],
-                                                            ),
-                                                            Row(
-                                                              children: [
-                                                                CustomTextFields.textWithStylesSmall(
-                                                                  'Time Fare',
-                                                                ),
-                                                                const Spacer(),
-                                                                CustomTextFields.textWithImage(
-                                                                  colors:
-                                                                      AppColors
-                                                                          .commonBlack,
-                                                                  text:
-                                                                      (widget.timeFare ??
-                                                                              0)
-                                                                          .toString(),
-                                                                  imagePath:
-                                                                      AppImages
-                                                                          .nBlackCurrency,
-                                                                ),
-                                                              ],
-                                                            ),
+                                                            _fareRow(
+                                                                'Base Fare',
+                                                                (widget.baseFare ??
+                                                                        0)
+                                                                    .toString()),
+                                                            _fareRow(
+                                                                'Distance Fare',
+                                                                (widget.distanceFare ??
+                                                                        0)
+                                                                    .toString()),
+                                                            _fareRow(
+                                                                'Pickup Fare',
+                                                                (widget.pickupFare ??
+                                                                        0)
+                                                                    .toString()),
+                                                            _fareRow(
+                                                                'Booking Fee',
+                                                                (widget.bookingFee ??
+                                                                        0)
+                                                                    .toString()),
+                                                            _fareRow(
+                                                                'Time Fare',
+                                                                (widget.timeFare ??
+                                                                        0)
+                                                                    .toString()),
                                                             const SizedBox(
                                                               height: 10,
                                                             ),

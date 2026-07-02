@@ -43,7 +43,21 @@ class Request {
     }
     return body.toString();
   }
+static String _tokenLogValue(String? authorization) {
+  final auth = authorization?.trim();
 
+  if (auth == null || auth.isEmpty) {
+    return '(none)';
+  }
+
+  // Debug build: show full token
+  if (kDebugMode) {
+    return auth;
+  }
+
+  // Release build: hide token
+  return 'Bearer ***masked***';
+}
   static void _logRequest({
     required String method,
     required String url,
@@ -52,10 +66,7 @@ class Request {
     Map<String, dynamic>? queryParams,
   }) {
     // SECURITY: never log the JWT — only whether one was attached.
-    final tokenState =
-        (headers['Authorization']?.toString().trim().isNotEmpty ?? false)
-            ? 'Bearer ***masked***'
-            : '(none)';
+    final tokenState = _tokenLogValue(headers['Authorization']?.toString());
 
     // Debug-only: full request details. Keep production logs clean.
     _debugLogInfo(
@@ -66,30 +77,26 @@ class Request {
     );
   }
 
-  static void _logResponse({
-    required String method,
-    required String url,
-  
-    required Response<dynamic> response,
-  }) {
-    // SECURITY: never log the JWT — only whether one was attached.
-    final tokenState = (response.requestOptions.headers['Authorization']
-                ?.toString()
-                .trim()
-                .isNotEmpty ??
-            false)
-        ? 'Bearer ***masked***'
-        : '(none)';
-    final reqBody =
-        response.requestOptions.data ?? response.requestOptions.queryParameters;
-    _debugLogInfo(
-      'Method: $method\n'
-      'Url: $url\n'
-      'Token: $tokenState\n'
-      'Body: ${_formatBody(reqBody)}\n'
-      'Response: ${response.data}',
-    );
-  }
+static void _logResponse({
+  required String method,
+  required String url,
+  required Response<dynamic> response,
+}) {
+  final tokenState = _tokenLogValue(
+    response.requestOptions.headers['Authorization']?.toString(),
+  );
+
+  final reqBody =
+      response.requestOptions.data ?? response.requestOptions.queryParameters;
+
+  _debugLogInfo(
+    'Method: $method\n'
+    'Url: $url\n'
+    'Token: $tokenState\n'
+    'Body: ${_formatBody(reqBody)}\n'
+    'Response: ${response.data}',
+  );
+}
 
   static BaseOptions _baseOptions() {
     return BaseOptions(

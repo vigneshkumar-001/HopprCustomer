@@ -162,6 +162,53 @@ AppLogger.log.w(body);
     }
   }
 
+  /// Confirm switching to the alternate seat(s) the backend offered via the
+  /// ALTERNATE_SEATS_AVAILABLE booking-update. Backend validates ownership and
+  /// that no driver has been assigned yet, then updates selectedSeats.
+  Future<Either<Failure, bool>> confirmAlternateSeats({
+    required String bookingId,
+    required List<int> seats,
+  }) async {
+    try {
+      final url = ApiConsents.sharedConfirmAlternateSeats;
+      final response = await Request.sendRequest(
+        url,
+        {
+          'bookingId': bookingId,
+          'seats': seats,
+        },
+        'POST',
+        false,
+      );
+
+      if (response is Response && response.statusCode == 200) {
+        if (response.data is Map && response.data['success'] == true) {
+          return const Right(true);
+        }
+        return Left(
+          ServerFailure(
+            (response.data is Map ? response.data['message'] : null)
+                    ?.toString() ??
+                'Could not confirm seats',
+          ),
+        );
+      }
+
+      if (response is DioException) {
+        final msg = response.response?.data is Map
+            ? (response.response!.data['message']?.toString() ?? '')
+            : '';
+        return Left(ServerFailure(
+            msg.isNotEmpty ? msg : (response.message ?? 'Network error')));
+      }
+
+      return Left(ServerFailure('Unexpected response from server'));
+    } catch (e, st) {
+      AppLogger.log.e('confirmAlternateSeats error: $e\n$st');
+      return Left(ServerFailure('Something went wrong'));
+    }
+  }
+
   Future<Either<Failure, SendDriverRequestModels>> sendSharedDriverRequest({
     required double pickupLatitude,
     required double pickupLongitude,

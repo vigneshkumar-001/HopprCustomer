@@ -85,6 +85,32 @@ class ShareRideController extends GetxController {
     }
   }
 
+  /// Confirms the alternate seat(s) the backend offered (ALTERNATE_SEATS_AVAILABLE).
+  /// Returns true on success; the caller then re-sends the driver request to start
+  /// a fresh dispatch cycle with the new seats.
+  Future<bool> confirmAlternateSeats({
+    required String bookingId,
+    required List<int> seats,
+    required BuildContext context,
+  }) async {
+    try {
+      final results = await sharedApiDatasource.confirmAlternateSeats(
+        bookingId: bookingId.trim(),
+        seats: seats,
+      );
+      return results.fold(
+        (failure) {
+          AppToasts.showError(context, failure.message);
+          return false;
+        },
+        (_) => true,
+      );
+    } catch (e) {
+      AppLogger.log.e('confirmAlternateSeats error: $e');
+      return false;
+    }
+  }
+
   Future<String?> sendSharedDriverRequest({
     required double pickupLatitude,
     required double pickupLongitude,

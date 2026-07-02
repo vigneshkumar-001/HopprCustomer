@@ -430,7 +430,7 @@ class FirebaseService {
         // Ride completed → open the payment screen for THIS booking only.
         case 'payment':
           if (bookingId.isNotEmpty) {
-            Get.to(() => PaymentScreen(bookingId: bookingId));
+            Get.offAll(() => PaymentScreen(bookingId: bookingId));
           } else {
             AppLogger.log.w('payment page without bookingId');
           }
