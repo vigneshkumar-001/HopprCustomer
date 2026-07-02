@@ -143,6 +143,7 @@ class DriverSearchController extends GetxController {
     required String carType,
     required BuildContext context,
   }) async {
+    if (isLoading.value) return null;
     isLoading.value = true;
 
     try {
@@ -197,6 +198,7 @@ class DriverSearchController extends GetxController {
     required List<int> seats,
     required BuildContext context,
   }) async {
+    if (isLoading.value) return null;
     isLoading.value = true;
 
     try {
@@ -254,6 +256,7 @@ class DriverSearchController extends GetxController {
     required String carType,
     required BuildContext context,
   }) async {
+    if (isRetryLoading.value) return null;
     isRetryLoading.value = true;
 
     try {

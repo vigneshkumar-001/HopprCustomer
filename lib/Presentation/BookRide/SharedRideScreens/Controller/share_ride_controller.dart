@@ -31,6 +31,7 @@ class ShareRideController extends GetxController {
     required List<int> seats,
     required BuildContext context,
   }) async {
+    if (isLoading.value) return null;
     isLoading.value = true;
 
     try {
@@ -93,6 +94,8 @@ class ShareRideController extends GetxController {
     required List<int> seats,
     required BuildContext context,
   }) async {
+    if (isLoading.value) return false;
+    isLoading.value = true;
     try {
       final results = await sharedApiDatasource.confirmAlternateSeats(
         bookingId: bookingId.trim(),
@@ -100,12 +103,17 @@ class ShareRideController extends GetxController {
       );
       return results.fold(
         (failure) {
+          isLoading.value = false;
           AppToasts.showError(context, failure.message);
           return false;
         },
-        (_) => true,
+        (_) {
+          isLoading.value = false;
+          return true;
+        },
       );
     } catch (e) {
+      isLoading.value = false;
       AppLogger.log.e('confirmAlternateSeats error: $e');
       return false;
     }
@@ -121,6 +129,7 @@ class ShareRideController extends GetxController {
     required String carType,
     required BuildContext context,
   }) async {
+    if (isLoading.value) return null;
     isLoading.value = true;
 
     try {

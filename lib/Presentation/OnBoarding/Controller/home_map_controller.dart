@@ -341,10 +341,18 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
   void _startNearbyDiagnostics() {
     _nearbyDiagTimer?.cancel();
     _nearbyDiagTimer = Timer(const Duration(seconds: 5), () {
+      // Markers from the shared backend carry a 'shared_' id prefix — counting
+      // by prefix shows WHICH feed each visible car came from. A car that is
+      // singleNearby-only is NOT shared-dispatchable (and vice versa), which is
+      // the classic "car on map but no booking popup" confusion.
+      final sharedNearby =
+          _driverMarkers.keys.where((k) => k.startsWith('shared_')).length;
+      final singleNearby = _driverMarkers.length - sharedNearby;
       AppLogger.log.i(
         '[HOME-SOCKET] 5s check singleConnected=${socketService.connected} '
         'sharedConnected=${rideShareSocket.connected} '
-        'nearbyMarkers=${_driverMarkers.length}');
+        'nearbyMarkers=${_driverMarkers.length} '
+        'singleNearby=$singleNearby sharedNearby=$sharedNearby');
       if (_driverMarkers.isEmpty) {
         AppLogger.log.w(
           '[HOME-SOCKET] no nearby drivers after 5s — re-requesting snapshot');
@@ -885,8 +893,9 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
       _publishMarkersDebounced();
     });
 
-    // Safety net: expire markers whose driver has gone silent (missed removal).
-    _startStaleDriverGc();
+  // Safety net: expire markers only after a very long silence so a healthy
+  // driver doesn't vanish just because one packet was delayed.
+  _startStaleDriverGc();
   }
 
   Future<bool> _ensureLocationReady() async => gate.isReady.value;
@@ -1396,8 +1405,8 @@ class HomeMapController extends GetxController with WidgetsBindingObserver {
   // ones that have actually gone away. On reconnect the backend also re-sends a
   // fresh nearby snapshot which reconciles the set; this GC just guarantees the
   // cleanup happens even when that snapshot is delayed or missed.
-  static const Duration _staleDriverGcInterval = Duration(seconds: 15);
-  static const Duration _staleDriverTtl = Duration(seconds: 90);
+  static const Duration _staleDriverGcInterval = Duration(minutes: 1);
+  static const Duration _staleDriverTtl = Duration(minutes: 10);
 
   void _startStaleDriverGc() {
     _staleDriverGcTimer?.cancel();

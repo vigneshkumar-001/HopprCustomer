@@ -583,6 +583,7 @@ class _SharedScreensState extends State<SharedScreens>
 
   Future<void> _onAlternateSeatsConfirmed(List<int> altSeats) async {
     if (!mounted) return;
+    if (shareRideController.isLoading.value) return;
     final bookingId = _bookingId.trim().isNotEmpty
         ? _bookingId.trim()
         : (shareRideController.sharedBooking.value?.bookingId ?? '')
