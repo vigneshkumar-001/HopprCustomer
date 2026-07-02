@@ -7,6 +7,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Core/Utility/phone_launcher.dart';
 import 'package:hopper/Presentation/BookRide/Controllers/order_confrim_controller.dart';
+import 'package:hopper/Presentation/BookRide/SharedRideScreens/Widgets/shared_trip_status_card.dart';
 import 'package:hopper/Presentation/OnBoarding/Controller/home_map_controller.dart';
 import 'package:hopper/uitls/map/customer/customer_ride_map_view.dart';
 import 'package:hopper/uitls/map/customer/marker_icon_cache.dart' as icon_cache;
@@ -93,6 +94,9 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
   final TextEditingController _destController = TextEditingController();
   bool _hasNavigatedToPayment = false;
   bool _hasNavigatedHomeOnCancel = false;
+  // Ride-status timeline: auto-center the active step (manual scroll allowed).
+  final ScrollController _timelineCtrl = ScrollController();
+  int _lastAutoScrolledStep = -1;
   static const MethodChannel _screenChannel = MethodChannel(
     'ride_screen_control',
   );
@@ -350,6 +354,7 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
 
   @override
   void dispose() {
+    _timelineCtrl.dispose();
     _startController.dispose();
     _destController.dispose();
     _searchingElapsedTimer?.cancel();
@@ -448,6 +453,24 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                             ? c.cartypeFromServer.value
                             : widget.carType;
 
+                    // ETA/distance now live on the reusable map card (same as
+                    // the shared-ride screen) — the in-sheet chips were removed.
+                    final etaPieces = c.etaChipText.value
+                        .split('|')
+                        .map((e) => e.trim())
+                        .where((e) => e.isNotEmpty)
+                        .toList();
+                    final showTripMetrics =
+                        c.isDriverConfirmed.value && !c.destinationReached.value;
+                    final mapEta =
+                        showTripMetrics && etaPieces.isNotEmpty
+                            ? etaPieces.first
+                            : '';
+                    final mapDist =
+                        showTripMetrics && etaPieces.length >= 2
+                            ? etaPieces.last
+                            : '';
+
                     return CustomerRideMapView(
                       key: _mapKey,
                       vehicleType:
@@ -464,8 +487,8 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                           c.driverStartedRide.value
                               ? RideMapMode.toDrop
                               : RideMapMode.toPickup,
-                      etaText: '',
-                      distanceText: '',
+                      etaText: mapEta,
+                      distanceText: mapDist,
                       statusText:
                           c.driverStartedRide.value
                               ? 'Ride in progress'
@@ -606,7 +629,9 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                         ),
                         child: Container(
                           key: ValueKey(sheetStateKey),
-                          padding: const EdgeInsets.symmetric(horizontal: 5),
+                          // 16px side padding — matches the shared-ride sheet
+                          // (was 5, which made every card look border-to-border).
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
                           decoration: const BoxDecoration(
                             color: Colors.white,
                             borderRadius: BorderRadius.vertical(
@@ -650,6 +675,15 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                     });
                   },
                 ),
+
+              // Fixed bottom Call + Message bar — pinned under the draggable
+              // sheet, same as the shared-ride screen.
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: _buildFixedDriverActionBar(),
+              ),
             ],
           ),
         ),
@@ -688,26 +722,20 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
 
       return Column(
         children: [
-          Center(
-            child: CustomTextFields.textWithImage(
-              fontSize: 20,
-              imageSize: 24,
-              fontWeight: FontWeight.w600,
-              text:
-                  c.destinationReached.value
-                      ? 'Ride Completed'
-                      : c.driverStartedRide.value
-                      ? 'Ride in Progress'
-                      : 'Your ride is confirmed',
-              colors: AppColors.commonBlack,
-              rightImagePath: AppImages.clrTick,
-            ),
-          ),
-          const SizedBox(height: 6),
-          Center(child: _rideTypePill(shared: false)),
-          if (c.isDriverConfirmed.value &&
-              !c.destinationReached.value &&
-              c.etaChipText.value.trim().isNotEmpty) ...[
+          // Lead status card — SAME widget the shared-ride sheet uses
+          // (SharedTripStatusCard): "ON TRIP" overline, bold stage title, and
+          // the "8 min to drop · 2.3 km" detail line. Replaces the old plain
+          // header text + tick.
+          _buildReachStatusCard(),
+          // DRIVER CARD directly under the status card (shared-ride order):
+          // same bordered design — photo + rating badge, name → plate chip →
+          // car details, car photo right, and the Solo ride tag INSIDE the card.
+          const SizedBox(height: 12),
+          _driverDetailsCard(),
+          // ETA/distance chips removed — they now show on the map card and in
+          // the status card detail, same as the shared-ride screen. Only the
+          // arrived "Waiting" timer stays in the sheet (see _tripInfoInline).
+          if (c.isDriverConfirmed.value && !c.destinationReached.value) ...[
             const SizedBox(height: 10),
             _tripInfoInline(),
           ],
@@ -721,237 +749,422 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
           ],
           const SizedBox(height: 14),
           _addressBox(),
-          const SizedBox(height: 14),
 
-          Row(
-            children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  CustomTextFields.textWithStylesSmall(
-                    c.plateNumber.value,
-                    colors: AppColors.commonBlack,
-                    fontWeight: FontWeight.w500,
-                  ),
-                  const SizedBox(height: 6),
-                  Row(
-                    children: [
-                      GestureDetector(
-                        onTap:
-                            () => _showImagePreview(
-                              c.profilePic.value,
-                              caption: c.driverName.value,
-                            ),
-                        child: Stack(
-                          clipBehavior: Clip.none,
-                          children: [
-                            Container(
-                              height: 36,
-                              width: 36,
-                              decoration: BoxDecoration(
-                                borderRadius: BorderRadius.circular(50),
-                                color: AppColors.containerColor1,
-                              ),
-                              clipBehavior: Clip.antiAlias,
-                              child:
-                                  c.profilePic.value.isNotEmpty
-                                      ? Image.network(
-                                        c.profilePic.value,
-                                        fit: BoxFit.cover,
-                                        errorBuilder:
-                                            (_, __, ___) => const Icon(
-                                              Icons.person,
-                                              size: 20,
-                                            ),
-                                      )
-                                      : const Icon(Icons.person, size: 20),
-                            ),
-                            if (c.profilePic.value.isNotEmpty)
-                              Positioned(
-                                right: -2,
-                                bottom: -2,
-                                child: Container(
-                                  padding: const EdgeInsets.all(2),
-                                  decoration: const BoxDecoration(
-                                    color: Colors.white,
-                                    shape: BoxShape.circle,
-                                  ),
-                                  child: const Icon(
-                                    Icons.zoom_in_rounded,
-                                    size: 11,
-                                    color: Colors.black87,
-                                  ),
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      CustomTextFields.textWithStylesSmall(
-                        c.driverName.value,
-                        colors: AppColors.commonBlack,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ],
-                  ),
-                  CustomTextFields.textWithStylesSmall(
-                    c.carDetails.value,
-                    fontSize: 12,
-                    colors: AppColors.carTypeColor,
-                  ),
-                ],
-              ),
-              const Spacer(),
-              c.carExteriorPhotos.value.isNotEmpty
-                  ? GestureDetector(
-                    onTap:
-                        () => _showImagePreview(
-                          c.carExteriorPhotos.value,
-                          caption:
-                              'Your car · ${c.plateNumber.value}'.trim(),
-                        ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(12),
-                      child: Stack(
-                        children: [
-                          Image.network(
-                            c.carExteriorPhotos.value,
-                            height: 80,
-                            width: 100,
-                            fit: BoxFit.fill,
-                            errorBuilder:
-                                (_, __, ___) => const SizedBox.shrink(),
-                          ),
-                          Positioned(
-                            left: 0,
-                            right: 0,
-                            bottom: 0,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(vertical: 3),
-                              decoration: BoxDecoration(
-                                gradient: LinearGradient(
-                                  begin: Alignment.topCenter,
-                                  end: Alignment.bottomCenter,
-                                  colors: [
-                                    Colors.transparent,
-                                    Colors.black.withOpacity(0.6),
-                                  ],
-                                ),
-                              ),
-                              child: const Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Icon(
-                                    Icons.zoom_in_rounded,
-                                    color: Colors.white,
-                                    size: 13,
-                                  ),
-                                  SizedBox(width: 3),
-                                  Text(
-                                    'Verify',
-                                    style: TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  )
-                  : const SizedBox.shrink(),
-            ],
-          ),
-
-          const SizedBox(height: 20),
-
-          Row(
-            children: [
-              Container(
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(50),
-                  color: AppColors.containerColor1,
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.all(8.0),
-                  child: InkWell(
-                    onTap: () async {
-                      try {
-                        var rawNumber = c.driverPhone.value.trim();
-                        if (rawNumber.isEmpty) {
-                          AppToasts.showError(context, 'Driver number not set');
-                          return;
-                        }
-
-                        final normalized = sanitizePhoneNumber(rawNumber);
-                        if (normalized.isEmpty) {
-                          AppToasts.showError(context, 'Invalid number');
-                          return;
-                        }
-                        final ok = await launchPhoneDialer(normalized);
-                        if (!ok) {
-                          AppToasts.showError(context, 'Could not open dialer');
-                        }
-                      } catch (_) {
-                        AppToasts.showError(context, 'Failed to start call');
-                      }
-                    },
-                    child: Image.asset(AppImages.call, height: 20, width: 20),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: InkWell(
-                  onTap: () {
-                    final booking =
-                        c.driverSearchController.carBooking.value?.bookingId ??
-                        c.bookingId;
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder:
-                            (_) => ChatScreen(
-                              bookingId: booking,
-                              pickupLatitude: _pickupLatLng.latitude,
-                              pickupLongitude: _pickupLatLng.longitude,
-                            ),
-                      ),
-                    );
-                  },
-                  child: Container(
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(20),
-                      color: AppColors.containerColor1,
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.all(8.0),
-                      child: Row(
-                        children: [
-                          CustomTextFields.textWithStylesSmall(
-                            'Message your driver',
-                            colors: AppColors.commonBlack,
-                          ),
-                          const Spacer(),
-                          Image.asset(AppImages.send, height: 16, width: 16),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-
+          // Call + Message moved to the FIXED bottom action bar (shared-ride
+          // parity) — see _buildFixedDriverActionBar().
           const SizedBox(height: 20),
           _fareBox(),
           const SizedBox(height: 20),
           _supportShareRow(),
+          // Keep the last card clear of the fixed bottom Call/Message bar.
+          const SizedBox(height: 78),
         ],
+      );
+    });
+  }
+
+  /// Lead status card — same UI as the shared-ride screen's
+  /// _buildReachStatusCard, mapped to solo-ride state: PICKUP → ARRIVED →
+  /// ON TRIP → COMPLETED. Detail line reuses etaChipText ("8 min | 2.3 km")
+  /// joined as "8 min to drop · 2.3 km". No seat pill on solo rides.
+  Widget _buildReachStatusCard() {
+    String title;
+    IconData icon;
+    String badge;
+    if (c.destinationReached.value) {
+      icon = Icons.flag_rounded;
+      title = 'You have reached your destination';
+      badge = 'COMPLETED';
+    } else if (c.driverStartedRide.value) {
+      icon = Icons.navigation_rounded;
+      badge = 'ON TRIP';
+      title = 'On the way to your destination';
+    } else if (c.driverArrived.value) {
+      icon = Icons.local_taxi_rounded;
+      title = 'Driver has arrived at pickup';
+      badge = 'ARRIVED';
+    } else {
+      icon = Icons.directions_car_filled_rounded;
+      badge = 'PICKUP';
+      title = 'Driver is reaching you';
+    }
+
+    final detail = c.etaChipText.value
+        .split('|')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .join('  ·  ');
+
+    // "Action needed" stage gets a slightly stronger accent (same as shared).
+    final bool emphasise = c.driverArrived.value && !c.driverStartedRide.value;
+
+    final String stageKey = '$badge|$title|$detail';
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 320),
+      curve: Curves.easeOutCubic,
+      alignment: Alignment.topCenter,
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 340),
+        switchInCurve: Curves.easeOutCubic,
+        switchOutCurve: Curves.easeIn,
+        transitionBuilder: (child, anim) {
+          final slide = Tween<Offset>(
+            begin: const Offset(0, 0.10),
+            end: Offset.zero,
+          ).animate(anim);
+          return FadeTransition(
+            opacity: anim,
+            child: SlideTransition(position: slide, child: child),
+          );
+        },
+        layoutBuilder:
+            (currentChild, previousChildren) => Stack(
+              alignment: Alignment.topCenter,
+              children: [
+                ...previousChildren,
+                if (currentChild != null) currentChild,
+              ],
+            ),
+        child: SharedTripStatusCard(
+          key: ValueKey<String>(stageKey),
+          overline: badge,
+          title: title,
+          detail: c.destinationReached.value ? '' : detail,
+          icon: icon,
+          emphasise: emphasise,
+        ),
+      ),
+    );
+  }
+
+  /// Driver details card — identical design to the shared-ride screen's
+  /// bordered driver card. Name/rating are parsed from driverName (backend
+  /// sends "Name ⭐ 4.2" in one string, same as shared). Tap the driver photo
+  /// or the car photo to open the full-screen verify preview.
+  Widget _driverDetailsCard() {
+    final rawName = c.driverName.value.trim();
+    final starIdx = rawName.indexOf('⭐');
+    final nameOnly =
+        (starIdx >= 0 ? rawName.substring(0, starIdx) : rawName).trim();
+    final ratingOnly =
+        starIdx >= 0 ? rawName.substring(starIdx + 1).trim() : '';
+    final profilePic = c.profilePic.value.trim();
+    final carPhoto = c.carExteriorPhotos.value.trim();
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.black.withOpacity(0.12)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Driver photo + rating badge (tap → full-screen preview).
+          SizedBox(
+            width: 52,
+            child: Stack(
+              clipBehavior: Clip.none,
+              alignment: Alignment.bottomCenter,
+              children: [
+                GestureDetector(
+                  onTap:
+                      profilePic.isEmpty
+                          ? null
+                          : () => _showImagePreview(
+                            profilePic,
+                            caption: nameOnly,
+                          ),
+                  child: Container(
+                    height: 52,
+                    width: 52,
+                    clipBehavior: Clip.antiAlias,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: AppColors.containerColor1,
+                      border: Border.all(
+                        color: const Color(0xFF111418).withOpacity(0.25),
+                        width: 2,
+                      ),
+                    ),
+                    child:
+                        profilePic.isNotEmpty
+                            ? Image.network(
+                              profilePic,
+                              fit: BoxFit.cover,
+                              errorBuilder:
+                                  (_, __, ___) =>
+                                      const Icon(Icons.person, size: 26),
+                            )
+                            : const Icon(Icons.person, size: 26),
+                  ),
+                ),
+                if (ratingOnly.isNotEmpty)
+                  Positioned(
+                    bottom: -7,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF111418),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.white, width: 1.5),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            ratingOnly,
+                            style: const TextStyle(
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.white,
+                            ),
+                          ),
+                          const SizedBox(width: 2),
+                          const Icon(
+                            Icons.star_rounded,
+                            size: 10,
+                            color: Colors.white,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          // Name → plate chip → car details, each on its own line.
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  nameOnly.isEmpty ? 'Your driver' : nameOnly,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF1A1A1A),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 9,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF1F3F5),
+                    borderRadius: BorderRadius.circular(7),
+                    border: Border.all(color: Colors.black.withOpacity(0.08)),
+                  ),
+                  child: Text(
+                    c.plateNumber.value.isEmpty ? '—' : c.plateNumber.value,
+                    style: const TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 1.0,
+                      color: Color(0xFF1A1A1A),
+                    ),
+                  ),
+                ),
+                if (c.carDetails.value.trim().isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    c.carDetails.value,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: AppColors.carTypeColor,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          // Car exterior photo (right) — clean image, no "Verify" overlay;
+          // tap still opens the full-screen preview.
+          if (carPhoto.isNotEmpty)
+            GestureDetector(
+              onTap:
+                  () => _showImagePreview(
+                    carPhoto,
+                    caption: 'Your car · ${c.plateNumber.value}'.trim(),
+                  ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: Image.network(
+                  carPhoto,
+                  height: 66,
+                  width: 86,
+                  fit: BoxFit.cover,
+                  errorBuilder:
+                      (_, __, ___) => Container(
+                        height: 66,
+                        width: 86,
+                        alignment: Alignment.center,
+                        color: Colors.grey.shade200,
+                        child: Icon(
+                          Icons.directions_car,
+                          color: Colors.grey.shade500,
+                          size: 26,
+                        ),
+                      ),
+                ),
+              ),
+            ),
+        ],
+          ),
+          // Solo ride tag INSIDE the card (shared-ride parity — shared shows
+          // its "Shared ride + Seat" tags in the same spot).
+          const SizedBox(height: 14),
+          Row(children: [_rideTypePill(shared: false)]),
+        ],
+      ),
+    );
+  }
+
+  /// Fixed bottom app bar (Call + Message), pinned at the very bottom of the
+  /// screen and always visible while the draggable sheet scrolls — identical
+  /// styling to the shared-ride screen (black theme, haptic feedback on tap).
+  Widget _buildFixedDriverActionBar() {
+    return Obx(() {
+      final show =
+          c.isDriverConfirmed.value &&
+          !c.destinationReached.value &&
+          !c.isTripCancelled.value;
+      if (!show) return const SizedBox.shrink();
+      return Container(
+        decoration: BoxDecoration(
+          color: Colors.white,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.10),
+              blurRadius: 16,
+              offset: const Offset(0, -4),
+            ),
+          ],
+        ),
+        child: SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+            child: Row(
+              children: [
+                // Call — small rounded black button.
+                GestureDetector(
+                  onTap: () async {
+                    HapticFeedback.mediumImpact();
+                    try {
+                      final rawNumber = c.driverPhone.value.trim();
+                      if (rawNumber.isEmpty) {
+                        AppToasts.showError(context, 'Driver number not set');
+                        return;
+                      }
+                      final normalized = sanitizePhoneNumber(rawNumber);
+                      if (normalized.isEmpty) {
+                        AppToasts.showError(context, 'Invalid number');
+                        return;
+                      }
+                      final ok = await launchPhoneDialer(normalized);
+                      if (!ok) {
+                        AppToasts.showError(context, 'Could not open dialer');
+                      }
+                    } catch (_) {
+                      AppToasts.showError(context, 'Failed to start call');
+                    }
+                  },
+                  child: Container(
+                    height: 50,
+                    width: 56,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF000000),
+                      borderRadius: BorderRadius.circular(14),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.25),
+                          blurRadius: 8,
+                          offset: const Offset(0, 3),
+                        ),
+                      ],
+                    ),
+                    child: const Icon(
+                      Icons.call_rounded,
+                      color: Colors.white,
+                      size: 24,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                // Message — wider rounded outlined button.
+                Expanded(
+                  child: GestureDetector(
+                    onTap: () {
+                      HapticFeedback.mediumImpact();
+                      final booking =
+                          c
+                              .driverSearchController
+                              .carBooking
+                              .value
+                              ?.bookingId ??
+                          c.bookingId;
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder:
+                              (_) => ChatScreen(
+                                bookingId: booking,
+                                pickupLatitude: _pickupLatLng.latitude,
+                                pickupLongitude: _pickupLatLng.longitude,
+                              ),
+                        ),
+                      );
+                    },
+                    child: Container(
+                      height: 50,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: AppColors.containerColor1,
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: Colors.black.withOpacity(0.06),
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Icon(
+                            Icons.chat_bubble_outline_rounded,
+                            size: 20,
+                            color: Color(0xFF1A1A1A),
+                          ),
+                          const SizedBox(width: 8),
+                          CustomTextFields.textWithStylesSmall(
+                            'Message your driver',
+                            colors: AppColors.commonBlack,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       );
     });
   }
@@ -1035,19 +1248,15 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
   }
 
   Widget _tripInfoInline() {
-    final raw = c.etaChipText.value;
-    final pieces =
-        raw.split('|').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
-    final etaText = pieces.isNotEmpty ? pieces.first : raw.trim();
-    final distText = pieces.length >= 2 ? pieces.last : '';
-
+    // ETA/distance chips moved to the map card (shared-ride parity); this
+    // widget now only renders the arrived "Waiting" timer.
     // A3: waiting timer — shown once the driver has arrived at pickup.
     final waiting =
         c.driverArrived.value &&
         !c.driverStartedRide.value &&
         !c.destinationReached.value;
 
-    if (etaText.isEmpty && distText.isEmpty && !waiting) {
+    if (!waiting) {
       return const SizedBox.shrink();
     }
 
@@ -1082,14 +1291,11 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
       runSpacing: 8,
       alignment: WrapAlignment.center,
       children: [
-        if (waiting)
-          chip(
-            Icons.timelapse_rounded,
-            'Waiting ${_fmtWait(_waitSeconds)}',
-            color: const Color(0xFF12B76A),
-          ),
-        if (etaText.isNotEmpty) chip(Icons.timer_outlined, etaText),
-        if (distText.isNotEmpty) chip(Icons.route_rounded, distText),
+        chip(
+          Icons.timelapse_rounded,
+          'Waiting ${_fmtWait(_waitSeconds)}',
+          color: const Color(0xFF12B76A),
+        ),
       ],
     );
   }
@@ -1129,6 +1335,27 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
       'Completed',
     ];
     final activeIndex = c.timelineIndex;
+
+    // AUTO-CENTER the active step: when the stage advances, smoothly scroll so
+    // the current step sits mid-viewport (manual horizontal scroll still works).
+    // Item extent = 82 (step) + 34 (connector) = 116; +41 centers on the step.
+    if (activeIndex != _lastAutoScrolledStep) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_timelineCtrl.hasClients) return;
+        _lastAutoScrolledStep = activeIndex;
+        final viewport = _timelineCtrl.position.viewportDimension;
+        final target = (activeIndex * 116.0 + 41.0 - viewport / 2).clamp(
+          0.0,
+          _timelineCtrl.position.maxScrollExtent,
+        );
+        _timelineCtrl.animateTo(
+          target,
+          duration: const Duration(milliseconds: 420),
+          curve: Curves.easeOutCubic,
+        );
+      });
+    }
+
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -1145,6 +1372,7 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
           ),
           const SizedBox(height: 12),
           SingleChildScrollView(
+            controller: _timelineCtrl,
             scrollDirection: Axis.horizontal,
             child: Row(
               children: List.generate(steps.length, (index) {
@@ -1500,10 +1728,50 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
       final id = idRaw.trim();
       final hasId = id.isNotEmpty;
 
+      // Vertical action layout — icon on TOP, label BELOW (per design), with
+      // even 16px padding and equal-width columns. Same bordered card style
+      // as the rest of the sheet.
+      Widget action({
+        required IconData icon,
+        required String label,
+        required VoidCallback onTap,
+        Color? color,
+      }) {
+        final effective = color ?? AppColors.cancelRideColor;
+        return Expanded(
+          child: InkWell(
+            onTap: onTap,
+            borderRadius: BorderRadius.circular(12),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(icon, size: 22, color: effective),
+                  const SizedBox(height: 6),
+                  Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: effective,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      }
+
       return Container(
         decoration: BoxDecoration(
           color: Colors.white,
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: Colors.black.withOpacity(0.08)),
           boxShadow: const [
             BoxShadow(
               color: Colors.black12,
@@ -1513,11 +1781,20 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
           ],
         ),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 15),
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              final compact = constraints.maxWidth < 340;
-              final cancelAction = CustomTextFields.textWithImage(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              action(
+                icon: Icons.cancel_outlined,
+                label:
+                    rideInProgress
+                        ? 'Ride in progress'
+                        : (isCancelling ? 'Cancelling...' : 'Cancel Ride'),
+                color:
+                    canCancel
+                        ? AppColors.cancelRideColor
+                        : AppColors.cancelRideColor.withOpacity(0.55),
                 onTap: () {
                   if (rideInProgress) {
                     AppToasts.showInfoGlobal(
@@ -1544,78 +1821,35 @@ class _OrderConfirmScreenState extends State<OrderConfirmScreen>
                     },
                   );
                 },
-                text:
-                    rideInProgress
-                        ? 'Ride in progress'
-                        : (isCancelling ? 'Cancelling...' : 'Cancel Ride'),
-                fontWeight: FontWeight.w500,
-                colors:
-                    canCancel
-                        ? AppColors.cancelRideColor
-                        : AppColors.cancelRideColor.withOpacity(0.55),
-                imagePath: AppImages.cancel,
-                imageColors:
-                    canCancel
-                        ? AppColors.cancelRideColor
-                        : AppColors.cancelRideColor.withOpacity(0.55),
-              );
-              final supportAction = CustomTextFields.textWithImage(
+              ),
+              const SizedBox(
+                height: 34,
+                child: VerticalDivider(color: Colors.grey, thickness: 1),
+              ),
+              action(
+                icon: Icons.support_agent_rounded,
+                label: 'Support',
                 onTap: () {
                   if (!hasId) return;
+                  HapticFeedback.selectionClick();
                   Get.to(() => CustomerSupportListScreen(bookingId: id));
                 },
-                text: 'Support',
-                fontWeight: FontWeight.w500,
-                colors: AppColors.cancelRideColor,
-                imagePath: AppImages.support,
-                imageColors: AppColors.cancelRideColor,
-              );
-              final shareAction = CustomTextFields.textWithImage(
+              ),
+              const SizedBox(
+                height: 34,
+                child: VerticalDivider(color: Colors.grey, thickness: 1),
+              ),
+              action(
+                icon: Icons.ios_share_rounded,
+                label: 'Share',
                 onTap: () {
                   if (!hasId) return;
                   final url =
                       "https://hoppr-admin-e7bebfb9fb05.herokuapp.com/ride-tracker/$id";
                   Share.share(url);
                 },
-                text: 'Share',
-                fontWeight: FontWeight.w500,
-                colors: AppColors.cancelRideColor,
-                imagePath: AppImages.share,
-                imageColors: AppColors.cancelRideColor,
-              );
-
-              if (compact) {
-                return Wrap(
-                  alignment: WrapAlignment.center,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  spacing: 16,
-                  runSpacing: 12,
-                  children: [cancelAction, supportAction, shareAction],
-                );
-              }
-
-              Widget scaled(Widget child) => Expanded(
-                child: Center(
-                  child: FittedBox(fit: BoxFit.scaleDown, child: child),
-                ),
-              );
-
-              return Row(
-                children: [
-                  scaled(cancelAction),
-                  const SizedBox(
-                    height: 24,
-                    child: VerticalDivider(color: Colors.grey, thickness: 1),
-                  ),
-                  scaled(supportAction),
-                  const SizedBox(
-                    height: 24,
-                    child: VerticalDivider(color: Colors.grey, thickness: 1),
-                  ),
-                  scaled(shareAction),
-                ],
-              );
-            },
+              ),
+            ],
           ),
         ),
       );
