@@ -64,6 +64,11 @@ class ActiveBookingData {
   final ActiveBookingVehicle? vehicle;
   final PricingInsights? pricingInsights;
 
+  /// Parcel delivery trust (Phase 2): raw courier lifecycle object
+  /// (parcelStatus, deliveryOtpVerified, podPhotoUrl, pickedUpAt, deliveredAt,
+  /// receiverName, receiverPhoneMasked, ...). Null for rides.
+  final Map<String, dynamic>? parcel;
+
   ActiveBookingData({
     required this.bookingId,
     required this.status,
@@ -101,6 +106,7 @@ class ActiveBookingData {
     required this.cancelled,
     this.vehicle,
     this.pricingInsights,
+    this.parcel,
   });
 
   static double? _parseNum(dynamic v) {
@@ -192,6 +198,10 @@ class ActiveBookingData {
               : null,
       otpCode: json['otpCode'],
       otpVerified: json['otpVerified'] == true,
+      parcel:
+          json['parcel'] is Map
+              ? Map<String, dynamic>.from(json['parcel'] as Map)
+              : null,
       customerImageVerified: json['customerImageVerified'] == true,
       driverAcceptStatus: json['driverAcceptStatus'] == true,
       destinationReached: json['destinationReached'] == true,

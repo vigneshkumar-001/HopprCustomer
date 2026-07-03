@@ -108,6 +108,16 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   bool _isPackageCollected = false;
   bool _isInTransit = false;
   bool _isOutForDelivery = false;
+  // Parcel delivery trust (Phase 2): courier lifecycle pushed via
+  // booking-update {type: 'parcel-status'} and restored from the
+  // active-booking `parcel` object on reopen.
+  String _parcelStatus = '';
+  bool _deliveryOtpVerified = false;
+  String _podPhotoUrl = '';
+  DateTime? _pickedUpAt;
+  DateTime? _deliveredAt;
+  String _receiverPhoneMasked = '';
+  String _receiverDisplayName = '';
   String _estimateStt1 = '';
   String _estimateStt2 = '';
   String otp = '';
@@ -669,12 +679,30 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     final est = _estimateText();
     final pickedUp = _isPackageCollected || _isInTransit || _isOutForDelivery;
 
+    // Parcel trust: terminal states take priority over the leg heuristics.
+    if (_parcelStatus == 'DELIVERED') {
+      return PackageContainer.pickUpFields(
+        title1: 'Ready',
+        imagePath: AppImages.clrHome,
+        title: 'Delivered',
+        subTitle: 'Package delivered successfully',
+      );
+    }
+    if (_parcelStatus == 'FAILED_DELIVERY') {
+      return PackageContainer.pickUpFields(
+        title1: 'Ready',
+        imagePath: AppImages.box,
+        title: 'Failed Delivery',
+        subTitle: 'Delivery failed — please contact support',
+      );
+    }
+
     if (_isOutForDelivery) {
       return PackageContainer.pickUpFields(
         title1: 'Ready',
         imagePath: AppImages.clrHome,
         title: 'Out for Delivery',
-        subTitle: est.isNotEmpty ? est : 'Delivering to destination',
+        subTitle: est.isNotEmpty ? est : 'Courier is near delivery location',
       );
     }
 
@@ -682,11 +710,11 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       return PackageContainer.pickUpFields(
         title1: 'Ready',
         imagePath: AppImages.box,
-        title: 'Picked Up',
+        title: _parcelStatusLabel.isNotEmpty ? _parcelStatusLabel : 'Picked Up',
         subTitle:
             _shortPlace(PickupAddress).isNotEmpty
                 ? 'From ${_shortPlace(PickupAddress)}'
-                : (est.isNotEmpty ? est : 'Package picked up'),
+                : (est.isNotEmpty ? est : 'Package is on the way'),
       );
     }
 
@@ -985,6 +1013,240 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
               ),
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  // ---------- parcel delivery trust (Phase 2) ----------
+
+  /// Apply a parcel-status push (socket) or the active-booking `parcel`
+  /// object (restore). Accepts both key sets; never regresses local state.
+  void _applyParcelTrustUpdate(Map<String, dynamic> payload) {
+    final status =
+        (payload['parcelStatus'] ?? '').toString().trim().toUpperCase();
+    if (!mounted) return;
+    setState(() {
+      if (status.isNotEmpty) _parcelStatus = status;
+      if (payload['deliveryOtpVerified'] == true) _deliveryOtpVerified = true;
+
+      final pod = (payload['podPhotoUrl'] ?? '').toString().trim();
+      if (pod.startsWith('http')) _podPhotoUrl = pod;
+
+      final masked =
+          (payload['deliveryOtpSentTo'] ?? payload['receiverPhoneMasked'] ?? '')
+              .toString()
+              .trim();
+      if (masked.isNotEmpty && masked != 'null') _receiverPhoneMasked = masked;
+
+      final rName =
+          (payload['recipientName'] ?? payload['receiverName'] ?? '')
+              .toString()
+              .trim();
+      if (rName.isNotEmpty && rName != 'null') _receiverDisplayName = rName;
+
+      _pickedUpAt ??=
+          DateTime.tryParse((payload['pickedUpAt'] ?? '').toString());
+      _deliveredAt ??=
+          DateTime.tryParse((payload['deliveredAt'] ?? '').toString());
+
+      // Advance the existing timeline flags from the granular status so the
+      // current cards keep working even if a ride-estimate packet was missed.
+      switch (status) {
+        case 'COURIER_ASSIGNED':
+          _isOrderConfirmed = true;
+          break;
+        case 'PICKED_UP':
+        case 'IN_TRANSIT':
+          _isOrderConfirmed = true;
+          _isPackageCollected = true;
+          _isInTransit = true;
+          driverStartedRide = true;
+          break;
+        case 'OUT_FOR_DELIVERY':
+        case 'DELIVERED':
+          _isOrderConfirmed = true;
+          _isPackageCollected = true;
+          _isInTransit = true;
+          _isOutForDelivery = true;
+          driverStartedRide = true;
+          break;
+        default:
+          break;
+      }
+    });
+    if (status == 'PICKED_UP' ||
+        status == 'IN_TRANSIT' ||
+        status == 'OUT_FOR_DELIVERY') {
+      _syncPhaseMarkers();
+    }
+    AppLogger.log.i('parcel-status update: $payload');
+  }
+
+  String get _parcelStatusLabel {
+    switch (_parcelStatus) {
+      case 'ORDER_CONFIRMED':
+        return 'Order Confirmed';
+      case 'COURIER_ASSIGNED':
+        return 'Courier Assigned';
+      case 'PICKED_UP':
+        return 'Package Picked Up';
+      case 'IN_TRANSIT':
+        return 'In Transit';
+      case 'OUT_FOR_DELIVERY':
+        return 'Out for Delivery';
+      case 'DELIVERED':
+        return 'Delivered';
+      case 'FAILED_DELIVERY':
+        return 'Failed Delivery';
+      default:
+        return '';
+    }
+  }
+
+  String _formatTrustTime(DateTime dt) {
+    final local = dt.toLocal();
+    final h = local.hour % 12 == 0 ? 12 : local.hour % 12;
+    final m = local.minute.toString().padLeft(2, '0');
+    final ampm = local.hour >= 12 ? 'PM' : 'AM';
+    return '${local.day}/${local.month}/${local.year}, $h:$m $ampm';
+  }
+
+  /// After pickup: tell the SENDER the delivery code went to the receiver.
+  /// The code itself is never shown here — only the receiver sees it.
+  Widget _deliveryOtpSentCard() {
+    final who =
+        _receiverDisplayName.isNotEmpty ? _receiverDisplayName : 'the receiver';
+    final phone = _receiverPhoneMasked.isNotEmpty
+        ? ' ($_receiverPhoneMasked)'
+        : '';
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.black,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.12),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(
+              Icons.sms_rounded,
+              color: Colors.white,
+              size: 20,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  _deliveryOtpVerified
+                      ? 'Delivery code verified'
+                      : 'Delivery OTP sent to receiver',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  _deliveryOtpVerified
+                      ? 'The courier verified the code with $who.'
+                      : 'We sent a delivery code to $who$phone by SMS. '
+                          'They share it with the courier at handover.',
+                  style: const TextStyle(color: Colors.white70, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// After delivery: proof-of-delivery photo + pickup/delivery timestamps.
+  Widget _proofOfDeliverySection() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFEFFAF3),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFBBE5C8)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(
+                Icons.verified_rounded,
+                color: Color(0xFF00A85E),
+                size: 20,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                _parcelStatus == 'DELIVERED'
+                    ? 'Delivered — Proof of delivery'
+                    : 'Proof of delivery',
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFF111827),
+                ),
+              ),
+            ],
+          ),
+          if (_podPhotoUrl.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: Image.network(
+                _podPhotoUrl,
+                height: 160,
+                width: double.infinity,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => Container(
+                  height: 80,
+                  alignment: Alignment.center,
+                  color: const Color(0xFFE5E7EB),
+                  child: const Text(
+                    'Photo unavailable',
+                    style: TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+                  ),
+                ),
+              ),
+            ),
+          ],
+          if (_pickedUpAt != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              'Picked up: ${_formatTrustTime(_pickedUpAt!)}',
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF374151),
+              ),
+            ),
+          ],
+          if (_deliveredAt != null) ...[
+            const SizedBox(height: 4),
+            Text(
+              'Delivered: ${_formatTrustTime(_deliveredAt!)}',
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF374151),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -1376,6 +1638,14 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       if (!mounted) return;
       final payload = _normalizeSocketPayload(data);
       if (payload.isEmpty) return;
+
+      // PARCEL TRUST (Phase 2): courier lifecycle pushes ride on the same
+      // booking-update channel with type=parcel-status. Handle them BEFORE the
+      // accepted-only early return below.
+      if ((payload['type'] ?? '').toString().trim() == 'parcel-status') {
+        _applyParcelTrustUpdate(payload);
+        return;
+      }
 
       final status = (payload['status'] ?? '').toString().trim().toUpperCase();
       final driverId = (payload['driverId'] ?? '').toString().trim();
@@ -2693,6 +2963,12 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         if (code.isNotEmpty && !verified && otp.isEmpty && mounted) {
           setState(() => otp = code);
         }
+        // Parcel trust (Phase 2): restore the courier lifecycle on reopen —
+        // socket events are transient, this is the source of truth.
+        final parcel = active.data?.parcel;
+        if (parcel != null && mounted) {
+          _applyParcelTrustUpdate(parcel);
+        }
       });
     } catch (_) {}
   }
@@ -3184,6 +3460,22 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                                       !driverStartedRide &&
                                       !destinationReached) ...[
                                     _otpHighlightCard(),
+                                    const SizedBox(height: 16),
+                                  ],
+                                  // Parcel trust: after pickup, the delivery
+                                  // code went to the RECEIVER — tell the
+                                  // sender (never show the code itself).
+                                  if (driverStartedRide &&
+                                      !destinationReached &&
+                                      _parcelStatus != 'DELIVERED') ...[
+                                    _deliveryOtpSentCard(),
+                                    const SizedBox(height: 16),
+                                  ],
+                                  // Parcel trust: POD photo + timestamps once
+                                  // delivered (or as soon as the photo lands).
+                                  if (_parcelStatus == 'DELIVERED' ||
+                                      _podPhotoUrl.isNotEmpty) ...[
+                                    _proofOfDeliverySection(),
                                     const SizedBox(height: 16),
                                   ],
 
