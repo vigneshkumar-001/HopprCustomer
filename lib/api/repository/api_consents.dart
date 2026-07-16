@@ -1,8 +1,6 @@
 class ApiConsents {
-  static const String baseUrl =
-      'https://bk.myhoppr.com';
-  static const String sharedBaseUrl =
-      'https://bck.myhoppr.com';
+  static const String baseUrl = 'https://bk.myhoppr.com';
+  static const String sharedBaseUrl = 'https://bck.myhoppr.com';
 
   // static String baseUrl = 'https://q29l3cr9-5000.inc1.devtunnels.ms';
   // static String sharedBaseUrl = 'https://q29l3cr9-6000.inc1.devtunnels.ms';
@@ -42,6 +40,30 @@ class ApiConsents {
       '$baseUrl/api/customer/update-customer-booking-image';
   static final String confirmBooking =
       '$baseUrl/api/customer/parcel/confirm-booking';
+
+  /// Package delivery trust (Phase 1): sender-only Pickup OTP retrieval.
+  /// Protected — the backend checks ownership against the authenticated
+  /// customer id, never a client-supplied one.
+  static String parcelPickupOtp(String bookingId) =>
+      '$baseUrl/api/customer/parcel/$bookingId/pickup-otp';
+
+  /// Receiver Tracking + WhatsApp Share MVP: sender-authorized share payload
+  /// (tracking link, pre-filled message, Delivery OTP while eligible).
+  static String parcelShareDetails(String bookingId) =>
+      '$baseUrl/api/customer/parcel/$bookingId/share-details';
+
+  /// Parcel payment — fully separate from paymentBooking (car-ride). See
+  /// payParcelBooking() in backend booking.service.ts for why.
+  static final String parcelPay = '$baseUrl/api/customer/parcel/pay';
+
+  /// Generic gateway-checkout init — same endpoints car-ride payment uses,
+  /// keyed purely on `userBookingId` server-side (no parcel-specific route
+  /// exists). Centralized here instead of hardcoding the URL at each call
+  /// site so a base-URL change can't silently diverge between call sites.
+  static final String paystackInit = '$baseUrl/api/paystack/init';
+  static final String flutterwaveInitialize =
+      '$baseUrl/api/flutterwave/initialize';
+
   static final String sendDriverRequest =
       '$baseUrl/api/customer/send-driver-request';
   static final String paymentBooking = '$baseUrl/api/customer/paymentBooking';
@@ -88,7 +110,8 @@ class ApiConsents {
   // Support
   static final String supportCustomerTickets =
       '$baseUrl/api/support/customer/tickets';
-  static final String supportCommonDetails = '$baseUrl/api/support/common-details';
+  static final String supportCommonDetails =
+      '$baseUrl/api/support/common-details';
   static final String supportMyTickets = '$baseUrl/api/support/my/tickets';
 
   static String driverSearch({

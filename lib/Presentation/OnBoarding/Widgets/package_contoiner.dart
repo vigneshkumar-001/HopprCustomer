@@ -137,7 +137,7 @@ class PackageContainer {
                         Image.asset(AppImages.alone, height: 20),
                         SizedBox(width: 15),
                         Text(
-                          'Ride Only',
+                          'Solo Ride',
                           style: TextStyle(
                             fontSize: 12,
                             fontWeight: FontWeight.w600,
@@ -176,7 +176,7 @@ class PackageContainer {
                         Image.asset(AppImages.rideShare, height: 20),
                         SizedBox(width: 15),
                         Text(
-                          'Ride Share',
+                          'Shared Ride',
                           style: TextStyle(
                             fontSize: 12,
                             fontWeight: FontWeight.w600,

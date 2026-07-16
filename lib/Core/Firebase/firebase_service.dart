@@ -131,6 +131,14 @@ class FirebaseService {
 
   final AndroidNotificationChannel channel = _highPriorityChannel;
 
+  /// Set when a `package_tracking` notification is opened, cleared once
+  /// consumed. HomeScreens' active-ride load checks this to auto-open the
+  /// package tracking screen instead of requiring an extra manual tap on
+  /// the "resume" card — the notification itself must never carry enough
+  /// state to navigate directly (no sender/receiver address data), so this
+  /// only signals intent; HomeScreens still re-fetches everything via REST.
+  static String? pendingPackageNotificationBookingId;
+
   String? _fcmToken;
   String? get fcmToken => _fcmToken;
 
@@ -223,10 +231,14 @@ class FirebaseService {
     _fcmToken = prefs.getString('fcmToken');
 
     if (_fcmToken != null && _fcmToken!.isNotEmpty) {
-      AppLogger.log.d('FCM token loaded from cache (${_fcmToken!.length} chars)');
+      AppLogger.log.d(
+        'FCM token loaded from cache (${_fcmToken!.length} chars)',
+      );
       await _syncFcmTokenIfAuthenticated(_fcmToken!);
     } else if (_tokenFetchInFlight) {
-      AppLogger.log.d('FCM token fetch already in progress; skipping duplicate call');
+      AppLogger.log.d(
+        'FCM token fetch already in progress; skipping duplicate call',
+      );
     } else {
       _tokenFetchInFlight = true;
       try {
@@ -424,6 +436,20 @@ class FirebaseService {
         // the active shared ride + its tracking screen (backend is source of truth).
         case 'shared_tracking':
         case 'shared-ride-tracking':
+          Get.offAll(() => const HomeScreens());
+          break;
+
+        // Package delivery trust: notification never carries the Pickup OTP
+        // (see backend deliverRideOtp) and never carries enough state to
+        // navigate directly (sender/receiver address data isn't in the
+        // payload). Signal intent via the pending-resume flag and let
+        // HomeScreens' existing active-ride REST fetch open the real
+        // package tracking screen once it has full, authoritative data.
+        case 'package_tracking':
+        case 'package-tracking':
+          if (bookingId.isNotEmpty) {
+            pendingPackageNotificationBookingId = bookingId;
+          }
           Get.offAll(() => const HomeScreens());
           break;
 

@@ -16,6 +16,7 @@ import 'package:hopper/Core/Utility/app_loader.dart';
 import 'package:hopper/Core/Utility/app_toasts.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:hopper/Presentation/OnBoarding/Controller/package_controller.dart';
+import 'package:hopper/Presentation/OnBoarding/Screens/package_payment_screen.dart';
 import 'package:hopper/Presentation/OnBoarding/Widgets/package_contoiner.dart';
 import 'package:hopper/Presentation/OnBoarding/models/address_models.dart';
 import 'package:hopper/uitls/map/google_map.dart';
@@ -1198,15 +1199,20 @@ class _ConfirmationScreenState extends State<ConfirmationScreen> {
                 final String? bookingId =
                     packageController.packageDetails.value?.data?.bookingId;
 
-                packageController.sendPackageDriverRequest(
-                  discountCode: _appliedCouponCode ?? '',
-                  bookingId: bookingId ?? '',
-                  receiverData: receiverData!,
-                  senderData: senderData!,
-                  // Optionally pass coupon info:
-                  // couponCode: _appliedCouponCode,
-                  // discountAmount: _discountAmount,
-                  // finalAmount: _totalAfterDiscount,
+                // A parcel must never become dispatchable until the customer
+                // has confirmed a complete payment plan — so "Confirm
+                // Booking" only opens the payment screen here. Driver
+                // dispatch (sendPackageDriverRequest) is triggered from
+                // PackagePaymentScreen itself, only after a payment plan is
+                // confirmed (payParcelBooking sets dispatchEligible=true).
+                Get.to(
+                  () => PackagePaymentScreen(
+                    bookingId: bookingId ?? '',
+                    amount: _totalAfterDiscount,
+                    discountCode: _appliedCouponCode ?? '',
+                    senderData: senderData!,
+                    receiverData: receiverData!,
+                  ),
                 );
               },
               text: 'Confirm Booking',

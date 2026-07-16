@@ -1,7 +1,6 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Core/Consents/app_logger.dart';
 import 'package:get/get.dart';
 import 'package:hopper/Core/Utility/app_toasts.dart';
@@ -14,7 +13,22 @@ import 'package:hopper/api/dataSource/apiDataSource.dart';
 
 import '../../../uitls/websocket/socket_io_client.dart';
 import '../../Drawer/controller/ride_history_controller.dart';
-import '../Screens/package_map_confrim_screen.dart';
+
+/// Centralized UI state for the parcel PAYMENT SCREEN specifically (not the
+/// booking flow at large) — single source of truth for what the bottom
+/// action button shows/does, replacing 4 independent per-tile loading
+/// booleans that used to live on the screen itself.
+enum ParcelPaymentUiState {
+  idle,
+  methodSelected,
+  confirmingCash,
+  initializingOnlinePayment,
+  awaitingPayment,
+  verifyingPayment,
+  dispatching,
+  success,
+  failed,
+}
 
 class PackageController extends GetxController {
   final ApiDataSource apiDataSource = ApiDataSource();
@@ -25,6 +39,228 @@ class PackageController extends GetxController {
   final RxBool isButtonLoading = false.obs;
   var packageDetails = Rxn<PackageDetailsResponse>();
   var confirmPackageDetails = Rxn<ConfirmPackageResponse>();
+
+  /// ---- Package delivery trust (Phase 3): sender-only Pickup OTP ----
+  /// Held in memory ONLY — never persisted (no SharedPreferences/GetStorage)
+  /// and never logged. Cleared as soon as pickup is verified or the tracking
+  /// screen is left. Backend (the Phase 1 sender-only endpoint) is the sole
+  /// source of truth for the value; nothing here is locally generated.
+  final RxString pickupOtp = ''.obs;
+  final RxBool pickupOtpLoading = false.obs;
+  final RxString pickupOtpError = ''.obs;
+  final RxBool pickupOtpAvailable = false.obs;
+
+  /// Fetch the sender's Pickup OTP for [bookingId]. Safe to call repeatedly
+  /// (e.g. on resume) — a 409 (already verified / past pre-pickup status) is
+  /// treated as "nothing to show", not a user-facing error.
+  Future<void> fetchSenderPickupOtp(String bookingId) async {
+    if (bookingId.trim().isEmpty || pickupOtpLoading.value) return;
+    pickupOtpLoading.value = true;
+    pickupOtpError.value = '';
+    try {
+      final result = await apiDataSource.getParcelPickupOtp(
+        bookingId: bookingId,
+      );
+      result.fold(
+        (failure) {
+          pickupOtp.value = '';
+          pickupOtpAvailable.value = false;
+          // A 409 ("not available right now") is expected once pickup moves
+          // on — don't surface it as an error the sender needs to act on.
+          pickupOtpError.value = '';
+        },
+        (data) {
+          final code = (data['otp'] ?? '').toString().trim();
+          pickupOtp.value = code;
+          pickupOtpAvailable.value =
+              data['otpAvailable'] == true && code.isNotEmpty;
+        },
+      );
+    } catch (_) {
+      pickupOtp.value = '';
+      pickupOtpAvailable.value = false;
+    } finally {
+      pickupOtpLoading.value = false;
+    }
+  }
+
+  /// Clear the raw Pickup OTP from memory — called once pickup is verified
+  /// (local or via socket) and whenever the sender leaves the eligible
+  /// tracking flow (screen dispose).
+  void clearPickupOtpFromMemory() {
+    pickupOtp.value = '';
+    pickupOtpAvailable.value = false;
+    pickupOtpError.value = '';
+  }
+
+  /// ---- Receiver Tracking + WhatsApp Share MVP ----
+  /// Sender-authorized share payload (tracking link, pre-filled message,
+  /// Delivery OTP while eligible). Held in memory only, same treatment as
+  /// the Pickup OTP above — never persisted, never logged.
+  final Rxn<Map<String, dynamic>> shareDetails = Rxn<Map<String, dynamic>>();
+  final RxBool shareDetailsLoading = false.obs;
+  final RxString shareDetailsError = ''.obs;
+
+  /// Fetch the sender's share payload for [bookingId]. Safe to call
+  /// repeatedly (e.g. on resume/reconnect) — a 409 (pickup not verified yet)
+  /// is treated as "nothing to show", not a user-facing error.
+  Future<void> fetchParcelShareDetails(String bookingId) async {
+    if (bookingId.trim().isEmpty || shareDetailsLoading.value) return;
+    shareDetailsLoading.value = true;
+    shareDetailsError.value = '';
+    try {
+      final result = await apiDataSource.getParcelShareDetails(
+        bookingId: bookingId,
+      );
+      result.fold(
+        (failure) {
+          shareDetails.value = null;
+          shareDetailsError.value = failure.message;
+        },
+        (data) {
+          shareDetails.value = data;
+          shareDetailsError.value = '';
+        },
+      );
+    } catch (_) {
+      shareDetails.value = null;
+      shareDetailsError.value = 'Something went wrong';
+    } finally {
+      shareDetailsLoading.value = false;
+    }
+  }
+
+  /// Clear the share payload from memory — called on screen dispose and
+  /// whenever the sender leaves the eligible tracking flow.
+  void clearShareDetailsFromMemory() {
+    shareDetails.value = null;
+    shareDetailsError.value = '';
+    shareDetailsLoading.value = false;
+  }
+
+  /// ---- Parcel payment ----
+  /// Deliberately separate from paymentDetails() (car-ride) — never touches
+  /// driverSearchController or the car-ride payment endpoint.
+  final RxBool parcelPaymentLoading = false.obs;
+  final RxString parcelPaymentError = ''.obs;
+
+  /// Drives PackagePaymentScreen's single bottom action button + tile
+  /// enablement. See [ParcelPaymentUiState] for the full state list.
+  final Rx<ParcelPaymentUiState> parcelPaymentUiState =
+      ParcelPaymentUiState.idle.obs;
+  final Rxn<String> selectedParcelPaymentMethod = Rxn<String>();
+
+  /// Non-toast status/error text for the payment screen — e.g. a failed
+  /// dispatch-after-payment message that should stay visible until retried,
+  /// not just flash as a toast.
+  final RxString parcelPaymentStatusMessage = ''.obs;
+
+  /// Full reset for a fresh entry into the payment screen — called from the
+  /// screen's dispose() so a previous booking's selection/error never leaks
+  /// into the next one.
+  void resetParcelPaymentFlow() {
+    parcelPaymentUiState.value = ParcelPaymentUiState.idle;
+    selectedParcelPaymentMethod.value = null;
+    parcelPaymentStatusMessage.value = '';
+    parcelPaymentError.value = '';
+  }
+
+  final RxBool parcelOnlinePaymentInitLoading = false.obs;
+
+  /// Starts a Paystack checkout for a parcel booking — call only AFTER
+  /// [payParcelBooking] has recorded the PAYSTACK intent. Returns the raw
+  /// backend body (`authorization_url`, ...) or null on failure (message in
+  /// [parcelPaymentError]).
+  Future<Map<String, dynamic>?> initParcelPaystackPayment({
+    required String bookingId,
+    required String email,
+  }) async {
+    parcelOnlinePaymentInitLoading.value = true;
+    parcelPaymentError.value = '';
+    try {
+      final result = await apiDataSource.initPaystackPayment(
+        bookingId: bookingId,
+        email: email,
+      );
+      return result.fold((failure) {
+        parcelPaymentError.value = failure.message;
+        return null;
+      }, (data) => data);
+    } catch (e) {
+      AppLogger.log.e(e);
+      parcelPaymentError.value = 'Something went wrong';
+      return null;
+    } finally {
+      parcelOnlinePaymentInitLoading.value = false;
+    }
+  }
+
+  /// Starts a Flutterwave checkout for a parcel booking. See
+  /// [initParcelPaystackPayment] for the calling contract.
+  Future<Map<String, dynamic>?> initParcelFlutterwavePayment({
+    required String bookingId,
+    required double amount,
+    required String email,
+    required String name,
+    required String phone,
+  }) async {
+    parcelOnlinePaymentInitLoading.value = true;
+    parcelPaymentError.value = '';
+    try {
+      final result = await apiDataSource.initFlutterwavePayment(
+        bookingId: bookingId,
+        amount: amount,
+        email: email,
+        name: name,
+        phone: phone,
+      );
+      return result.fold((failure) {
+        parcelPaymentError.value = failure.message;
+        return null;
+      }, (data) => data);
+    } catch (e) {
+      AppLogger.log.e(e);
+      parcelPaymentError.value = 'Something went wrong';
+      return null;
+    } finally {
+      parcelOnlinePaymentInitLoading.value = false;
+    }
+  }
+
+  /// paymentType ∈ {PAYSTACK, FLUTTERWAVE, WALLET, CASH}. Returns the
+  /// backend's data map on success (`parcelPaymentStatus` tells the caller
+  /// what happened: PAID / CASH_PENDING / PENDING), or null on failure
+  /// (error message left in [parcelPaymentError]).
+  Future<Map<String, dynamic>?> payParcelBooking({
+    required String bookingId,
+    required String paymentType,
+  }) async {
+    parcelPaymentLoading.value = true;
+    parcelPaymentError.value = '';
+    try {
+      final result = await apiDataSource.payParcelBooking(
+        bookingId: bookingId,
+        paymentType: paymentType,
+      );
+      return result.fold(
+        (failure) {
+          parcelPaymentError.value = failure.message;
+          parcelPaymentLoading.value = false;
+          return null;
+        },
+        (data) {
+          parcelPaymentLoading.value = false;
+          return data;
+        },
+      );
+    } catch (e) {
+      AppLogger.log.e(e);
+      parcelPaymentError.value = 'Something went wrong';
+      parcelPaymentLoading.value = false;
+      return null;
+    }
+  }
+
   RideHistoryController get controller {
     if (Get.isRegistered<RideHistoryController>()) {
       return Get.find<RideHistoryController>();
@@ -104,16 +340,16 @@ class PackageController extends GetxController {
             'userId': response.data.customerId,
           };
 
-           // Log the data
-           AppLogger.log.i("📤 Join booking data: $bookingData");
-           socketService.joinBookingRoom(
-             bookingId: response.data.bookingId.toString(),
-             payload: bookingData,
-           );
+          // Log the data
+          AppLogger.log.i("📤 Join booking data: $bookingData");
+          socketService.joinBookingRoom(
+            bookingId: response.data.bookingId.toString(),
+            payload: bookingData,
+          );
 
-           isLoading.value = false;
-           packageDetails.value = response;
-           AppLogger.log.i("Package Details  == ${packageDetails.value}");
+          isLoading.value = false;
+          packageDetails.value = response;
+          AppLogger.log.i("Package Details  == ${packageDetails.value}");
           return response.data.toString();
         },
       );
@@ -176,7 +412,12 @@ class PackageController extends GetxController {
     return null;
   }
 
-  Future<String?> sendPackageDriverRequest({
+  /// Dispatches the booking to nearby drivers. For Parcel bookings the
+  /// backend rejects this (409, dispatchEligible=false) until a payment plan
+  /// has been confirmed via payParcelBooking — so callers must only invoke
+  /// this AFTER that succeeds. Does NOT navigate — the caller (PaymentScreen
+  /// for parcels) owns navigation since it knows the full post-payment flow.
+  Future<bool> sendPackageDriverRequest({
     required String bookingId,
     required String discountCode,
 
@@ -190,7 +431,7 @@ class PackageController extends GetxController {
         'Something went wrong with your booking. Please go back and try again.',
         title: 'Booking failed',
       );
-      return null;
+      return false;
     }
     try {
       isConfirmLoading.value = true;
@@ -208,24 +449,15 @@ class PackageController extends GetxController {
           final raw = failure.message.trim();
           final friendly =
               (raw.isEmpty || raw == 'Something went wrong')
-                  ? 'Could not confirm your booking right now. Please try again.'
+                  ? 'Could not request a courier right now. Please try again.'
                   : raw;
-          AppToasts.showErrorGlobal(friendly, title: 'Booking failed');
-          return null;
+          AppToasts.showErrorGlobal(friendly, title: 'Courier request failed');
+          return false;
         },
         (response) {
           isConfirmLoading.value = false;
-          Get.to(
-            PackageMapConfirmScreen(
-              bookingId: bookingId,
-              discountCode: discountCode,
-              senderData: senderData,
-              receiverData: receiverData,
-            ),
-          );
           AppLogger.log.i('${response.data}');
-
-          return response.data.toString();
+          return true;
         },
       );
     } catch (e) {
@@ -236,7 +468,7 @@ class PackageController extends GetxController {
         title: 'Booking failed',
       );
     }
-    return null;
+    return false;
   }
 
   Future<String?> submitProfileData({
@@ -260,7 +492,7 @@ class PackageController extends GetxController {
           if (context != null) {
             AppToasts.customToast(context, failure.message);
           } else {
-            AppToasts.showError(context!,failure.message);
+            AppToasts.showError(context!, failure.message);
           }
           return null;
         }, (success) => success.message);
@@ -284,7 +516,7 @@ class PackageController extends GetxController {
           if (context != null) {
             AppToasts.customToast(context, failure.message);
           } else {
-            AppToasts.showError(context!,failure.message);
+            AppToasts.showError(context!, failure.message);
           }
           AppLogger.log.e("Failure: $failure");
 
@@ -322,13 +554,13 @@ class PackageController extends GetxController {
         (failure) {
           isLoading.value = false;
           AppLogger.log.e("Failed: ${failure.message}");
-          AppToasts.showError(context,failure.message);
+          AppToasts.showError(context, failure.message);
           return null; // <-- always return a consistent type
         },
         (response) {
           isLoading.value = false;
           AppLogger.log.i("Success: ${response.message}");
-          AppToasts.showSuccess(context,response.message ?? 'Coupon applied');
+          AppToasts.showSuccess(context, response.message ?? 'Coupon applied');
           return response; // <-- return proper CouponResponse
         },
       );
@@ -343,8 +575,3 @@ class PackageController extends GetxController {
     }
   }
 }
-
-
-
-
-

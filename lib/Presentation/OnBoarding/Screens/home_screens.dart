@@ -10,6 +10,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import 'package:hopper/Core/Consents/app_colors.dart';
 import 'package:hopper/Core/Consents/app_texts.dart';
+import 'package:hopper/Core/Firebase/firebase_service.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
 import 'package:hopper/Core/Utility/skeleton_loaders.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
@@ -23,6 +24,7 @@ import 'package:hopper/Presentation/OnBoarding/Widgets/custom_bottomnavigation.d
 import 'package:hopper/Presentation/OnBoarding/Widgets/package_contoiner.dart';
 import 'package:hopper/Presentation/OnBoarding/Screens/package_map_confrim_screen.dart';
 import 'package:hopper/Presentation/OnBoarding/Screens/payment_screen.dart';
+import 'package:hopper/Presentation/OnBoarding/Screens/package_payment_screen.dart';
 import 'package:hopper/Presentation/OnBoarding/models/address_models.dart';
 import 'package:hopper/api/dataSource/apiDataSource.dart';
 import 'package:hopper/api/repository/request.dart';
@@ -137,7 +139,53 @@ bool _isParcelActiveBooking(ActiveBookingData ride) {
   return rideType == 'bike';
 }
 
+/// Rule 1: DELIVERED never opens payment. A parcel's payment plan is chosen
+/// BEFORE dispatch (PackagePaymentScreen) or settled by the driver at
+/// pickup/delivery (cash collected / online webhook) — by the time
+/// `parcelStatus` reaches DELIVERED the backend has already atomically
+/// re-verified payment was satisfied (see checkParcelCompletionAllowed /
+/// markParcelDelivered's own filter) before ever stamping DELIVERED. So a
+/// DELIVERED parcel is NEVER "payment pending" from the customer's
+/// perspective, regardless of what a stale/loosely-matched paymentStatus
+/// string says.
+bool _isParcelDelivered(ActiveBookingData ride) {
+  final parcelStatus = (ride.parcel?['parcelStatus'] ?? '')
+      .toString()
+      .trim()
+      .toUpperCase();
+  return parcelStatus == 'DELIVERED';
+}
+
 bool _isPaymentPending(ActiveBookingData ride) {
+  if (_isParcelActiveBooking(ride)) {
+    // Rule 1: DELIVERED never opens payment.
+    if (_isParcelDelivered(ride)) return false;
+    // Once a driver is assigned, the payment PLAN was already confirmed —
+    // dispatch requires dispatchEligible=true server-side, which is only
+    // ever set by a successful payParcelBooking() call. CASH_PENDING is an
+    // expected, non-blocking state all the way to pickup/delivery, not an
+    // unresolved payment; online methods are already PAID by the time
+    // dispatch happens (PackagePaymentScreen only dispatches after webhook
+    // verification). So never reopen the payment screen once dispatched,
+    // regardless of what the generic ride `status` says while a courier is
+    // still being searched for (see the matching backend fix in
+    // getCustomerActiveBookingDetails — `derivedPaymentStatus` no longer
+    // infers "payment pending" from dispatch-in-progress for parcels, this
+    // is the client-side belt-and-suspenders half of that same fix).
+    if (ride.driverId.trim().isNotEmpty) return false;
+    // No driver yet — read the parcel's OWN payment status (never the
+    // generic top-level one, which for parcels reflects dispatch progress,
+    // not payment). Empty/PENDING means no plan was ever confirmed (or an
+    // online intent was recorded but checkout was abandoned) — genuinely
+    // worth resuming into the payment screen. CASH_PENDING/PAID/
+    // CASH_COLLECTED are all already-resolved plans, never re-opened here.
+    final parcelPaymentStatus =
+        (ride.parcel?['parcelPaymentStatus'] ?? '')
+            .toString()
+            .trim()
+            .toUpperCase();
+    return parcelPaymentStatus.isEmpty || parcelPaymentStatus == 'PENDING';
+  }
   final ps = (ride.paymentStatus ?? '').toString().trim().toUpperCase();
   final st = ride.status.trim().toUpperCase();
   return ps == 'PAYMENT_PENDING' ||
@@ -170,6 +218,7 @@ bool _isCompletedStatus(ActiveBookingData ride) {
 bool _isCustomerTerminalRide(ActiveBookingData ride) {
   if (ride.cancelled) return true;
   if (_isCompletedStatus(ride)) return true;
+  if (_isParcelActiveBooking(ride) && _isParcelDelivered(ride)) return true;
   return ride.destinationReached && _isPaymentSettled(ride);
 }
 
@@ -688,6 +737,28 @@ class _HomeScreensState extends State<HomeScreens>
         if (!hasValidActiveRide && !shouldSuppressRide) {
           await _clearLocallyCompletedCashBookingId();
         }
+
+        // Package delivery trust: a `package_tracking` notification was
+        // opened — auto-open the tracking screen instead of leaving the
+        // sender to spot and tap the "resume" card manually. Only fires
+        // once per notification (flag is cleared immediately) and only for
+        // the exact booking the notification named, using the just-fetched
+        // REST data — never anything from the notification payload itself.
+        final pendingBookingId =
+            FirebaseService.pendingPackageNotificationBookingId;
+        if (pendingBookingId != null &&
+            pendingBookingId.isNotEmpty &&
+            hasValidActiveRide &&
+            data != null &&
+            data.bookingId == pendingBookingId &&
+            _isParcelActiveBooking(data)) {
+          FirebaseService.pendingPackageNotificationBookingId = null;
+          await _resumeActiveRide();
+        } else if (pendingBookingId != null) {
+          // Stale/mismatched — don't leave it around to misfire on a later,
+          // unrelated active-ride load.
+          FirebaseService.pendingPackageNotificationBookingId = null;
+        }
       },
     );
   }
@@ -718,14 +789,18 @@ class _HomeScreensState extends State<HomeScreens>
     // - Car -> payment screen with driver details
     if (_isPaymentPending(ride)) {
       if (_isParcelActiveBooking(ride)) {
+        // The PARCEL payment screen, not the ride one — parcel payment is a
+        // pre-dispatch/pickup-time plan (Cash/Paystack/Flutterwave/Wallet
+        // via PackagePaymentScreen's own state machine), never the post-ride
+        // fare screen. _isPaymentPending() already excludes DELIVERED
+        // parcels above, so reaching here means a genuinely unfinished
+        // payment plan from before dispatch — not a re-open after delivery.
         await Get.to(
-          () => PaymentScreen(
+          () => PackagePaymentScreen(
             bookingId: ride.bookingId,
             amount: ride.amount,
-            sender: _activeBookingToAddress(ride: ride, pickup: true),
-            receiver: _activeBookingToAddress(ride: ride, pickup: false),
-            driverName: ride.driverName,
-            driverProfilePic: ride.driverProfilePic,
+            senderData: _activeBookingToAddress(ride: ride, pickup: true),
+            receiverData: _activeBookingToAddress(ride: ride, pickup: false),
           ),
         );
       } else {
@@ -1042,62 +1117,65 @@ class _HomeScreensState extends State<HomeScreens>
                       SizedBox(
                         key: _mapKey,
                         child: GoogleMap(
-                    initialCameraPosition: CameraPosition(
-                      target: _firstMapPos!,
-                      // Nearby drivers on pickup screen.
-                      zoom: 15.5,
-                    ),
-                    // Keep padding zero so map projection matches overlay pin coordinates.
-                    padding: EdgeInsets.zero,
-                    markers: mapC.markers.toSet(),
-                    circles: mapC.circles.toSet(),
-                    onMapCreated: (controller) async {
-                      debugPrint("Main Map created");
-                      await mapC.attachMap(controller);
-                      if (!mounted) return;
-                      WidgetsBinding.instance.addPostFrameCallback((_) {
-                        _captureMapScreenScaleIfNeeded();
-                      });
-                      _onSheetHeightChanged(_sheetHeightN.value);
-                      _tryAlignCurrentLocationUnderPinOnce();
-                      // Fade the "locating you" placeholder out once the map is
-                      // created and tiles have a beat to paint — smooth reveal.
-                      Future.delayed(const Duration(milliseconds: 650), () {
-                        if (mounted && !_mapReady) {
-                          setState(() => _mapReady = true);
-                        }
-                      });
-                    },
-                    onTap: (_) {},
-                    onCameraMove: mapC.onCameraMove,
-                    onCameraIdle: () async {
-                      _captureMapScreenScaleIfNeeded();
-                      final tip = _pinTipInMap();
-                      if (tip == null) {
-                        await mapC.onCameraIdle(immediateGeocode: false);
-                      } else {
-                        await mapC.onCameraIdleAt(
-                          pinTip: tip,
-                          immediateGeocode: false,
-                        );
-                      }
-                    },
-                    myLocationEnabled: mapC.gate.isReady.value,
-                    myLocationButtonEnabled: false,
-                    buildingsEnabled: false,
-                    tiltGesturesEnabled: false,
-                    minMaxZoomPreference: const MinMaxZoomPreference(
-                      14.0,
-                      18.0,
-                    ),
-                    mapToolbarEnabled: false,
-                    zoomControlsEnabled: false,
-                    gestureRecognizers: {
-                      Factory<OneSequenceGestureRecognizer>(
-                        () => EagerGestureRecognizer(),
-                      ),
-                    },
-                  ),
+                          initialCameraPosition: CameraPosition(
+                            target: _firstMapPos!,
+                            // Nearby drivers on pickup screen.
+                            zoom: 15.5,
+                          ),
+                          // Keep padding zero so map projection matches overlay pin coordinates.
+                          padding: EdgeInsets.zero,
+                          markers: mapC.markers.toSet(),
+                          circles: mapC.circles.toSet(),
+                          onMapCreated: (controller) async {
+                            debugPrint("Main Map created");
+                            await mapC.attachMap(controller);
+                            if (!mounted) return;
+                            WidgetsBinding.instance.addPostFrameCallback((_) {
+                              _captureMapScreenScaleIfNeeded();
+                            });
+                            _onSheetHeightChanged(_sheetHeightN.value);
+                            _tryAlignCurrentLocationUnderPinOnce();
+                            // Fade the "locating you" placeholder out once the map is
+                            // created and tiles have a beat to paint — smooth reveal.
+                            Future.delayed(
+                              const Duration(milliseconds: 650),
+                              () {
+                                if (mounted && !_mapReady) {
+                                  setState(() => _mapReady = true);
+                                }
+                              },
+                            );
+                          },
+                          onTap: (_) {},
+                          onCameraMove: mapC.onCameraMove,
+                          onCameraIdle: () async {
+                            _captureMapScreenScaleIfNeeded();
+                            final tip = _pinTipInMap();
+                            if (tip == null) {
+                              await mapC.onCameraIdle(immediateGeocode: false);
+                            } else {
+                              await mapC.onCameraIdleAt(
+                                pinTip: tip,
+                                immediateGeocode: false,
+                              );
+                            }
+                          },
+                          myLocationEnabled: mapC.gate.isReady.value,
+                          myLocationButtonEnabled: false,
+                          buildingsEnabled: false,
+                          tiltGesturesEnabled: false,
+                          minMaxZoomPreference: const MinMaxZoomPreference(
+                            14.0,
+                            18.0,
+                          ),
+                          mapToolbarEnabled: false,
+                          zoomControlsEnabled: false,
+                          gestureRecognizers: {
+                            Factory<OneSequenceGestureRecognizer>(
+                              () => EagerGestureRecognizer(),
+                            ),
+                          },
+                        ),
                       ),
                     // Premium "locating you" placeholder over the map; fades out
                     // smoothly once the map is ready (no spinner, no flash).
@@ -1166,9 +1244,7 @@ class _HomeScreensState extends State<HomeScreens>
                           onTap: _openBookRideSearch,
                           child: Container(
                             height: 48,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 14,
-                            ),
+                            padding: const EdgeInsets.symmetric(horizontal: 14),
                             decoration: BoxDecoration(
                               color: Colors.white,
                               borderRadius: BorderRadius.circular(16),
@@ -1206,8 +1282,10 @@ class _HomeScreensState extends State<HomeScreens>
                                 const SizedBox(width: 8),
                                 GestureDetector(
                                   behavior: HitTestBehavior.opaque,
-                                  onTap: () =>
-                                      Get.to(() => const FavouritesScreen()),
+                                  onTap:
+                                      () => Get.to(
+                                        () => const FavouritesScreen(),
+                                      ),
                                   child: const Icon(
                                     Icons.favorite_border,
                                     size: 20,
@@ -1505,136 +1583,134 @@ class _HomeBottomSheet extends StatelessWidget {
                             Material(
                               color: Colors.transparent,
                               child: InkWell(
-                                  borderRadius: BorderRadius.circular(16),
-                                  onTap: () async {
-                                    if (mapC.currentPosition == null) {
-                                      await mapC.initLocation();
-                                      if (mapC.currentPosition == null) return;
-                                    }
+                                borderRadius: BorderRadius.circular(16),
+                                onTap: () async {
+                                  if (mapC.currentPosition == null) {
+                                    await mapC.initLocation();
+                                    if (mapC.currentPosition == null) return;
+                                  }
 
-                                    final pickupAddress = await mapC
-                                        .getAddressFromLatLng(
-                                          mapC.currentPosition!,
-                                        );
+                                  final pickupAddress = await mapC
+                                      .getAddressFromLatLng(
+                                        mapC.currentPosition!,
+                                      );
 
-                                    final pickupData = {
-                                      'description': pickupAddress,
-                                      'lat': mapC.currentPosition!.latitude,
-                                      'lng': mapC.currentPosition!.longitude,
-                                    };
+                                  final pickupData = {
+                                    'description': pickupAddress,
+                                    'lat': mapC.currentPosition!.latitude,
+                                    'lng': mapC.currentPosition!.longitude,
+                                  };
 
-                                    Get.to(
-                                      () => BookRideSearchScreen(
-                                        isPickup: false,
-                                        pickupData: pickupData,
-                                      ),
-                                      transition: Transition.downToUp,
-                                      curve: Curves.easeOutCubic,
-                                      duration: const Duration(
-                                        milliseconds: 360,
-                                      ),
-                                    );
-                                  },
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 12,
-                                      vertical: 11,
+                                  Get.to(
+                                    () => BookRideSearchScreen(
+                                      isPickup: false,
+                                      pickupData: pickupData,
                                     ),
-                                    decoration: BoxDecoration(
-                                      gradient: const LinearGradient(
-                                        begin: Alignment.topLeft,
-                                        end: Alignment.bottomRight,
-                                        colors: [
-                                          Color(0xFFF7F9FC),
-                                          Color(0xFFEDF3FD),
-                                        ],
-                                      ),
-                                      borderRadius: BorderRadius.circular(16),
-                                      border: Border.all(
-                                        color: const Color(
-                                          0xFF2563EB,
-                                        ).withOpacity(0.10),
-                                      ),
-                                    ),
-                                    child: Row(
-                                      children: [
-                                        Container(
-                                          height: 40,
-                                          width: 40,
-                                          alignment: Alignment.center,
-                                          decoration: BoxDecoration(
-                                            color: const Color(0xFF2563EB),
-                                            borderRadius: BorderRadius.circular(
-                                              12,
-                                            ),
-                                            boxShadow: [
-                                              BoxShadow(
-                                                color: const Color(
-                                                  0xFF2563EB,
-                                                ).withOpacity(0.30),
-                                                blurRadius: 10,
-                                                offset: const Offset(0, 4),
-                                              ),
-                                            ],
-                                          ),
-                                          child: const Icon(
-                                            Icons.search_rounded,
-                                            color: Colors.white,
-                                            size: 22,
-                                          ),
-                                        ),
-                                        const SizedBox(width: 12),
-                                        Expanded(
-                                          child: Column(
-                                            crossAxisAlignment:
-                                                CrossAxisAlignment.start,
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: [
-                                              const Text(
-                                                'Where to?',
-                                                style: TextStyle(
-                                                  fontSize: 15,
-                                                  fontWeight: FontWeight.w700,
-                                                  color: AppColors.commonBlack,
-                                                ),
-                                              ),
-                                              const SizedBox(height: 2),
-                                              Text(
-                                                'Search destination',
-                                                style: TextStyle(
-                                                  fontSize: 12,
-                                                  color: AppColors.textColor,
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                        Container(
-                                          padding: const EdgeInsets.all(6),
-                                          decoration: BoxDecoration(
-                                            color: Colors.white,
-                                            shape: BoxShape.circle,
-                                            boxShadow: [
-                                              BoxShadow(
-                                                color: Colors.black.withOpacity(
-                                                  0.06,
-                                                ),
-                                                blurRadius: 6,
-                                                offset: const Offset(0, 2),
-                                              ),
-                                            ],
-                                          ),
-                                          child: const Icon(
-                                            Icons.arrow_forward_rounded,
-                                            size: 16,
-                                            color: Color(0xFF2563EB),
-                                          ),
-                                        ),
+                                    transition: Transition.downToUp,
+                                    curve: Curves.easeOutCubic,
+                                    duration: const Duration(milliseconds: 360),
+                                  );
+                                },
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 11,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    gradient: const LinearGradient(
+                                      begin: Alignment.topLeft,
+                                      end: Alignment.bottomRight,
+                                      colors: [
+                                        Color(0xFFF7F9FC),
+                                        Color(0xFFEDF3FD),
                                       ],
                                     ),
+                                    borderRadius: BorderRadius.circular(16),
+                                    border: Border.all(
+                                      color: const Color(
+                                        0xFF2563EB,
+                                      ).withOpacity(0.10),
+                                    ),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Container(
+                                        height: 40,
+                                        width: 40,
+                                        alignment: Alignment.center,
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFF2563EB),
+                                          borderRadius: BorderRadius.circular(
+                                            12,
+                                          ),
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: const Color(
+                                                0xFF2563EB,
+                                              ).withOpacity(0.30),
+                                              blurRadius: 10,
+                                              offset: const Offset(0, 4),
+                                            ),
+                                          ],
+                                        ),
+                                        child: const Icon(
+                                          Icons.search_rounded,
+                                          color: Colors.white,
+                                          size: 22,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            const Text(
+                                              'Where to?',
+                                              style: TextStyle(
+                                                fontSize: 15,
+                                                fontWeight: FontWeight.w700,
+                                                color: AppColors.commonBlack,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 2),
+                                            Text(
+                                              'Search destination',
+                                              style: TextStyle(
+                                                fontSize: 12,
+                                                color: AppColors.textColor,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      Container(
+                                        padding: const EdgeInsets.all(6),
+                                        decoration: BoxDecoration(
+                                          color: Colors.white,
+                                          shape: BoxShape.circle,
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: Colors.black.withOpacity(
+                                                0.06,
+                                              ),
+                                              blurRadius: 6,
+                                              offset: const Offset(0, 2),
+                                            ),
+                                          ],
+                                        ),
+                                        child: const Icon(
+                                          Icons.arrow_forward_rounded,
+                                          size: 16,
+                                          color: Color(0xFF2563EB),
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
                               ),
+                            ),
                             const SizedBox(height: 8),
 
                             Obx(() {
@@ -1709,112 +1785,124 @@ class _HomeBottomSheet extends StatelessWidget {
                                       );
                                     },
                                     child: Column(
-                                    children: [
-                                      InkWell(
-                                        borderRadius: BorderRadius.circular(14),
-                                        onTap: () async {
-                                          if (mapC.currentPosition == null) {
-                                            await mapC.initLocation();
+                                      children: [
+                                        InkWell(
+                                          borderRadius: BorderRadius.circular(
+                                            14,
+                                          ),
+                                          onTap: () async {
                                             if (mapC.currentPosition == null) {
-                                              return;
+                                              await mapC.initLocation();
+                                              if (mapC.currentPosition ==
+                                                  null) {
+                                                return;
+                                              }
                                             }
-                                          }
 
-                                          final pickupAddress = await mapC
-                                              .getAddressFromLatLng(
-                                                mapC.currentPosition!,
-                                              );
+                                            final pickupAddress = await mapC
+                                                .getAddressFromLatLng(
+                                                  mapC.currentPosition!,
+                                                );
 
-                                          Get.to(
-                                            () => BookMapScreen(
-                                              pickupData: {
-                                                'name': pickupAddress,
-                                                'lat':
-                                                    mapC
-                                                        .currentPosition
-                                                        ?.latitude,
-                                                'lng':
-                                                    mapC
-                                                        .currentPosition
-                                                        ?.longitude,
-                                              },
-                                              destinationData: {
-                                                'name': it['title'],
-                                                'lat': it['lat'],
-                                                'lng': it['lng'],
-                                              },
-                                              pickupAddress: pickupAddress,
-                                              destinationAddress:
-                                                  it['title'] as String,
+                                            Get.to(
+                                              () => BookMapScreen(
+                                                pickupData: {
+                                                  'name': pickupAddress,
+                                                  'lat':
+                                                      mapC
+                                                          .currentPosition
+                                                          ?.latitude,
+                                                  'lng':
+                                                      mapC
+                                                          .currentPosition
+                                                          ?.longitude,
+                                                },
+                                                destinationData: {
+                                                  'name': it['title'],
+                                                  'lat': it['lat'],
+                                                  'lng': it['lng'],
+                                                },
+                                                pickupAddress: pickupAddress,
+                                                destinationAddress:
+                                                    it['title'] as String,
+                                              ),
+                                            );
+                                          },
+                                          child: Padding(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 8,
+                                              vertical: 9,
                                             ),
-                                          );
-                                        },
-                                        child: Padding(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 8,
-                                            vertical: 9,
-                                          ),
-                                          child: Row(
-                                            children: [
-                                              Container(
-                                                height: 42,
-                                                width: 42,
-                                                alignment: Alignment.center,
-                                                decoration: BoxDecoration(
-                                                  gradient: LinearGradient(
-                                                    begin: Alignment.topLeft,
-                                                    end: Alignment.bottomRight,
-                                                    colors: [
-                                                      accent.withOpacity(0.18),
-                                                      accent.withOpacity(0.06),
-                                                    ],
-                                                  ),
-                                                  borderRadius:
-                                                      BorderRadius.circular(13),
-                                                  border: Border.all(
-                                                    color: accent.withOpacity(
-                                                      0.20,
+                                            child: Row(
+                                              children: [
+                                                Container(
+                                                  height: 42,
+                                                  width: 42,
+                                                  alignment: Alignment.center,
+                                                  decoration: BoxDecoration(
+                                                    gradient: LinearGradient(
+                                                      begin: Alignment.topLeft,
+                                                      end:
+                                                          Alignment.bottomRight,
+                                                      colors: [
+                                                        accent.withOpacity(
+                                                          0.18,
+                                                        ),
+                                                        accent.withOpacity(
+                                                          0.06,
+                                                        ),
+                                                      ],
+                                                    ),
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          13,
+                                                        ),
+                                                    border: Border.all(
+                                                      color: accent.withOpacity(
+                                                        0.20,
+                                                      ),
                                                     ),
                                                   ),
+                                                  child: Icon(
+                                                    _quickDestIcon(category),
+                                                    size: 21,
+                                                    color: accent,
+                                                  ),
                                                 ),
-                                                child: Icon(
-                                                  _quickDestIcon(category),
-                                                  size: 21,
-                                                  color: accent,
+                                                const SizedBox(width: 12),
+                                                Expanded(
+                                                  child:
+                                                      CustomTextFields.textWithStylesSmall(
+                                                        it['title'] as String,
+                                                        maxLines: 1,
+                                                        textAlign:
+                                                            TextAlign.left,
+                                                        colors:
+                                                            AppColors
+                                                                .commonBlack,
+                                                        fontWeight:
+                                                            FontWeight.w600,
+                                                      ),
                                                 ),
-                                              ),
-                                              const SizedBox(width: 12),
-                                              Expanded(
-                                                child:
-                                                    CustomTextFields.textWithStylesSmall(
-                                                      it['title'] as String,
-                                                      maxLines: 1,
-                                                      textAlign: TextAlign.left,
-                                                      colors:
-                                                          AppColors.commonBlack,
-                                                      fontWeight:
-                                                          FontWeight.w600,
-                                                    ),
-                                              ),
-                                              Icon(
-                                                Icons.arrow_outward_rounded,
-                                                size: 18,
-                                                color: AppColors.commonBlack
-                                                    .withOpacity(0.35),
-                                              ),
-                                            ],
+                                                Icon(
+                                                  Icons.arrow_outward_rounded,
+                                                  size: 18,
+                                                  color: AppColors.commonBlack
+                                                      .withOpacity(0.35),
+                                                ),
+                                              ],
+                                            ),
                                           ),
                                         ),
-                                      ),
-                                      if (index != items.length - 1)
-                                        Divider(
-                                          height: 1,
-                                          indent: 58,
-                                          endIndent: 8,
-                                          color: AppColors.commonBlack
-                                              .withOpacity(0.06),
-                                        ),
-                                    ],
+                                        if (index != items.length - 1)
+                                          Divider(
+                                            height: 1,
+                                            indent: 58,
+                                            endIndent: 8,
+                                            color: AppColors.commonBlack
+                                                .withOpacity(0.06),
+                                          ),
+                                      ],
                                     ),
                                   );
                                 }),
@@ -1831,7 +1919,7 @@ class _HomeBottomSheet extends StatelessWidget {
                       ),
                     ),
                   ),
-  const SizedBox(height: 20),
+                  const SizedBox(height: 20),
                   if (banners.isNotEmpty) ...[
                     _HomeBannerCarousel(
                       banners: banners,
@@ -2165,10 +2253,7 @@ class _HomeLoadingViewState extends State<_HomeLoadingView>
 class _HomeBannerCarousel extends StatefulWidget {
   final List<_HomeHeroBanner> banners;
   final ValueChanged<_HomeHeroBanner> onBannerTap;
-  const _HomeBannerCarousel({
-    required this.banners,
-    required this.onBannerTap,
-  });
+  const _HomeBannerCarousel({required this.banners, required this.onBannerTap});
 
   @override
   State<_HomeBannerCarousel> createState() => _HomeBannerCarouselState();
@@ -2208,20 +2293,17 @@ class _HomeBannerCarouselState extends State<_HomeBannerCarousel> {
     final provider = CachedNetworkImageProvider(widget.banners.first.imageUrl);
     final stream = provider.resolve(const ImageConfiguration());
     late final ImageStreamListener listener;
-    listener = ImageStreamListener(
-      (info, _) {
-        final w = info.image.width.toDouble();
-        final h = info.image.height.toDouble();
-        if (mounted && h > 0) {
-          final r = (w / h).clamp(1.2, 3.2);
-          if ((r - _bannerRatio).abs() > 0.001) {
-            setState(() => _bannerRatio = r);
-          }
+    listener = ImageStreamListener((info, _) {
+      final w = info.image.width.toDouble();
+      final h = info.image.height.toDouble();
+      if (mounted && h > 0) {
+        final r = (w / h).clamp(1.2, 3.2);
+        if ((r - _bannerRatio).abs() > 0.001) {
+          setState(() => _bannerRatio = r);
         }
-        stream.removeListener(listener);
-      },
-      onError: (_, __) => stream.removeListener(listener),
-    );
+      }
+      stream.removeListener(listener);
+    }, onError: (_, __) => stream.removeListener(listener));
     stream.addListener(listener);
   }
 
@@ -2271,10 +2353,12 @@ class _HomeBannerCarouselState extends State<_HomeBannerCarousel> {
                     imageUrl: b.imageUrl,
                     fit: BoxFit.cover,
                     width: double.infinity,
-                    placeholder: (context, url) =>
-                        Container(color: const Color(0xFFF2F4F7)),
-                    errorWidget: (context, url, error) =>
-                        Container(color: const Color(0xFFF2F4F7)),
+                    placeholder:
+                        (context, url) =>
+                            Container(color: const Color(0xFFF2F4F7)),
+                    errorWidget:
+                        (context, url, error) =>
+                            Container(color: const Color(0xFFF2F4F7)),
                   ),
                 ),
               );

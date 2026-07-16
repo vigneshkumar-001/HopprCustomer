@@ -67,6 +67,14 @@ class CustomerRideMapView extends StatefulWidget {
   /// Force the dark map style regardless of time of day (Uber-style shared ride).
   final bool forceDarkMap;
 
+  /// When true, also draws the FULL pickup->drop route as a faint static base
+  /// layer underneath the normal forward-trimmed/comet-animated active route,
+  /// so the whole path stays visible even after the vehicle has travelled
+  /// part of it (the trimmed route alone only shows what's still ahead).
+  /// Defaults to false — every existing caller (single ride, shared ride)
+  /// keeps its current look untouched; opt in per-screen.
+  final bool showFullRouteTrail;
+
   const CustomerRideMapView({
     super.key,
     required this.vehicleType,
@@ -84,6 +92,7 @@ class CustomerRideMapView extends StatefulWidget {
     this.otherStopIsPickup = true,
     this.otherRoute = const <LatLng>[],
     this.forceDarkMap = false,
+    this.showFullRouteTrail = false,
     this.mapPadding = const EdgeInsets.only(
       bottom: MapUiConfig.defaultBottomPadding,
     ),
@@ -649,6 +658,17 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
         _remainingRoute.length >= 2 ? _remainingRoute : _fullRoute;
     if (baseActive.length < 2) return set;
 
+    // Full pickup->drop path, always visible underneath the trimmed/animated
+    // active route above — opt-in only (see showFullRouteTrail doc comment),
+    // so this never changes single/shared ride, which keep their existing
+    // "line shrinks behind the car" look. The animated "energy" already comes
+    // from the existing comet-flow on the active segment; this static base
+    // gets a genuine multi-stop colour gradient (light purple at pickup ->
+    // dark at drop) since a single Polyline can't gradient its own points.
+    if (widget.showFullRouteTrail && _fullRoute.length >= 2) {
+      set.addAll(_fullRouteGradientTrail(_fullRoute));
+    }
+
     // Anchor the route to the live car so the polyline always visually emanates
     // from the vehicle (Uber/Ola feel). Bridge only a SMALL gap so an off-route
     // / simulator divergence never draws a long line cutting across the map.
@@ -682,12 +702,18 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
       case SharedRouteStyle.servingOther:
         routeColor = Colors.grey.shade600; // "serving another rider" — dashed
         routeWidth = 5;
-        routePatterns = <PatternItem>[PatternItem.dash(20), PatternItem.gap(10)];
+        routePatterns = <PatternItem>[
+          PatternItem.dash(20),
+          PatternItem.gap(10),
+        ];
         break;
       case null:
         routeColor = isPickup ? Colors.grey.shade600 : const Color(0xFF111111);
         routeWidth = isPickup ? 4 : 6;
-        routePatterns = <PatternItem>[PatternItem.dash(20), PatternItem.gap(10)];
+        routePatterns = <PatternItem>[
+          PatternItem.dash(20),
+          PatternItem.gap(10),
+        ];
         break;
     }
 
@@ -944,6 +970,42 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     return out;
   }
 
+  /// Static full-route base line (see [CustomerRideMapView.showFullRouteTrail])
+  /// — a genuine multi-stop colour gradient from pickup to drop, since a
+  /// single Polyline can only take one flat colour. Reuses the same
+  /// length-based sub-segmenting as the comet flow above, just without the
+  /// per-frame animation (this line doesn't move; the comet on top of it does).
+  List<Polyline> _fullRouteGradientTrail(List<LatLng> route) {
+    final total = _polylineLength(route);
+    if (total <= 0) return const <Polyline>[];
+
+    const segments = 8;
+    const startColor = Color(0xFF6C4DFF); // lavender — pickup end
+    const endColor = Color(0xFF111111); // near-black — drop end
+
+    final out = <Polyline>[];
+    for (int i = 0; i < segments; i++) {
+      final fromLen = total * i / segments;
+      final toLen = total * (i + 1) / segments;
+      final pts = _subPolylineByLength(route, fromLen, toLen);
+      if (pts.length < 2) continue;
+      final t = (i + 0.5) / segments;
+      out.add(
+        Polyline(
+          polylineId: PolylineId('full_trail_$i'),
+          points: pts,
+          color: Color.lerp(startColor, endColor, t)!.withValues(alpha: 0.4),
+          width: 4,
+          zIndex: 0,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          jointType: JointType.round,
+        ),
+      );
+    }
+    return out;
+  }
+
   List<LatLng> _subPolylineByLength(
     List<LatLng> pts,
     double fromLen,
@@ -1015,9 +1077,10 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
           anchor: const Offset(0.5, 1.0),
           zIndexInt: 1,
           infoWindow: InfoWindow(
-            title: widget.otherStopIsPickup
-                ? 'Pickup stop for another rider'
-                : 'Drop stop for another rider',
+            title:
+                widget.otherStopIsPickup
+                    ? 'Pickup stop for another rider'
+                    : 'Drop stop for another rider',
           ),
         ),
     };
@@ -1267,7 +1330,8 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
     // regressed and was clamped — the back-jitter source). grep LIVETRACK.
     if (kDebugMode &&
         (_lastDropRenderLogAt == null ||
-            now.difference(_lastDropRenderLogAt!) >= const Duration(seconds: 1))) {
+            now.difference(_lastDropRenderLogAt!) >=
+                const Duration(seconds: 1))) {
       _lastDropRenderLogAt = now;
       final rawToSnap = Geolocator.distanceBetween(
         raw.latitude,
@@ -1401,7 +1465,10 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
 
     final activeTarget =
         widget.mode == RideMapMode.toDrop ? widget.drop : widget.pickup;
-    final currentGapToTarget = haversineDistanceMeters(vehiclePos, activeTarget);
+    final currentGapToTarget = haversineDistanceMeters(
+      vehiclePos,
+      activeTarget,
+    );
     final previousGapToTarget = _lastTrimDistanceToTargetMeters;
     if (!force &&
         previousGapToTarget != null &&
@@ -1519,7 +1586,9 @@ class CustomerRideMapViewState extends State<CustomerRideMapView>
               ? _remainingRoute
               : _fullRoute;
       final fitPoints =
-          routeForFit.length >= 2 ? <LatLng>[...routeForFit, ...extras] : extras;
+          routeForFit.length >= 2
+              ? <LatLng>[...routeForFit, ...extras]
+              : extras;
       await _animateBoundsSafe(focusPoints: fitPoints);
     } catch (_) {}
   }

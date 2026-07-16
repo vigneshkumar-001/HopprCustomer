@@ -193,18 +193,11 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
     final isFromMap = ModalRoute.of(context)?.settings.arguments == 'fromMap';
 
     if (isFromMap) {
-      Navigator.pop(context, {
-        'pickup': {
-          'description': _pickup!['description'],
-          'lat': _pickup!['lat'],
-          'lng': _pickup!['lng'],
-        },
-        'destination': {
-          'description': _destination!['description'],
-          'lat': _destination!['lat'],
-          'lng': _destination!['lng'],
-        },
-      });
+      // Full location objects (address + coordinates + placeId/source where
+      // available) go back to BookMapScreen — not just address strings —
+      // so it can hand them straight to `setPickupLocation`/
+      // `setDestinationLocation` without re-deriving anything.
+      Navigator.pop(context, {'pickup': _pickup, 'destination': _destination});
     } else {
       Navigator.push(
         context,
@@ -221,19 +214,23 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
     }
   }
 
-  void _handleSelection(Map<String, dynamic> item) {
-    late final Map<String, dynamic> selectedMapData;
+  /// Single shared handler for every selection source (search results,
+  /// recent history, saved places). Normalizes whatever shape the source
+  /// handed in (`'location': LatLng` or flat `'lat'/'lng'`) into ONE
+  /// consistent flat shape — `{description, lat, lng, placeId?, source}` —
+  /// so pickup/destination are never silently split across incompatible key
+  /// shapes downstream (the root cause of coordinates going missing after
+  /// an edit).
+  void _handleSelection(Map<String, dynamic> item, {String source = 'search'}) {
+    late final LatLng newLoc;
 
     if (item['location'] is LatLng) {
-      selectedMapData = {
-        'description': item['description'],
-        'location': item['location'],
-      };
+      newLoc = item['location'] as LatLng;
     } else if (item['lat'] != null && item['lng'] != null) {
-      selectedMapData = {
-        'description': item['description'],
-        'location': LatLng(item['lat'], item['lng']),
-      };
+      newLoc = LatLng(
+        (item['lat'] as num).toDouble(),
+        (item['lng'] as num).toDouble(),
+      );
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Selected location is invalid.')),
@@ -241,21 +238,35 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
       return;
     }
 
-    final LatLng newLoc = selectedMapData['location'];
+    final description = (item['description'] ?? '').toString();
+    if (description.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Selected location is invalid.')),
+      );
+      return;
+    }
+
+    final selectedMapData = <String, dynamic>{
+      'description': description,
+      'lat': newLoc.latitude,
+      'lng': newLoc.longitude,
+      if (item['placeId'] != null) 'placeId': item['placeId'],
+      'source': source,
+    };
 
     setState(() {
       if (_isStartFieldFocused) {
-        _startController.text = selectedMapData['description'];
+        _startController.text = description;
         _pickup = selectedMapData;
         _startSearchResults.clear();
       } else {
-        _destController.text = selectedMapData['description'];
+        _destController.text = description;
         _destination = selectedMapData;
         _destSearchResults.clear();
       }
     });
 
-    _saveRecentLocation(selectedMapData['description'], newLoc);
+    _saveRecentLocation(description, newLoc);
 
     if (_pickup != null && _destination != null) {
       _goToMapScreen();
@@ -280,25 +291,28 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
         result['mapAddress'] != null &&
         result['location'] is LatLng) {
       final LatLng latLng = result['location'];
+      final String mapAddress = result['mapAddress'];
 
-      final selectedMapData = {
-        'description': result['mapAddress'],
-        'location': latLng,
+      final selectedMapData = <String, dynamic>{
+        'description': mapAddress,
+        'lat': latLng.latitude,
+        'lng': latLng.longitude,
+        'source': 'map',
       };
 
       setState(() {
         if (_isStartFieldFocused) {
-          _startController.text = result['mapAddress'];
+          _startController.text = mapAddress;
           _pickup = selectedMapData;
           _startSearchResults.clear();
         } else {
-          _destController.text = result['mapAddress'];
+          _destController.text = mapAddress;
           _destination = selectedMapData;
           _destSearchResults.clear();
         }
       });
 
-      _saveRecentLocation(result['mapAddress'], latLng);
+      _saveRecentLocation(mapAddress, latLng);
 
       if (_pickup != null && _destination != null) {
         _goToMapScreen();
@@ -364,7 +378,7 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
     _handleSelection({
       'description': desc,
       'location': LatLng(e.address.latitude, e.address.longitude),
-    });
+    }, source: 'saved');
   }
 
   /// Premium, equal-sized quick-destination card (2-per-row grid). Staggers
@@ -828,7 +842,10 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
                                           locMap['lng'],
                                         ),
                                       };
-                                      _handleSelection(selectedMapData);
+                                      _handleSelection(
+                                        selectedMapData,
+                                        source: 'history',
+                                      );
                                     },
                                   );
                                 } catch (_) {
@@ -847,7 +864,10 @@ class _BookRideSearchScreenState extends State<BookRideSearchScreen> {
                                         'description': locString,
                                         'location': null,
                                       };
-                                      _handleSelection(selectedMapData);
+                                      _handleSelection(
+                                        selectedMapData,
+                                        source: 'history',
+                                      );
                                     },
                                   );
                                 }

@@ -48,6 +48,27 @@ class DriverSearchController extends GetxController {
     super.onInit();
   }
 
+  /// Resets the in-progress booking draft (ride-type selection, fetched
+  /// driver/fare results) WITHOUT touching [carBooking] — this is only ever
+  /// called when a draft is being abandoned before a booking was created, so
+  /// [carBooking] is already null; leaving it alone here keeps the method
+  /// correct even if that assumption ever changes. Never deletes this
+  /// controller — it's shared across the whole booking flow (BookMapScreen →
+  /// ConfirmBooking → RideShareScreen), so it's reset in place, not disposed.
+  void resetDraftSelection() {
+    rideType.value = RideType.rideOnly;
+    serviceType.clear();
+    sharedServiceType.clear();
+    sharedDriverSearchResponse.value = null;
+    selectedSharedDriver.value = null;
+    sharedBooking.value = null;
+    estimatedTime.value = '';
+    markerAdded.value = false;
+    hasFetchedRideOnly.value = false;
+    hasFetchedShared.value = false;
+    selectedCarType.value = '';
+  }
+
   Future<DriverSearchModels?> getDriverSearch({
     required double pickupLat,
     required double pickupLng,

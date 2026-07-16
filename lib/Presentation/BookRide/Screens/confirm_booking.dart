@@ -43,7 +43,14 @@ class ConfirmBooking extends StatefulWidget {
 class _ConfirmBookingState extends State<ConfirmBooking> {
   final TextEditingController _startController = TextEditingController();
   final TextEditingController _destController = TextEditingController();
-  DriverSearchController driverController = Get.put(DriverSearchController());
+  // Reuse the instance BookMapScreen already registered (carries
+  // selectedCarType/carBooking/estimatedTime/rideType forward) — an
+  // unconditional Get.put() here replaces and disposes that live instance,
+  // silently resetting booking state on every navigation into this screen.
+  final DriverSearchController driverController =
+      Get.isRegistered<DriverSearchController>()
+          ? Get.find<DriverSearchController>()
+          : Get.put(DriverSearchController());
   final PackageController packageController = Get.put(PackageController());
 
   LatLng? _pickupPosition;

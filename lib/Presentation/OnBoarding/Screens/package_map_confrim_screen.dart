@@ -12,11 +12,15 @@ import 'package:dotted_line/dotted_line.dart';
 
 import 'package:hopper/Presentation/OnBoarding/Widgets/custom_bottomnavigation.dart';
 import 'package:hopper/Presentation/OnBoarding/Widgets/package_contoiner.dart';
+import 'package:hopper/Presentation/OnBoarding/Widgets/package_status_style.dart';
+import 'package:hopper/Presentation/Shared/RideUI/ride_ui.dart';
+import 'package:hopper/Presentation/OnBoarding/Screens/package_delivery_success_screen.dart';
+import 'package:hopper/Presentation/OnBoarding/Widgets/parcel_share_card.dart';
 import 'package:hopper/Presentation/OnBoarding/models/address_models.dart';
 import 'package:hopper/uitls/netWorkHandling/network_handling_screen.dart';
 import 'package:hopper/uitls/map/map_ui_defaults.dart';
 import 'package:flutter/foundation.dart';
-import 'package:hopper/Presentation/OnBoarding/Screens/payment_screen.dart';
+import 'package:hopper/Presentation/OnBoarding/Screens/package_payment_screen.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -57,13 +61,11 @@ class PackageMapConfirmScreen extends StatefulWidget {
 }
 
 class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
-    with TickerProviderStateMixin {
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   bool isExpanded = false;
   GoogleMapController? _mapController;
   final socketService = SocketService();
   LatLng? _currentPosition;
-  final ValueNotifier<Set<Polyline>> _polylinesNotifier =
-      ValueNotifier<Set<Polyline>>(<Polyline>{});
   BitmapDescriptor? _carIcon;
   BitmapDescriptor? _pickupPinIcon;
   BitmapDescriptor? _dropPinIcon;
@@ -112,9 +114,21 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   // booking-update {type: 'parcel-status'} and restored from the
   // active-booking `parcel` object on reopen.
   String _parcelStatus = '';
+  // Parcel payment — separate from parcelStatus above (see the backend's
+  // isParcelPaymentSatisfied for why). Defaults reflect "nothing chosen yet",
+  // a real, displayable state, not "no data".
+  String _parcelPaymentStatus = '';
+  String _parcelPaymentMode = '';
+  double? _parcelPaymentAmount;
   bool _deliveryOtpVerified = false;
+  // Guards the one-time navigation to the delivery success screen — a
+  // status push can arrive more than once (reconnect/restore), this must
+  // only navigate the first time DELIVERED is observed.
+  bool _deliverySuccessShown = false;
   String _podPhotoUrl = '';
   DateTime? _pickedUpAt;
+  DateTime? _inTransitAt;
+  DateTime? _outForDeliveryAt;
   DateTime? _deliveredAt;
   String _receiverPhoneMasked = '';
   String _receiverDisplayName = '';
@@ -155,6 +169,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     _routeSeconds = seconds;
     _etaDisplaySeconds = seconds;
   }
+
   DateTime _routeMetricsFromSocketAt = DateTime.fromMillisecondsSinceEpoch(0);
   bool _navigatedToPayment = false;
   Timer? _paymentNavTimer;
@@ -394,7 +409,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         bearing: b0,
         allowDeadReckoning: false,
       );
-      if (_polylinesNotifier.value.isEmpty) {
+      if (_activeRoutePoints.isEmpty) {
         _maybeUpdatePolyline(newDriverLatLng, force: true);
       } else if (displayDeltaMeters > 2.5) {
         _checkRouteDeviation(newDriverLatLng);
@@ -529,8 +544,20 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     return parts.first;
   }
 
+  // Rule 1: DELIVERED never opens payment. This screen is parcel-only
+  // (constructor takes no ride-shaped fields), and parcel payment is a
+  // pre-dispatch/pre-delivery plan — it's never re-opened as a "pay the
+  // fare" step after arrival like a car ride is. `_deliverySuccessShown`/
+  // `_parcelStatus` guard here is what actually prevents the GlobalKey
+  // crash: without it, a leftover ride-flavored `driver-reached-destination`
+  // event (see its listener below) and the correct DELIVERED->success-screen
+  // navigation could both fire a route push into the same Navigator/Overlay
+  // within the same frame.
+  bool get _paymentNavigationBlocked =>
+      _deliverySuccessShown || _parcelStatus == 'DELIVERED';
+
   void _navigateToPayment({required bool replace}) {
-    if (_navigatedToPayment) return;
+    if (_navigatedToPayment || _paymentNavigationBlocked) return;
     _paymentNavTimer?.cancel();
     _paymentNavTimer = null;
 
@@ -538,13 +565,15 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     final id =
         (BookingId.trim().isNotEmpty ? BookingId : widget.bookingId).trim();
 
-    final screen = PaymentScreen(
+    // The PARCEL payment screen, not the ride one — see the guard comment
+    // above for why this trigger should be rare (only a genuinely
+    // unfinished pre-delivery payment plan, never a post-DELIVERED re-open).
+    final screen = PackagePaymentScreen(
       bookingId: id,
       amount: Amount,
-      sender: widget.senderData,
-      receiver: widget.receiverData,
-      driverName: driverName,
-      driverProfilePic: ProfilePic,
+      senderData: widget.senderData,
+      receiverData: widget.receiverData,
+      discountCode: widget.discountCode,
     );
 
     if (replace) {
@@ -558,7 +587,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     required Duration delay,
     required bool replace,
   }) {
-    if (_navigatedToPayment) return;
+    if (_navigatedToPayment || _paymentNavigationBlocked) return;
     _paymentNavTimer?.cancel();
     _paymentNavTimer = Timer(delay, () {
       if (!mounted) return;
@@ -862,7 +891,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
     if (kDebugMode) {
       AppLogger.log.i(
-        'pkg map markers updated: count=${_markersNotifier.value.length} hasDriver=${_driverMarker != null} hasPolyline=${_polylinesNotifier.value.isNotEmpty}',
+        'pkg map markers updated: count=${_markersNotifier.value.length} hasDriver=${_driverMarker != null} hasPolyline=${_activeRoutePoints.isNotEmpty}',
       );
     }
   }
@@ -966,9 +995,10 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                 ),
                 const SizedBox(height: 6),
                 InkWell(
-                  onTap: (_otpResending || _otpResendCooldown > 0)
-                      ? null
-                      : _resendRideOtp,
+                  onTap:
+                      (_otpResending || _otpResendCooldown > 0)
+                          ? null
+                          : _resendRideOtp,
                   child: Text(
                     _otpResendCooldown > 0
                         ? 'Resend OTP in ${_otpResendCooldown}s'
@@ -976,14 +1006,16 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                             ? 'Resending…'
                             : "Didn't get it? Resend OTP"),
                     style: TextStyle(
-                      color: (_otpResending || _otpResendCooldown > 0)
-                          ? Colors.white54
-                          : Colors.white,
+                      color:
+                          (_otpResending || _otpResendCooldown > 0)
+                              ? Colors.white54
+                              : Colors.white,
                       fontSize: 12,
                       fontWeight: FontWeight.w700,
-                      decoration: (_otpResending || _otpResendCooldown > 0)
-                          ? TextDecoration.none
-                          : TextDecoration.underline,
+                      decoration:
+                          (_otpResending || _otpResendCooldown > 0)
+                              ? TextDecoration.none
+                              : TextDecoration.underline,
                     ),
                   ),
                 ),
@@ -1018,6 +1050,26 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     );
   }
 
+  /// Package delivery trust (Phase 3): SENDER-only Pickup OTP card. Value
+  /// comes exclusively from `packageController.pickupOtp` (the protected
+  /// Phase 1 endpoint) — never generated locally, never read off a socket
+  /// payload or the general package-details response. No copy-to-clipboard:
+  /// this code is more sensitive than the legacy ride PIN (hash-backed,
+  /// single-instance-cached server-side) and the driver should hear it read
+  /// aloud at handover rather than have it copied/pasted around.
+  Widget _pickupOtpCard() {
+    return Obx(() {
+      final code = packageController.pickupOtp.value;
+      if (code.isEmpty) return const SizedBox.shrink();
+      return OtpCard(
+        title: 'Pickup OTP',
+        code: code,
+        helperText:
+            'Share this OTP with the courier only when they collect your package.',
+      );
+    });
+  }
+
   // ---------- parcel delivery trust (Phase 2) ----------
 
   /// Apply a parcel-status push (socket) or the active-booking `parcel`
@@ -1026,9 +1078,35 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     final status =
         (payload['parcelStatus'] ?? '').toString().trim().toUpperCase();
     if (!mounted) return;
+    var effectiveStatus = _parcelStatus;
     setState(() {
-      if (status.isNotEmpty) _parcelStatus = status;
+      if (status.isNotEmpty) {
+        final currentRank = kPackageStatusOrder.indexOf(_parcelStatus);
+        final nextRank = kPackageStatusOrder.indexOf(status);
+        final isFailure = status == 'FAILED_DELIVERY';
+        final canApplyFailure = isFailure && _parcelStatus != 'DELIVERED';
+        if (canApplyFailure ||
+            (nextRank >= 0 && (currentRank < 0 || nextRank >= currentRank))) {
+          _parcelStatus = status;
+        }
+      }
+      effectiveStatus = _parcelStatus;
       if (payload['deliveryOtpVerified'] == true) _deliveryOtpVerified = true;
+
+      final paymentStatus =
+          (payload['parcelPaymentStatus'] ?? '')
+              .toString()
+              .trim()
+              .toUpperCase();
+      if (paymentStatus.isNotEmpty) _parcelPaymentStatus = paymentStatus;
+      final paymentMode =
+          (payload['parcelPaymentMode'] ?? '').toString().trim().toUpperCase();
+      if (paymentMode.isNotEmpty) _parcelPaymentMode = paymentMode;
+      if (payload['parcelPaymentAmount'] != null) {
+        _parcelPaymentAmount = double.tryParse(
+          payload['parcelPaymentAmount'].toString(),
+        );
+      }
 
       final pod = (payload['podPhotoUrl'] ?? '').toString().trim();
       if (pod.startsWith('http')) _podPhotoUrl = pod;
@@ -1045,14 +1123,22 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
               .trim();
       if (rName.isNotEmpty && rName != 'null') _receiverDisplayName = rName;
 
-      _pickedUpAt ??=
-          DateTime.tryParse((payload['pickedUpAt'] ?? '').toString());
-      _deliveredAt ??=
-          DateTime.tryParse((payload['deliveredAt'] ?? '').toString());
+      _pickedUpAt ??= DateTime.tryParse(
+        (payload['pickedUpAt'] ?? '').toString(),
+      );
+      _inTransitAt ??= DateTime.tryParse(
+        (payload['inTransitAt'] ?? '').toString(),
+      );
+      _outForDeliveryAt ??= DateTime.tryParse(
+        (payload['outForDeliveryAt'] ?? '').toString(),
+      );
+      _deliveredAt ??= DateTime.tryParse(
+        (payload['deliveredAt'] ?? '').toString(),
+      );
 
       // Advance the existing timeline flags from the granular status so the
       // current cards keep working even if a ride-estimate packet was missed.
-      switch (status) {
+      switch (effectiveStatus) {
         case 'COURIER_ASSIGNED':
           _isOrderConfirmed = true;
           break;
@@ -1075,10 +1161,52 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
           break;
       }
     });
-    if (status == 'PICKED_UP' ||
-        status == 'IN_TRANSIT' ||
-        status == 'OUT_FOR_DELIVERY') {
+    // Package delivery trust (Phase 3): pickup verified — the sender-only
+    // Pickup OTP is no longer valid or retrievable server-side. Drop it from
+    // memory immediately rather than waiting for the card to unmount.
+    if (effectiveStatus == 'PICKED_UP' ||
+        effectiveStatus == 'IN_TRANSIT' ||
+        effectiveStatus == 'OUT_FOR_DELIVERY' ||
+        effectiveStatus == 'DELIVERED') {
+      packageController.clearPickupOtpFromMemory();
+    }
+    // Receiver Tracking + WhatsApp Share MVP: the share card (and the
+    // Delivery OTP it may carry) only becomes valid once pickup is verified.
+    // Re-fetched on every relevant transition so the OTP disappears from the
+    // payload the moment delivery is verified/completed, per spec.
+    if (effectiveStatus == 'PICKED_UP' ||
+        effectiveStatus == 'IN_TRANSIT' ||
+        effectiveStatus == 'OUT_FOR_DELIVERY' ||
+        effectiveStatus == 'DELIVERED') {
+      unawaited(packageController.fetchParcelShareDetails(widget.bookingId));
+    }
+    if (effectiveStatus == 'PICKED_UP' ||
+        effectiveStatus == 'IN_TRANSIT' ||
+        effectiveStatus == 'OUT_FOR_DELIVERY') {
       _syncPhaseMarkers();
+    }
+    if (effectiveStatus == 'DELIVERED' && !_deliverySuccessShown) {
+      _deliverySuccessShown = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder:
+                (_) => PackageDeliverySuccessScreen(
+                  bookingId:
+                      BookingId.trim().isNotEmpty
+                          ? BookingId
+                          : widget.bookingId,
+                  receiverName: _receiverDisplayName,
+                  dropAddress: DropAddress,
+                  podPhotoUrl: _podPhotoUrl,
+                  deliveredAt: _deliveredAt,
+                  courierName: driverName,
+                  courierProfilePic: ProfilePic,
+                ),
+          ),
+        );
+      });
     }
     AppLogger.log.i('parcel-status update: $payload');
   }
@@ -1104,6 +1232,131 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     }
   }
 
+  /// Single source of truth for the status card shown in BOTH the floating
+  /// map header and the in-sheet status card — keeps the two visually in
+  /// sync. Previously inferred a "Courier has arrived" state client-side
+  /// from Pickup-OTP availability (backend has no distinct
+  /// `ARRIVED_AT_PICKUP` parcelStatus). Removed: that inference was
+  /// unreliable — `packageController`'s Pickup-OTP fields are a Get.put()
+  /// singleton not defensively cleared on entry for a fresh booking, so a
+  /// previous booking's leftover OTP state could make this fire while the
+  /// customer was still waiting for a driver to be assigned, showing
+  /// "arrived" text nobody actually earned. It also only read those
+  /// observables *conditionally*, which broke GetX's Obx contract (a build
+  /// pass that takes the other branch reads zero observables) — that was the
+  /// root cause of the "[Get] improper use of GetX" crash reported right
+  /// after pickup-OTP verification. `_parcelStatus` itself is a plain field
+  /// driven by `setState`, not an Rx, so this is intentionally NOT wrapped in
+  /// Obx at its call sites anymore either.
+  PackageStatusStyle _effectivePackageStatusStyle() {
+    return packageStatusStyle(_parcelStatus);
+  }
+
+  /// Compact payment-status row shown under the main status card once a
+  /// payment method has been chosen. CASH is deliberately never shown as
+  /// "paid" here — it settles when the courier collects it at pickup.
+  Widget _paymentStatusChip() {
+    late final IconData icon;
+    late final Color color;
+    late final Color background;
+    late final String label;
+
+    switch (_parcelPaymentStatus) {
+      case 'PAID':
+      case 'CASH_COLLECTED':
+        icon = Icons.verified_rounded;
+        color = const Color(0xFF067647);
+        background = const Color(0xFFE7F6EC);
+        label =
+            _parcelPaymentMode == 'WALLET'
+                ? 'Paid via Hoppr Wallet'
+                : _parcelPaymentMode.isNotEmpty
+                ? 'Paid via ${_parcelPaymentMode[0]}${_parcelPaymentMode.substring(1).toLowerCase()}'
+                : 'Payment collected';
+        break;
+      case 'CASH_PENDING':
+        icon = Icons.payments_outlined;
+        color = const Color(0xFFB54708);
+        background = const Color(0xFFFFF6ED);
+        label =
+            _parcelPaymentAmount != null && _parcelPaymentAmount! > 0
+                ? 'Pay ₦${_parcelPaymentAmount!.toStringAsFixed(0)} cash to the courier at pickup'
+                : 'Cash on delivery — pay the courier at pickup';
+        break;
+      case 'PENDING':
+        icon = Icons.hourglass_top_rounded;
+        color = const Color(0xFF667085);
+        background = const Color(0xFFF2F4F7);
+        label =
+            _parcelPaymentAmount != null && _parcelPaymentAmount! > 0
+                ? 'Payment of ₦${_parcelPaymentAmount!.toStringAsFixed(0)} pending'
+                : 'Payment pending';
+        break;
+      case 'FAILED':
+        icon = Icons.error_outline_rounded;
+        color = const Color(0xFFB42318);
+        background = const Color(0xFFFEF3F2);
+        label = 'Payment failed — please retry';
+        break;
+      default:
+        return const SizedBox.shrink();
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 18, color: color),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w700,
+                color: color,
+                height: 1.35,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Rule 5: safe Cash -> Online switch. Reuses PackagePaymentScreen's own
+  /// state machine (built to be idempotent/safe for re-entry) — the backend
+  /// atomically overwrites the CASH_PENDING plan the moment the customer
+  /// completes a new online payParcelBooking() call there; there is no
+  /// window where both plans coexist. Only ever reachable while
+  /// _parcelPaymentStatus=='CASH_PENDING' && not yet delivered (see call
+  /// site), so this never needs its own DELIVERED guard beyond that.
+  /// PackagePaymentScreen's own back button correctly returns to THIS
+  /// screen's tracking state (see _paymentNavigationBlocked / the REST
+  /// driver-restore in _seedOtpFromActiveBooking) rather than re-triggering
+  /// a "searching for courier" UI, even though a courier is already
+  /// assigned by the time this is reachable.
+  void _openOnlinePaymentSwitch() {
+    if (_paymentNavigationBlocked) return;
+    final id =
+        (BookingId.trim().isNotEmpty ? BookingId : widget.bookingId).trim();
+    Get.to(
+      () => PackagePaymentScreen(
+        bookingId: id,
+        amount: Amount,
+        senderData: widget.senderData,
+        receiverData: widget.receiverData,
+        discountCode: widget.discountCode,
+      ),
+    );
+  }
+
   String _formatTrustTime(DateTime dt) {
     final local = dt.toLocal();
     final h = local.hour % 12 == 0 ? 12 : local.hour % 12;
@@ -1117,26 +1370,86 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   Widget _deliveryOtpSentCard() {
     final who =
         _receiverDisplayName.isNotEmpty ? _receiverDisplayName : 'the receiver';
-    final phone = _receiverPhoneMasked.isNotEmpty
-        ? ' ($_receiverPhoneMasked)'
-        : '';
+    final phone =
+        _receiverPhoneMasked.isNotEmpty ? ' ($_receiverPhoneMasked)' : '';
+    if (!_deliveryOtpVerified) {
+      const blue = Color(0xFF2563EB);
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: const Color(0xFFEFF4FF),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: const Color(0xFFC7D7FE)),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 34,
+              height: 34,
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(
+                Icons.verified_user_rounded,
+                color: blue,
+                size: 19,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    'Pickup OTP verified',
+                    style: TextStyle(
+                      color: Color(0xFF1E3A8A),
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Package collected. Delivery OTP sent to $who$phone.',
+                    style: const TextStyle(
+                      color: Color(0xFF475569),
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w600,
+                      height: 1.3,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final style = packageStatusStyle('PICKED_UP');
     return Container(
-      padding: const EdgeInsets.all(14),
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: Colors.black,
-        borderRadius: BorderRadius.circular(16),
+        color: style.background,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: style.color.withOpacity(0.18)),
       ),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Container(
             padding: const EdgeInsets.all(10),
             decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.12),
+              color: Colors.white,
               shape: BoxShape.circle,
             ),
-            child: const Icon(
-              Icons.sms_rounded,
-              color: Colors.white,
+            child: Icon(
+              _deliveryOtpVerified ? Icons.verified_rounded : Icons.sms_rounded,
+              color: style.color,
               size: 20,
             ),
           ),
@@ -1148,10 +1461,10 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                 Text(
                   _deliveryOtpVerified
                       ? 'Delivery code verified'
-                      : 'Delivery OTP sent to receiver',
+                      : 'Pickup Verified',
                   style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 14,
+                    color: Color(0xFF111827),
+                    fontSize: 14.5,
                     fontWeight: FontWeight.w800,
                   ),
                 ),
@@ -1159,10 +1472,26 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                 Text(
                   _deliveryOtpVerified
                       ? 'The courier verified the code with $who.'
-                      : 'We sent a delivery code to $who$phone by SMS. '
-                          'They share it with the courier at handover.',
-                  style: const TextStyle(color: Colors.white70, fontSize: 11),
+                      : 'The courier has collected your package. A Delivery '
+                          'OTP has been sent to the receiver.',
+                  style: const TextStyle(
+                    color: Color(0xFF374151),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    height: 1.4,
+                  ),
                 ),
+                if (!_deliveryOtpVerified && who != 'the receiver') ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    'Sent to $who$phone by SMS.',
+                    style: const TextStyle(
+                      color: Color(0xFF6B7280),
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -1173,56 +1502,107 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
   /// After delivery: proof-of-delivery photo + pickup/delivery timestamps.
   Widget _proofOfDeliverySection() {
+    final delivered = _parcelStatus == 'DELIVERED';
+    final style = packageStatusStyle('DELIVERED');
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: const Color(0xFFEFFAF3),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFFBBE5C8)),
+        color: style.background,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: style.color.withOpacity(0.18)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              const Icon(
-                Icons.verified_rounded,
-                color: Color(0xFF00A85E),
-                size: 20,
+          if (delivered) ...[
+            Center(
+              child: Column(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      Icons.check_circle_rounded,
+                      color: style.color,
+                      size: 40,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Package Delivered',
+                    style: TextStyle(
+                      fontSize: 19,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF111827),
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(width: 8),
-              Text(
-                _parcelStatus == 'DELIVERED'
-                    ? 'Delivered — Proof of delivery'
-                    : 'Proof of delivery',
-                style: const TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w800,
-                  color: Color(0xFF111827),
-                ),
-              ),
-            ],
-          ),
-          if (_podPhotoUrl.isNotEmpty) ...[
-            const SizedBox(height: 10),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(12),
-              child: Image.network(
-                _podPhotoUrl,
-                height: 160,
-                width: double.infinity,
-                fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => Container(
-                  height: 80,
-                  alignment: Alignment.center,
-                  color: const Color(0xFFE5E7EB),
-                  child: const Text(
-                    'Photo unavailable',
-                    style: TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+            ),
+            const SizedBox(height: 16),
+          ] else
+            Row(
+              children: [
+                Icon(Icons.verified_rounded, color: style.color, size: 20),
+                const SizedBox(width: 8),
+                const Text(
+                  'Proof of delivery',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF111827),
                   ),
                 ),
+              ],
+            ),
+          if (_podPhotoUrl.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            GestureDetector(
+              onTap: () => _showFullPodPhoto(_podPhotoUrl),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(14),
+                child: Image.network(
+                  _podPhotoUrl,
+                  height: 180,
+                  width: double.infinity,
+                  fit: BoxFit.cover,
+                  loadingBuilder: (context, child, progress) {
+                    if (progress == null) return child;
+                    return Container(
+                      height: 180,
+                      color: const Color(0xFFF3F4F6),
+                      alignment: Alignment.center,
+                      child: const SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: CircularProgressIndicator(strokeWidth: 2.4),
+                      ),
+                    );
+                  },
+                  errorBuilder:
+                      (_, __, ___) => Container(
+                        height: 80,
+                        alignment: Alignment.center,
+                        color: const Color(0xFFE5E7EB),
+                        child: const Text(
+                          'Photo unavailable',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Color(0xFF6B7280),
+                          ),
+                        ),
+                      ),
+                ),
               ),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              'Tap photo to view full size',
+              style: TextStyle(fontSize: 11, color: Color(0xFF6B7280)),
             ),
           ],
           if (_pickedUpAt != null) ...[
@@ -1244,6 +1624,260 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                 fontSize: 12,
                 fontWeight: FontWeight.w600,
                 color: Color(0xFF374151),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// Read-only full-size POD viewer. The sender can look, never edit/replace.
+  void _showFullPodPhoto(String url) {
+    showDialog(
+      context: context,
+      barrierColor: Colors.black87,
+      builder:
+          (dialogContext) => GestureDetector(
+            onTap: () => Navigator.of(dialogContext).pop(),
+            child: Scaffold(
+              backgroundColor: Colors.transparent,
+              body: Stack(
+                children: [
+                  Center(
+                    child: InteractiveViewer(
+                      minScale: 0.8,
+                      maxScale: 4,
+                      child: Image.network(
+                        url,
+                        errorBuilder:
+                            (_, __, ___) => const Text(
+                              'Photo unavailable',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    top: 40,
+                    right: 16,
+                    child: IconButton(
+                      onPressed: () => Navigator.of(dialogContext).pop(),
+                      icon: const Icon(
+                        Icons.close_rounded,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+    );
+  }
+
+  /// Package delivery trust (Phase 3): a socket-driven 3-step progress card
+  /// built from backend `parcelStatus` + timestamps only — never inferred
+  /// from local UI state alone. Shows the 3 steps relevant to the current
+  /// phase: "Pickup Progress" (Order Confirmed -> Courier En Route ->
+  /// Package Pickup) before the courier collects the package, then
+  /// "Delivery Time" (Package Collected -> In Transit -> Out for Delivery)
+  /// after. Unset/blank status means ORDER_CONFIRMED (matches backend
+  /// semantics); COURIER_ASSIGNED is inferred locally since no distinct
+  /// backend status write for it exists yet — a driver assignment implies
+  /// at least this.
+  Widget _timelineCard() {
+    final effectiveStatus =
+        _parcelStatus.isEmpty
+            ? (_isOrderConfirmed ? 'COURIER_ASSIGNED' : 'ORDER_CONFIRMED')
+            : _parcelStatus;
+    // FAILED_DELIVERY is a branch off IN_TRANSIT, not a forward step — treat
+    // it as IN_TRANSIT for phase/position purposes so the 3-step window
+    // still resolves; packageTimelineStateFor marks the failed step itself.
+    final compareStatus =
+        effectiveStatus == 'FAILED_DELIVERY' ? 'IN_TRANSIT' : effectiveStatus;
+    final pastPickup =
+        kPackageStatusOrder.indexOf(compareStatus) >=
+        kPackageStatusOrder.indexOf('PICKED_UP');
+    final steps =
+        pastPickup
+            ? const ['PICKED_UP', 'IN_TRANSIT', 'OUT_FOR_DELIVERY']
+            : const ['ORDER_CONFIRMED', 'COURIER_ASSIGNED', 'PICKED_UP'];
+    final heading = pastPickup ? 'Delivery Time' : 'Pickup Progress';
+
+    String? timeFor(String step) {
+      switch (step) {
+        case 'PICKED_UP':
+          return _pickedUpAt != null ? _formatTrustTime(_pickedUpAt!) : null;
+        case 'IN_TRANSIT':
+          return _inTransitAt != null ? _formatTrustTime(_inTransitAt!) : null;
+        case 'OUT_FOR_DELIVERY':
+          return _outForDeliveryAt != null
+              ? _formatTrustTime(_outForDeliveryAt!)
+              : null;
+        case 'DELIVERED':
+          return _deliveredAt != null ? _formatTrustTime(_deliveredAt!) : null;
+        default:
+          return null;
+      }
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
+      decoration: RideUI.card(radius: RideUI.radiusCardLg),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            heading,
+            style: const TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w800,
+              color: RideUI.textPrimary,
+            ),
+          ),
+          const SizedBox(height: 16),
+          for (final step in steps)
+            _progressStepRow(
+              step: step,
+              state: packageTimelineStateFor(
+                step: step,
+                currentStatus: compareStatus,
+                failedOnStep: 'IN_TRANSIT',
+              ),
+              timestamp: timeFor(step),
+              isLast: step == steps.last,
+            ),
+        ],
+      ),
+    );
+  }
+
+  String _progressStepTitle(String step, PackageTimelineState state) {
+    switch (step) {
+      case 'ORDER_CONFIRMED':
+        return 'Order Confirmed';
+      case 'COURIER_ASSIGNED':
+        return 'Courier En Route';
+      case 'PICKED_UP':
+        // Same backend status, different tense: still-ahead in "Pickup
+        // Progress" reads as an action to do; already-happened in
+        // "Delivery Time" reads as a completed event.
+        return state == PackageTimelineState.completed
+            ? 'Package Collected'
+            : 'Package Pickup';
+      case 'IN_TRANSIT':
+        return 'In Transit';
+      case 'OUT_FOR_DELIVERY':
+        return 'Out for Delivery';
+      default:
+        return packageStatusStyle(step).label;
+    }
+  }
+
+  Widget _progressStepRow({
+    required String step,
+    required PackageTimelineState state,
+    String? timestamp,
+    required bool isLast,
+  }) {
+    final style = packageStatusStyle(step);
+    final completed = state == PackageTimelineState.completed;
+    final active = state == PackageTimelineState.active;
+    final failed = state == PackageTimelineState.failed;
+
+    final Color circleColor =
+        completed
+            ? const Color(0xFF15803D)
+            : failed
+            ? const Color(0xFFDC2626)
+            : active
+            ? style.color
+            : const Color(0xFFB0B7C3);
+    final Color circleBg =
+        completed
+            ? const Color(0xFFE7F6EC)
+            : failed
+            ? const Color(0xFFFDECEC)
+            : active
+            ? style.background
+            : const Color(0xFFF3F4F6);
+
+    String subtitle;
+    if (completed) {
+      subtitle = timestamp ?? 'Completed';
+      if (step == 'PICKED_UP' &&
+          timestamp != null &&
+          _shortPlace(PickupAddress).isNotEmpty) {
+        subtitle = '$timestamp • From ${_shortPlace(PickupAddress)}';
+      }
+    } else if (failed) {
+      subtitle = 'Delivery attempt unsuccessful';
+    } else if (active) {
+      subtitle = style.message;
+    } else {
+      subtitle = 'Waiting';
+    }
+
+    return Padding(
+      padding: EdgeInsets.only(bottom: isLast ? 0 : 16),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(color: circleBg, shape: BoxShape.circle),
+            child: Icon(
+              completed ? Icons.check_rounded : style.icon,
+              size: 18,
+              color: circleColor,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  _progressStepTitle(step, state),
+                  style: TextStyle(
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.w800,
+                    color:
+                        completed || active
+                            ? RideUI.textPrimary
+                            : RideUI.textMuted,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  subtitle,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: failed ? const Color(0xFFDC2626) : RideUI.textMuted,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (active) ...[
+            const SizedBox(width: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              decoration: BoxDecoration(
+                color: const Color(0xFFE7F6EC),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: const Text(
+                'Ready',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFF15803D),
+                ),
               ),
             ),
           ],
@@ -1517,6 +2151,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
 
     // Seed pickup/drop immediately from the data we already have, so the
     // "Your pickup spot" marker is reliable even if socket payload is delayed
@@ -1626,12 +2261,36 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       // Fallback source of truth: seed the PIN from the active-booking record in
       // case the live `otp-generated` socket event was missed.
       unawaited(_seedOtpFromActiveBooking());
+      // Package delivery trust (Phase 3): the sender-only Pickup OTP. Safe to
+      // call unconditionally — the backend 409s (handled as "not available")
+      // once the package is past the pre-pickup statuses.
+      unawaited(packageController.fetchSenderPickupOtp(widget.bookingId));
     } catch (_) {}
+  }
+
+  /// Refresh tracking state when the app returns from background — socket
+  /// events missed while backgrounded are the main risk this guards against.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_seedOtpFromActiveBooking());
+      unawaited(packageController.fetchSenderPickupOtp(widget.bookingId));
+    }
   }
 
   void initSocket() {
     socketService.onConnect(() {
       AppLogger.log.i("✅ Socket connected on booking screen");
+    });
+    // This screen previously registered no reconnect callback at all, so a
+    // reconnect here (app backgrounded then resumed with the socket still
+    // "connected" from the OS's view, network blip, etc.) never forced a
+    // fresh REST read — this booking could keep rendering as active on the
+    // client purely because no live event happened to arrive after
+    // reconnecting. MongoDB via getActiveBooking() is the source of truth.
+    socketService.onReconnect(() {
+      AppLogger.log.i("🔄 Socket reconnected on booking screen — re-syncing");
+      unawaited(_seedOtpFromActiveBooking());
     });
 
     socketService.on('booking-update', (data) {
@@ -1644,6 +2303,12 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       // accepted-only early return below.
       if ((payload['type'] ?? '').toString().trim() == 'parcel-status') {
         _applyParcelTrustUpdate(payload);
+        // Older backend instances emitted only the verified flag here. During
+        // a rolling deploy, reconcile the missing status from REST immediately.
+        if (payload['deliveryOtpVerified'] == true &&
+            (payload['parcelStatus'] ?? '').toString().trim().isEmpty) {
+          unawaited(_seedOtpFromActiveBooking());
+        }
         return;
       }
 
@@ -2039,7 +2704,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       // Robust status parse (bool / number / "true" / "STARTED") so the map
       // reliably switches from driver->pickup to driver->drop.
       final dynamic rawStatus = (data is Map) ? data['status'] : data;
-      final String statusStr = (rawStatus ?? '').toString().trim().toLowerCase();
+      final String statusStr =
+          (rawStatus ?? '').toString().trim().toLowerCase();
       final bool status =
           rawStatus == true ||
           rawStatus == 1 ||
@@ -2086,7 +2752,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       AppLogger.log.i('customer-cancelled : $data');
 
       final payload = _asMap(data);
-      if (payload.isNotEmpty && payload['status'] == true) {
+      if (payload.isNotEmpty && _isCancelPayload(payload)) {
         if (!mounted) return;
 
         setState(() {
@@ -2107,7 +2773,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       AppLogger.log.i('driver-cancelled : $data');
 
       final payload = _asMap(data);
-      if (payload.isNotEmpty && payload['status'] == true) {
+      if (payload.isNotEmpty && _isCancelPayload(payload)) {
         if (!mounted) return;
 
         setState(() {
@@ -2124,6 +2790,92 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         Get.offAll(() => CommonBottomNavigation(initialIndex: 3));
       }
     });
+    // Backend stale-booking sweep auto-cancels an abandoned booking with
+    // cancelledBy:'system' -> event "system-cancelled" (MongoDB is the
+    // source of truth for this — see src/jobs/staleBookingSweep.ts in
+    // either backend). Same UI treatment as a real cancellation; distinct
+    // fallback copy so the customer understands it wasn't a person.
+    socketService.on('system-cancelled', (data) async {
+      AppLogger.log.i('system-cancelled : $data');
+
+      final payload = _asMap(data);
+      if (payload.isNotEmpty && _isCancelPayload(payload)) {
+        if (!mounted) return;
+
+        setState(() {
+          isTripCancelled = true;
+          cancelTitle = _extractCancelTitle(
+            payload,
+            fallback: 'Booking expired',
+          );
+          cancelReason = _extractCancelReason(
+            payload,
+            fallback: 'No activity was detected for an extended period.',
+          );
+        });
+
+        await Future.delayed(const Duration(seconds: 3));
+        if (!mounted) return;
+        Get.offAll(() => CommonBottomNavigation(initialIndex: 3));
+      }
+    });
+    // H6 (mirrors OrderConfirmController): the backend asks every client
+    // still in this booking's room to re-pull canonical state once it has
+    // validated a reconnected session. Without this, a stale parcel-tracking
+    // screen could persist through a reconnect that happened while the
+    // booking was auto-expired elsewhere — REST + MongoDB, not the socket
+    // event we might have missed, is what actually decides "still active."
+    socketService.on('active_ride_sync_required', (data) {
+      if (!mounted) return;
+      unawaited(_seedOtpFromActiveBooking());
+    });
+  }
+
+  // Lenient cancellation-payload check (mirrors the already-hardened shared-
+  // ride version in shared_screens.dart) — the strict `status == true` check
+  // silently dropped the event if the backend ever sent status as a string
+  // ("CANCELLED"), omitted it, or used a different field, which is why a
+  // driver-cancelled trip could leave the customer stuck on this screen.
+  bool _isCancelPayload(Map payload) {
+    final st = payload['status'];
+    final statusStr = (st ?? '').toString().toUpperCase();
+    return st == true ||
+        statusStr == 'CANCELLED' ||
+        statusStr == 'DRIVER_CANCELLED' ||
+        payload['clearActiveRide'] == true ||
+        st == null;
+  }
+
+  // Both cancel-confirm sheets (showPackageCancelBottomSheet and the generic
+  // showCancelRideBottomSheet) previously called cancelRide() directly and
+  // just closed themselves on success — the tracking screen underneath was
+  // left showing stale, no-longer-true data, entirely dependent on the
+  // customer-cancelled socket echo (above) to ever navigate away. This wraps
+  // the API call with the same "show cancelled, then go home" handling the
+  // socket listeners already do, so a self-initiated cancel behaves
+  // identically whether or not that echo arrives.
+  Future<String?> _cancelPackageAndHandle(
+    String selectedReason, {
+    String? bookingId,
+  }) async {
+    final result = await driverSearchController.cancelRide(
+      bookingId: bookingId ?? BookingId.toString(),
+      selectedReason: selectedReason,
+      context: context,
+    );
+    final ok = (result ?? '').trim().isEmpty;
+    if (ok && mounted) {
+      setState(() {
+        isTripCancelled = true;
+        cancelTitle = 'Booking cancelled';
+        cancelReason = 'Cancelled by you';
+      });
+      Future.delayed(const Duration(seconds: 3), () {
+        if (!mounted) return;
+        Get.offAll(() => CommonBottomNavigation(initialIndex: 3));
+      });
+    }
+    return result;
   }
 
   void _updateDriverMarker(LatLng position, double bearing) {
@@ -2490,36 +3242,33 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         }
       } else {
         // Keep the current route if Directions fails (production-safe). If we
-        // don't have any route yet, draw a minimal fallback line.
-        if (mounted &&
-            _polylinesNotifier.value.isEmpty &&
-            !forceKeepOldOnFailure) {
-          if (mounted) {
-            setState(() {
-              _activeRoutePoints = <LatLng>[origin, destination];
-              _lastTrimSegIndex = -1;
-            });
-          } else {
+        // don't have any route yet, draw a minimal fallback line. Checked
+        // against `_activeRoutePoints` — the field CustomerRideMapView
+        // actually renders — not `_polylinesNotifier`, which nothing reads
+        // (a leftover from the pre-CustomerRideMapView implementation);
+        // checking the dead notifier's emptiness meant it was always seen as
+        // "empty" and this fallback could silently stomp an already-good
+        // curved route with a straight line on a later transient failure.
+        if (mounted && _activeRoutePoints.isEmpty && !forceKeepOldOnFailure) {
+          setState(() {
             _activeRoutePoints = <LatLng>[origin, destination];
             _lastTrimSegIndex = -1;
-          }
+          });
         }
         if (kDebugMode) {
           AppLogger.log.e("Directions error: ${data['status']}");
         }
       }
     } catch (e) {
-      // Network hiccup/timeouts shouldn't clear the current route.
-      if (mounted &&
-          _polylinesNotifier.value.isEmpty &&
-          !forceKeepOldOnFailure) {
-        _polylinesNotifier.value = _styledRoutePolylines(
-          <LatLng>[origin, destination],
-          id: polylineId,
-          isDashed: isDashedStyle,
-        );
-        _activeRoutePoints = <LatLng>[origin, destination];
-        _lastTrimSegIndex = -1;
+      // Network hiccup/timeouts shouldn't clear the current route. Same fix
+      // as above: check the field the map actually renders, and setState so
+      // the fallback line is not silently invisible until an unrelated
+      // rebuild happens to pick it up.
+      if (mounted && _activeRoutePoints.isEmpty && !forceKeepOldOnFailure) {
+        setState(() {
+          _activeRoutePoints = <LatLng>[origin, destination];
+          _lastTrimSegIndex = -1;
+        });
       }
       if (kDebugMode) {
         AppLogger.log.e("Directions exception: $e");
@@ -2527,36 +3276,6 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     } finally {
       _isDrawingPolyline = false;
     }
-  }
-
-  Set<Polyline> _styledRoutePolylines(
-    List<LatLng> points, {
-    required String id,
-    required bool isDashed,
-  }) {
-    if (points.length < 2) return const <Polyline>{};
-
-    // Production-safe: keep route high-contrast (black) and leave dashed
-    // "secondary" guidance grey.
-    final color = isDashed ? const Color(0xFF9E9E9E) : const Color(0xFF000000);
-    final width = isDashed ? 4 : 5;
-
-    return {
-      Polyline(
-        polylineId: PolylineId(id),
-        points: points,
-        color: color,
-        width: width,
-        zIndex: 2,
-        startCap: Cap.roundCap,
-        endCap: Cap.roundCap,
-        jointType: JointType.round,
-        patterns:
-            isDashed
-                ? <PatternItem>[PatternItem.dash(20), PatternItem.gap(10)]
-                : const <PatternItem>[],
-      ),
-    };
   }
 
   void _maybeFitBounds(
@@ -2628,7 +3347,9 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
   Widget _etaChip() {
     final etaText =
-        (_displayEtaSeconds != null) ? _formatDuration(_displayEtaSeconds!) : '';
+        (_displayEtaSeconds != null)
+            ? _formatDuration(_displayEtaSeconds!)
+            : '';
     final distText =
         (_routeMeters != null) ? _formatDistance(_routeMeters!) : '';
 
@@ -2686,7 +3407,9 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
   Future<void> _showEtaDistanceSheet() async {
     final etaText =
-        (_displayEtaSeconds != null) ? _formatDuration(_displayEtaSeconds!) : '';
+        (_displayEtaSeconds != null)
+            ? _formatDuration(_displayEtaSeconds!)
+            : '';
     final distText =
         (_routeMeters != null) ? _formatDistance(_routeMeters!) : '';
     if (etaText.isEmpty && distText.isEmpty) return;
@@ -2766,7 +3489,9 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
   Widget _tripInfoInline() {
     final etaText =
-        (_displayEtaSeconds != null) ? _formatDuration(_displayEtaSeconds!) : '';
+        (_displayEtaSeconds != null)
+            ? _formatDuration(_displayEtaSeconds!)
+            : '';
     final distText =
         (_routeMeters != null) ? _formatDistance(_routeMeters!) : '';
 
@@ -2909,12 +3634,15 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     ];
     if (remaining.length < 2) return;
 
-    _activeRoutePoints = remaining;
-    _polylinesNotifier.value = _styledRoutePolylines(
-      remaining,
-      id: id,
-      isDashed: !driverStartedRide,
-    );
+    // Must setState — CustomerRideMapView only re-syncs its route on a
+    // rebuild that hands it a changed `routePoints` list; mutating the field
+    // alone (as this used to) left the trimmed route computed but never
+    // actually reaching the map until some unrelated rebuild happened to
+    // pick it up, which read as "the polyline doesn't update / disappears".
+    if (!mounted) return;
+    setState(() {
+      _activeRoutePoints = remaining;
+    });
   }
 
   void _maybeRerouteIfOffRoute(LatLng driverLatLng) {
@@ -2958,15 +3686,86 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     try {
       final res = await _otpApi.getActiveBooking();
       res.fold((_) {}, (active) {
+        if (!mounted) return;
+
+        // MongoDB (via this endpoint) is the source of truth for whether
+        // THIS booking is still active — covers the reconnect gap where a
+        // live "system-cancelled"/cancellation socket event could have been
+        // missed entirely while disconnected/backgrounded. If the server no
+        // longer considers this bookingId active, never keep rendering it
+        // as if it were (mirrors the existing customer/driver/system
+        // -cancelled socket handlers' UI, just triggered from a REST read
+        // instead of a live event).
+        final stillOurs =
+            active.hasActiveBooking == true &&
+            active.data != null &&
+            (active.data!.bookingId.isEmpty ||
+                active.data!.bookingId == widget.bookingId);
+        if (!stillOurs) {
+          if (!isTripCancelled) {
+            setState(() {
+              isTripCancelled = true;
+              cancelTitle = 'Booking no longer active';
+              cancelReason =
+                  'This booking is no longer active on your account.';
+            });
+            Future.delayed(const Duration(seconds: 3), () {
+              if (!mounted) return;
+              Get.offAll(() => CommonBottomNavigation(initialIndex: 3));
+            });
+          }
+          return;
+        }
+
         final code = (active.data?.otpCode ?? '').toString().trim();
         final verified = active.data?.otpVerified == true;
-        if (code.isNotEmpty && !verified && otp.isEmpty && mounted) {
+        if (code.isNotEmpty && !verified && otp.isEmpty) {
           setState(() => otp = code);
         }
+
+        // Restore "driver already assigned" from REST too — the socket
+        // 'joined-booking' push that normally flips _isDriverConfirmed can
+        // be missed/delayed on a cold re-entry into a FRESH screen instance
+        // (e.g. Get.offAll back from "Switch to online payment" mid-dispatch),
+        // which otherwise left the "Finding a courier" searching UI showing
+        // even though a courier was already accepted. REST is the source of
+        // truth; only ever moves this forward here (a real un-assignment is
+        // a cancellation, already handled by the cancel socket handlers).
+        final restoredDriverId =
+            (active.data?.driverId ?? '').toString().trim();
+        if (restoredDriverId.isNotEmpty && !_isDriverConfirmed) {
+          setState(() {
+            _isDriverConfirmed = true;
+            isWaitingForDriver = false;
+            noDriverFound = false;
+            final name = (active.data?.driverName ?? '').toString().trim();
+            if (name.isNotEmpty) driverName = name;
+            final pic = (active.data?.driverProfilePic ?? '').toString().trim();
+            if (pic.isNotEmpty) ProfilePic = pic;
+            final phone = (active.data?.driverPhone ?? '').toString().trim();
+            if (phone.isNotEmpty) CUSTOMERPHONE = phone;
+            final vehicle = active.data?.vehicle;
+            if (vehicle != null) {
+              if (vehicle.plateNumber.trim().isNotEmpty) {
+                plateNumber = vehicle.plateNumber;
+              }
+              final details = [
+                vehicle.color,
+                vehicle.brand,
+              ].where((e) => e.trim().isNotEmpty).join(' - ');
+              if (details.isNotEmpty) carDetails = details;
+              if (vehicle.type.trim().isNotEmpty) {
+                _vehicleType = vehicle.type;
+                CARTYPE = vehicle.type;
+              }
+            }
+          });
+        }
+
         // Parcel trust (Phase 2): restore the courier lifecycle on reopen —
         // socket events are transient, this is the source of truth.
         final parcel = active.data?.parcel;
-        if (parcel != null && mounted) {
+        if (parcel != null) {
           _applyParcelTrustUpdate(parcel);
         }
       });
@@ -2979,7 +3778,9 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     final id = widget.bookingId.trim();
     if (id.isEmpty) return;
     setState(() => _otpResending = true);
-    _startOtpCooldown(30); // immediate client cooldown; server is source of truth
+    _startOtpCooldown(
+      30,
+    ); // immediate client cooldown; server is source of truth
     try {
       final res = await _otpApi.resendRideOtp(id);
       if (!mounted) return;
@@ -3016,6 +3817,14 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    // Package delivery trust (Phase 3): never let the raw Pickup OTP outlive
+    // this screen — leaving the tracking flow is a "leaving the eligible
+    // flow" boundary regardless of package status.
+    packageController.clearPickupOtpFromMemory();
+    // Receiver Tracking + WhatsApp Share MVP: same treatment for the share
+    // payload (tracking link + Delivery OTP) held for this screen.
+    packageController.clearShareDetailsFromMemory();
     _otpCooldownTimer?.cancel();
     try {
       socketService.off('booking-update');
@@ -3037,7 +3846,6 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
     _searchingAnimController.dispose();
     _motion.dispose();
     _markersNotifier.dispose();
-    _polylinesNotifier.dispose();
     _isFollowingNotifier.dispose();
     _mapController?.dispose();
     super.dispose();
@@ -3091,6 +3899,10 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                   // here. The widget fully owns the camera; leaving the screen's
                   // legacy `_mapController` null keeps all old camera code inert.
                   mapPadding: const EdgeInsets.only(bottom: 230),
+                  // Parcel-only: keep the whole pickup->drop path visible even
+                  // as the courier travels it, instead of only the remaining
+                  // portion. Single/shared ride are unaffected (default false).
+                  showFullRouteTrail: true,
                 ),
               ),
 
@@ -3101,7 +3913,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                   _driverRawLatLng == null &&
                   !destinationReached)
                 Positioned(
-                  top: 60,
+                  top: 94,
                   left: 0,
                   right: 0,
                   child: Center(
@@ -3163,7 +3975,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                 ),
               ),
               Positioned(
-                top: 50,
+                top: 94,
                 right: 15,
                 child: GestureDetector(
                   onTap: () async {
@@ -3281,31 +4093,136 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                                 ),
                               )
                             else
-                              Center(
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    CustomTextFields.textWithImage(
-                                      fontSize: 20,
-                                      imageSize: 24,
-                                      fontWeight: FontWeight.w600,
-                                      text:
-                                          destinationReached
-                                              ? 'Ride Completed'
-                                              : driverStartedRide
-                                              ? 'Ride in Progress'
-                                              : 'Your ride is confirmed',
-                                      colors: AppColors.commonBlack,
-                                      rightImagePath: AppImages.clrTick,
-                                    ),
-                                    if (_isDriverConfirmed &&
-                                        !destinationReached &&
-                                        (_routeMeters != null ||
-                                            _routeSeconds != null)) ...[
-                                      const SizedBox(height: 10),
-                                      _tripInfoInline(),
-                                    ],
-                                  ],
+                              Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 4,
+                                ),
+                                child: Builder(
+                                  builder: (context) {
+                                    final style =
+                                        _effectivePackageStatusStyle();
+                                    return Column(
+                                      children: [
+                                        Row(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Container(
+                                              padding: const EdgeInsets.all(12),
+                                              decoration: BoxDecoration(
+                                                color: style.background,
+                                                shape: BoxShape.circle,
+                                              ),
+                                              child: Icon(
+                                                style.icon,
+                                                size: 22,
+                                                color: style.color,
+                                              ),
+                                            ),
+                                            const SizedBox(width: 12),
+                                            Expanded(
+                                              child: Column(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                children: [
+                                                  Text(
+                                                    style.label,
+                                                    style: const TextStyle(
+                                                      fontSize: 17,
+                                                      fontWeight:
+                                                          FontWeight.w800,
+                                                      color: Color(0xFF111827),
+                                                      height: 1.2,
+                                                    ),
+                                                  ),
+                                                  const SizedBox(height: 4),
+                                                  Text(
+                                                    style.message,
+                                                    style: const TextStyle(
+                                                      fontSize: 12.5,
+                                                      fontWeight:
+                                                          FontWeight.w600,
+                                                      color: Color(0xFF6B7280),
+                                                      height: 1.35,
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                            Container(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 10,
+                                                    vertical: 6,
+                                                  ),
+                                              decoration: BoxDecoration(
+                                                color: style.background,
+                                                borderRadius:
+                                                    BorderRadius.circular(20),
+                                              ),
+                                              child: Text(
+                                                style.label.toUpperCase(),
+                                                style: TextStyle(
+                                                  fontSize: 9.5,
+                                                  fontWeight: FontWeight.w800,
+                                                  letterSpacing: 0.3,
+                                                  color: style.color,
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                        if (_isDriverConfirmed &&
+                                            !destinationReached &&
+                                            (_routeMeters != null ||
+                                                _routeSeconds != null)) ...[
+                                          const SizedBox(height: 12),
+                                          _tripInfoInline(),
+                                        ],
+                                        // Current payment method is always
+                                        // shown first (the chip already spells
+                                        // out "Cash — pay the courier..." /
+                                        // "Paid via Wallet" / etc — this is the
+                                        // one place the sender sees what's
+                                        // actually selected, not a vague
+                                        // "switch" link with no visible
+                                        // current state).
+                                        if (_parcelPaymentStatus
+                                            .isNotEmpty) ...[
+                                          const SizedBox(height: 12),
+                                          _paymentStatusChip(),
+                                        ],
+                                        // Rule 5: let the sender safely switch
+                                        // Cash -> Online while the plan is
+                                        // still CASH_PENDING (i.e. the courier
+                                        // hasn't collected cash yet) and the
+                                        // package hasn't been delivered. Once
+                                        // either happens this button simply
+                                        // stops appearing — no destructive
+                                        // action is possible after the fact.
+                                        // Full-width black CTA (not a subtle
+                                        // text link) so it reads as a real
+                                        // action, matching the app's primary-
+                                        // button convention.
+                                        if (_parcelPaymentStatus ==
+                                                'CASH_PENDING' &&
+                                            _parcelStatus != 'DELIVERED') ...[
+                                          const SizedBox(height: 10),
+                                          SizedBox(
+                                            width: double.infinity,
+                                            child: AppButtons.button(
+                                              onTap:
+                                                  _paymentNavigationBlocked
+                                                      ? null
+                                                      : _openOnlinePaymentSwitch,
+                                              text: 'Pay Online Instead',
+                                              fontSize: 14,
+                                            ),
+                                          ),
+                                        ],
+                                      ],
+                                    );
+                                  },
                                 ),
                               ),
 
@@ -3320,147 +4237,81 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Row(
-                                    children: [
-                                      Column(
-                                        spacing: 5,
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          CustomTextFields.textWithStylesSmall(
-                                            'PKG - ${BookingId}',
-                                            colors: AppColors.commonBlack,
-                                            fontWeight: FontWeight.w500,
-                                          ),
-
-                                          Row(
-                                            children: [
-                                              ClipOval(child: _driverAvatar()),
-                                              SizedBox(width: 5),
-                                              CustomTextFields.textWithStylesSmall(
-                                                fontSize: 14,
-                                                driverName,
-                                                colors: AppColors.commonBlack,
-                                                fontWeight: FontWeight.w500,
-                                              ),
-                                              // SizedBox(width: 5),
-                                              // Image.asset(
-                                              //   AppImages.star,
-                                              //   width: 13,
-                                              //   height: 13,
-                                              // ),
-                                              // SizedBox(width: 5),
-                                              // CustomTextFields.textWithStyles600(
-                                              //   '4.5',
-                                              // ),
-                                            ],
-                                          ),
-                                          CustomTextFields.textWithStylesSmall(
-                                            fontWeight: FontWeight.w500,
-                                            fontSize: 14,
-                                            'Vehicle: Bike ($plateNumber)',
-                                            colors:
-                                                AppColors
-                                                    .rideShareContainerColor2,
-                                          ),
-                                        ],
-                                      ),
-                                      Spacer(),
-                                      Container(
-                                        decoration: BoxDecoration(
-                                          borderRadius: BorderRadius.circular(
-                                            50,
-                                          ),
-                                          color:
-                                              AppColors.chatCallContainerColor,
+                                  DriverInfoCard(
+                                    name:
+                                        driverName.trim().isEmpty
+                                            ? 'Courier'
+                                            : driverName,
+                                    photoUrl: ProfilePic,
+                                    rating:
+                                        driverRating > 0 ? driverRating : null,
+                                    vehicleLabel:
+                                        _vehicleType.isNotEmpty
+                                            ? _vehicleType
+                                            : 'Bike',
+                                    vehicleNumber: plateNumber,
+                                    onCall: () async {
+                                      final ph = _normalizePhone(CUSTOMERPHONE);
+                                      if (ph.isEmpty) {
+                                        AppToasts.showError(
+                                          context,
+                                          'Driver phone not available',
+                                        );
+                                        return;
+                                      }
+                                      final ok = await launchPhoneDialer(ph);
+                                      if (!ok) {
+                                        AppToasts.showError(
+                                          context,
+                                          'Could not open dialer',
+                                        );
+                                      }
+                                    },
+                                    onMessage: () {
+                                      final id =
+                                          (BookingId.trim().isNotEmpty
+                                                  ? BookingId
+                                                  : widget.bookingId)
+                                              .trim();
+                                      if (id.isEmpty) {
+                                        AppToasts.showError(
+                                          context,
+                                          'Booking ID not available yet',
+                                        );
+                                        return;
+                                      }
+                                      Get.to(
+                                        () => ChatScreen(
+                                          bookingId: id,
+                                          pickupLatitude:
+                                              widget.senderData.latitude,
+                                          pickupLongitude:
+                                              widget.senderData.longitude,
                                         ),
-
-                                        child: Padding(
-                                          padding: const EdgeInsets.all(8.0),
-                                          child: InkWell(
-                                            onTap: () async {
-                                              final ph = _normalizePhone(
-                                                CUSTOMERPHONE,
-                                              );
-                                              if (ph.isEmpty) {
-                                                AppToasts.showError(
-                                                  context,
-                                                  'Driver phone not available',
-                                                );
-                                                return;
-                                              }
-
-                                              final ok =
-                                                  await launchPhoneDialer(ph);
-                                              if (!ok) {
-                                                AppToasts.showError(
-                                                  context,
-                                                  'Could not open dialer',
-                                                );
-                                              }
-                                            },
-                                            child: Image.asset(
-                                              AppImages.chatCall,
-                                              height: 20,
-                                              width: 20,
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                      SizedBox(width: 10),
-                                      Container(
-                                        decoration: BoxDecoration(
-                                          borderRadius: BorderRadius.circular(
-                                            50,
-                                          ),
-                                          color: AppColors.chatBlueColor,
-                                        ),
-
-                                        child: Padding(
-                                          padding: const EdgeInsets.all(8.0),
-                                          child: InkWell(
-                                            onTap: () async {
-                                              final id =
-                                                  (BookingId.trim().isNotEmpty
-                                                          ? BookingId
-                                                          : widget.bookingId)
-                                                      .trim();
-                                              if (id.isEmpty) {
-                                                AppToasts.showError(
-                                                  context,
-                                                  'Booking ID not available yet',
-                                                );
-                                                return;
-                                              }
-                                              Get.to(
-                                                () => ChatScreen(
-                                                  bookingId: id,
-                                                  pickupLatitude:
-                                                      widget
-                                                          .senderData
-                                                          .latitude,
-                                                  pickupLongitude:
-                                                      widget
-                                                          .senderData
-                                                          .longitude,
-                                                ),
-                                              );
-                                            },
-                                            child: Image.asset(
-                                              AppImages.chat,
-                                              height: 20,
-                                              width: 20,
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                    ],
+                                      );
+                                    },
                                   ),
-                                  if (otp.isNotEmpty &&
+                                  // Package delivery trust (Phase 3): the
+                                  // SENDER-only Pickup OTP, sourced solely
+                                  // from the protected Phase 1 endpoint (via
+                                  // packageController) — never from the
+                                  // generic ride-OTP socket/REST fields above.
+                                  if (!_isPackageCollected &&
                                       !driverStartedRide &&
                                       !destinationReached) ...[
-                                    _otpHighlightCard(),
-                                    const SizedBox(height: 16),
+                                    Obx(() {
+                                      if (!packageController
+                                          .pickupOtpAvailable
+                                          .value) {
+                                        return const SizedBox.shrink();
+                                      }
+                                      return Column(
+                                        children: [
+                                          _pickupOtpCard(),
+                                          const SizedBox(height: 16),
+                                        ],
+                                      );
+                                    }),
                                   ],
                                   // Parcel trust: after pickup, the delivery
                                   // code went to the RECEIVER — tell the
@@ -3469,6 +4320,18 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                                       !destinationReached &&
                                       _parcelStatus != 'DELIVERED') ...[
                                     _deliveryOtpSentCard(),
+                                    const SizedBox(height: 16),
+                                  ],
+                                  // Receiver Tracking + WhatsApp Share MVP:
+                                  // hidden before pickup verification; stays
+                                  // available after delivery too (shares the
+                                  // delivered tracking page, minus the OTP —
+                                  // handled server-side per response).
+                                  if (driverStartedRide &&
+                                      _parcelStatus != 'FAILED_DELIVERY') ...[
+                                    ParcelShareCard(
+                                      packageController: packageController,
+                                    ),
                                     const SizedBox(height: 16),
                                   ],
                                   // Parcel trust: POD photo + timestamps once
@@ -3595,54 +4458,15 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                                     ),
                                   ],
 
-                                  SizedBox(height: 25),
-                                  _isOrderConfirmed && !_isPackageCollected
-                                      ? PackageContainer.pickUpFields(
-                                        imagePath: AppImages.clrTick1,
-                                        title: 'Order Confirmed',
-                                        subTitle:
-                                            _estimateText().isNotEmpty
-                                                ? _estimateText()
-                                                : (_isEnRoute
-                                                    ? 'Courier en route to pickup'
-                                                    : 'Waiting for courier'),
-                                      )
-                                      : PackageContainer.pickUpFields(
-                                        imagePath: AppImages.clrTick1,
-                                        title: 'Package Collected',
-                                        subTitle:
-                                            _shortPlace(
-                                                  PickupAddress,
-                                                ).isNotEmpty
-                                                ? 'From ${_shortPlace(PickupAddress)}'
-                                                : 'Package collected',
-                                      ),
-                                  const SizedBox(height: 10),
-                                  _isEnRoute && !_isInTransit
-                                      ? PackageContainer.pickUpFields(
-                                        imagePath: AppImages.clrDirection,
-                                        title: 'Courier En Route',
-                                        subTitle:
-                                            _estimateText().isNotEmpty
-                                                ? _estimateText()
-                                                : 'On the way',
-                                      )
-                                      : PackageContainer.pickUpFields(
-                                        imagePath: AppImages.clrBox1,
-                                        title: 'In Transit',
-                                        subTitle:
-                                            _estimateText().isNotEmpty
-                                                ? _estimateText()
-                                                : (_shortPlace(
-                                                      DropAddress,
-                                                    ).isNotEmpty
-                                                    ? 'To ${_shortPlace(DropAddress)}'
-                                                    : 'Moving to destination'),
-                                      ),
-                                  const SizedBox(height: 10),
-                                  _buildPickupDeliveryStatusCard(),
-
-                                  SizedBox(height: 15),
+                                  // Socket-driven step-by-step progress
+                                  // ("Pickup Progress" pre-collection,
+                                  // "Delivery Time" post-collection) — reads
+                                  // only backend `parcelStatus` + timestamps,
+                                  // same source of truth as the status
+                                  // Builder above, never inferred locally.
+                                  const SizedBox(height: 12),
+                                  _timelineCard(),
+                                  const SizedBox(height: 15),
                                   Divider(color: AppColors.dividerColor1),
 
                                   Row(
@@ -3729,10 +4553,11 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                                   const SizedBox(height: 12),
                                   GestureDetector(
                                     onTap: () {
+                                      if (_paymentNavigationBlocked) return;
                                       if (!destinationReached) {
                                         AppToasts.showError(
                                           context,
-                                          'Payment available after delivery is completed',
+                                          'Your payment plan is already set for this package — check the Payment card above.',
                                         );
                                         return;
                                       }
@@ -3990,13 +4815,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                                                                     String
                                                                     selectedReason,
                                                                   ) {
-                                                                    return driverSearchController.cancelRide(
-                                                                      bookingId:
-                                                                          BookingId.toString(),
-                                                                      selectedReason:
-                                                                          selectedReason,
-                                                                      context:
-                                                                          context,
+                                                                    return _cancelPackageAndHandle(
+                                                                      selectedReason,
                                                                     );
                                                                   },
                                                                 );
@@ -4381,10 +5201,9 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                             AppButtons.showCancelRideBottomSheet(
                               context,
                               onConfirmCancel: (String selectedReason) {
-                                return driverSearchController.cancelRide(
+                                return _cancelPackageAndHandle(
+                                  selectedReason,
                                   bookingId: widget.bookingId.toString(),
-                                  selectedReason: selectedReason,
-                                  context: context,
                                 );
                               },
                             );
@@ -4454,14 +5273,14 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
                       isWaitingForDriver = true;
                       noDriverFound = false;
                     });
-                    String? result = await packageController
+                    bool result = await packageController
                         .sendPackageDriverRequest(
                           discountCode: widget.discountCode ?? '',
                           bookingId: widget.bookingId,
                           receiverData: widget.receiverData,
                           senderData: widget.senderData,
                         );
-                    if (result != null) {
+                    if (result) {
                       startDriverSearch();
                     }
                   },

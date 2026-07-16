@@ -173,7 +173,6 @@ class OrderConfirmController extends GetxController
   static const double _focusDriverZoom = 16.9;
   DateTime _lastAutoFrameAt = DateTime.fromMillisecondsSinceEpoch(0);
   final Duration _autoFrameInterval = const Duration(milliseconds: 1400);
-  DateTime _lastRouteTrimAt = DateTime.fromMillisecondsSinceEpoch(0);
   static const Duration _routeTrimInterval = Duration(milliseconds: 90);
   int _lastTrimSegIndex = -1;
 
@@ -399,7 +398,9 @@ class OrderConfirmController extends GetxController
   int _lastGapMs = 0;
   int _duplicateDroppedCount = 0;
   int _staleDroppedCount = 0;
-  DateTime _lastAcceptedUpdateLocationAt = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastAcceptedUpdateLocationAt = DateTime.fromMillisecondsSinceEpoch(
+    0,
+  );
   String? _lastAcceptedUpdateLocationBookingId;
   static const Duration _heartbeatLowPriorityWindow = Duration(seconds: 4);
 
@@ -411,9 +412,9 @@ class OrderConfirmController extends GetxController
   Timer? _freshnessTimer;
   static const Duration _trackingStaleAfter = Duration(seconds: 8);
   static const Duration _trackingHardStaleAfter = Duration(seconds: 10);
-  final RxBool driverSignalStale = false.obs; // >8s -> "Reconnecting…"
+  final RxBool driverSignalStale = false.obs; // >8s -> "Reconnectingâ€¦"
   final RxBool driverSignalLost = false.obs; // >10s -> "Driver signal lost"
-  // Wall-clock time of the last VALID tracking packet for this booking — any
+  // Wall-clock time of the last VALID tracking packet for this booking â€” any
   // packet carrying coordinates, INCLUDING stationary same-point snapshots. The
   // watchdog measures CONTACT from here, not marker movement: a driver stopped
   // at a signal still emits, so identical snapshots must not read as "lost".
@@ -488,7 +489,7 @@ class OrderConfirmController extends GetxController
     _startFreshnessWatchdog();
     socketService.retainOnlyBookingContext(bookingId);
     // ALWAYS join the booking room so the customer receives live driver-location
-    // broadcasts — the backend joins the room by bookingId alone, no driverId
+    // broadcasts â€” the backend joins the room by bookingId alone, no driverId
     // needed. Previously this was gated on `resumeDriverId`, so on a fresh ride
     // (driver just accepted, resumeDriverId empty) the socket never joined the
     // room: the car showed from the initial snapshot but never moved, because no
@@ -524,13 +525,15 @@ class OrderConfirmController extends GetxController
     } catch (_) {}
   }
 
-  /// Customer-initiated "Didn't get it? / Resend" — calls the resend API and
+  /// Customer-initiated "Didn't get it? / Resend" â€” calls the resend API and
   /// starts a client cooldown. Server enforces the real 30s/5-attempt policy.
   Future<void> resendRideOtp() async {
     if (otpResending.value || otpResendCooldown.value > 0) return;
     if (bookingId.trim().isEmpty) return;
     otpResending.value = true;
-    _startOtpCooldown(30); // immediate client cooldown; server is source of truth
+    _startOtpCooldown(
+      30,
+    ); // immediate client cooldown; server is source of truth
     try {
       final res = await _otpApi.resendRideOtp(bookingId);
       res.fold(
@@ -541,7 +544,7 @@ class OrderConfirmController extends GetxController
         ),
       );
     } catch (_) {
-      // network error — client cooldown already running; user can retry after it
+      // network error â€” client cooldown already running; user can retry after it
     } finally {
       otpResending.value = false;
     }
@@ -696,7 +699,7 @@ class OrderConfirmController extends GetxController
   }
 
   Future<void> onLocateActionTap() async {
-    // UX: 1st tap -> focus the moving driver, 2nd tap -> fit bounds (driver↔pickup/drop)
+    // UX: 1st tap -> focus the moving driver, 2nd tap -> fit bounds (driverâ†”pickup/drop)
     if (!focusDriverOnNextTap.value) {
       await focusDriverLocation();
       focusDriverOnNextTap.value = true;
@@ -912,7 +915,7 @@ class OrderConfirmController extends GetxController
     try {
       final position = await Geolocator.getCurrentPosition();
       currentPosition = LatLng(position.latitude, position.longitude);
-      AppLogger.log.i("ðŸ“ customer currentPosition: $currentPosition");
+      AppLogger.log.i("Ã°Å¸â€œÂ customer currentPosition: $currentPosition");
     } catch (_) {}
   }
 
@@ -1044,9 +1047,9 @@ class OrderConfirmController extends GetxController
       if (bookingId.trim().isNotEmpty) {
         socketService.joinBookingRoom(bookingId: bookingId, force: true);
       }
-      final res = await _otpApi
-          .getActiveBooking()
-          .timeout(const Duration(seconds: 10));
+      final res = await _otpApi.getActiveBooking().timeout(
+        const Duration(seconds: 10),
+      );
       if (_disposed) return;
       res.fold((_) {}, (active) {
         if (active.hasActiveBooking != true || active.data == null) return;
@@ -1065,7 +1068,8 @@ class OrderConfirmController extends GetxController
         final loc = d.driverLocation;
         if (loc != null) {
           final pos = LatLng(loc.latitude, loc.longitude);
-          final hasLiveStream = _lastAcceptedDriverLocationPos != null &&
+          final hasLiveStream =
+              _lastAcceptedDriverLocationPos != null &&
               DateTime.now().difference(_lastAcceptedDriverLocationTs) <
                   const Duration(seconds: 6);
           if (!hasLiveStream) {
@@ -1095,7 +1099,7 @@ class OrderConfirmController extends GetxController
     if (evtBookingId.isNotEmpty &&
         bookingId.isNotEmpty &&
         evtBookingId != bookingId) {
-      return; // another passenger's leg — leave this ride untouched
+      return; // another passenger's leg â€” leave this ride untouched
     }
     latestRideStatus.value = 'COMPLETED';
     destinationReached.value = true;
@@ -1204,7 +1208,7 @@ class OrderConfirmController extends GetxController
       customerToLatLng = LatLng(toLat, toLng);
 
       plateNumber.value = plate;
-      driverName.value = '$driverFullName ⭐️ $rating';
+      driverName.value = '$driverFullName â­ï¸ $rating';
       carDetails.value = '$color - $brand';
       isDriverConfirmed.value = hasDriver;
       driverPhone.value = driverPhoneStr;
@@ -1299,7 +1303,6 @@ class OrderConfirmController extends GetxController
       } else {
         _fitDriverAndPickupOnce();
       }
-
     });
 
     socketService.on(
@@ -1366,7 +1369,8 @@ class OrderConfirmController extends GetxController
       // ("true"/"1"/"STARTED"). A strict `== true` missed those and left the map
       // stuck on the pickup phase (pickup marker + driver->pickup line).
       final dynamic rawStatus = (data is Map) ? data['status'] : data;
-      final String statusStr = (rawStatus ?? '').toString().trim().toLowerCase();
+      final String statusStr =
+          (rawStatus ?? '').toString().trim().toLowerCase();
       final bool status =
           rawStatus == true ||
           rawStatus == 1 ||
@@ -1391,7 +1395,7 @@ class OrderConfirmController extends GetxController
       //
       // BUG (booking-474342): the drop route was being fetched from `_emaPos`
       // (the controller's smoothed motion-engine output). That smoothed value
-      // can lag — or freeze — several fixes behind the real position, so at
+      // can lag â€” or freeze â€” several fixes behind the real position, so at
       // ride-start it still held the pickup/accept-time location (~the spot the
       // driver accepted from). The result: a driver->drop polyline drawn from a
       // stale point hundreds of metres off the driver's true position, which
@@ -1403,7 +1407,8 @@ class OrderConfirmController extends GetxController
       // is always at least as fresh as `_emaPos`; prefer it, then the exposed
       // raw `driverLocation.value`, and only fall back to the smoothed pose.
       if (status && customerToLatLng != null) {
-        final polyOrigin = _lastAcceptedDriverLocationPos ??
+        final polyOrigin =
+            _lastAcceptedDriverLocationPos ??
             driverLocation.value ??
             _emaPos ??
             _displayPos;
@@ -1432,7 +1437,7 @@ class OrderConfirmController extends GetxController
 
     socketService.on('customer-cancelled', (data) {
       if (isClosed) return;
-      if (data != null && data['status'] == true) {
+      if (data != null && _isCancelPayload(data)) {
         isTripCancelled.value = true;
         cancelReason.value =
             (data['message'] ?? data['reason'] ?? "Trip cancelled").toString();
@@ -1442,13 +1447,27 @@ class OrderConfirmController extends GetxController
 
     socketService.on('driver-cancelled', (data) {
       if (isClosed) return;
-      if (data != null && data['status'] == true) {
+      if (data != null && _isCancelPayload(data)) {
         isTripCancelled.value = true;
         cancelReason.value =
             (data['message'] ?? data['reason'] ?? "Trip cancelled").toString();
         _clearActiveRoute();
       }
     });
+  }
+
+  // Lenient cancellation-payload check (mirrors the already-hardened shared-
+  // ride version in shared_screens.dart) â€” the strict `status == true` check
+  // silently dropped the event if the backend ever sent status as a string
+  // ("CANCELLED"), omitted it, or used a different field.
+  bool _isCancelPayload(dynamic data) {
+    final st = data['status'];
+    final statusStr = (st ?? '').toString().toUpperCase();
+    return st == true ||
+        statusStr == 'CANCELLED' ||
+        statusStr == 'DRIVER_CANCELLED' ||
+        data['clearActiveRide'] == true ||
+        st == null;
   }
 
   DateTime _parseServerTime(dynamic ts) {
@@ -1506,7 +1525,7 @@ class OrderConfirmController extends GetxController
     // Future-timestamp guard. A driver device with a skewed clock can send a fix
     // dated far in the future. Accepting it makes `_lastAcceptedDriverLocationTs`
     // jump ahead, after which EVERY subsequent real fix reads as `older_than_last`
-    // and is rejected forever — the marker freezes and never recovers. Drop a
+    // and is rejected forever â€” the marker freezes and never recovers. Drop a
     // clearly-future packet so it can never become the baseline. (Simulated
     // packets are trusted; their timestamps are generated locally.)
     if (!simulated) {
@@ -1530,8 +1549,8 @@ class OrderConfirmController extends GetxController
       if (seq <= _lastAcceptedDriverSeq) {
         // Seq-space reset detector (defense-in-depth). The driver app emits from
         // two isolates with independent seq counters (foreground socket vs the
-        // background location service). On a foreground->background handoff —
-        // the driver opening Google Maps — the counter can restart lower, so a
+        // background location service). On a foreground->background handoff â€”
+        // the driver opening Google Maps â€” the counter can restart lower, so a
         // genuinely fresh fix looks "older" by seq. If the wall-clock timestamp
         // is clearly newer than the last accepted fix, trust time over seq:
         // accept and let the caller re-baseline _lastAcceptedDriverSeq to this
@@ -1543,9 +1562,8 @@ class OrderConfirmController extends GetxController
               lastAcceptedTsUtc.add(const Duration(seconds: 2)),
             );
         if (!seqResetWithNewerTime) {
-          decision = seq == _lastAcceptedDriverSeq
-              ? 'duplicate_seq'
-              : 'older_seq';
+          decision =
+              seq == _lastAcceptedDriverSeq ? 'duplicate_seq' : 'older_seq';
           if (seq == _lastAcceptedDriverSeq) {
             _duplicateDroppedCount += 1;
           } else {
@@ -1625,11 +1643,10 @@ class OrderConfirmController extends GetxController
 
   void _noteAcceptedTrackingPacket(DateTime receivedTsUtc) {
     if (_lastAcceptedDriverLocationTs.millisecondsSinceEpoch > 0) {
-      _lastGapMs =
-          receivedTsUtc
-              .difference(_lastAcceptedDriverLocationTs)
-              .inMilliseconds
-              .clamp(0, 1 << 30);
+      _lastGapMs = receivedTsUtc
+          .difference(_lastAcceptedDriverLocationTs)
+          .inMilliseconds
+          .clamp(0, 1 << 30);
     }
     _receiveCountWindow += 1;
     _logReceiveMetricsIfNeeded();
@@ -1637,7 +1654,7 @@ class OrderConfirmController extends GetxController
 
   /// Tiered freshness watchdog (AC#1). Runs at 1 Hz and flips two observables
   /// from the gap since the last ACCEPTED driver fix:
-  ///   gap >= 8s  -> driverSignalStale  (UI: dim marker + "Reconnecting…")
+  ///   gap >= 8s  -> driverSignalStale  (UI: dim marker + "Reconnectingâ€¦")
   ///   gap >= 10s -> driverSignalLost   (UI: "Driver signal lost")
   /// 0-8s is left to the motion engine, which keeps the marker gliding /
   /// dead-reckoning so short gaps never surface as a frozen car.
@@ -1673,9 +1690,7 @@ class OrderConfirmController extends GetxController
 
   bool _isWrongBookingTrackingPacket(Map<String, dynamic> payload) {
     final packetBookingId =
-        (payload['bookingId'] ?? payload['bookingID'] ?? '')
-            .toString()
-            .trim();
+        (payload['bookingId'] ?? payload['bookingID'] ?? '').toString().trim();
     return packetBookingId.isNotEmpty && packetBookingId != bookingId.trim();
   }
 
@@ -1853,36 +1868,37 @@ class OrderConfirmController extends GetxController
     // (Restructured live-tracking pipeline) The consistency-drop, backward
     // micro-jitter, and force-accept-after-N gates that used to sit here have
     // been removed. Each of them froze the marker (sometimes for seconds) and
-    // then released into a catch-up jump — the "appears then freezes & jumps"
+    // then released into a catch-up jump â€” the "appears then freezes & jumps"
     // symptom. CustomerRideMapView's single TrackingPlaybackEngine now owns ALL
     // jitter / stationary / teleport handling and glides smoothly between fixes,
     // so every ordered, non-duplicate fix is accepted and forwarded to it.
     _noteAcceptedTrackingPacket(rawTs);
 
     // (Restructured pipeline) The server-truth-speed "stationary hold" that used
-    // to live here — holding the marker for up to 25m whenever the driver
-    // reported speed < 0.7 m/s — has been removed. It was the main "freeze then
+    // to live here â€” holding the marker for up to 25m whenever the driver
+    // reported speed < 0.7 m/s â€” has been removed. It was the main "freeze then
     // jump" source: a driver creeping in traffic reports low speed yet keeps
     // moving, so the marker froze for many metres and then leapt to catch up.
     // The playback engine's own stationary-jitter guard (implied speed +
     // small-move filter) keeps the marker rock-solid at a genuine stop without
     // freezing slow real movement.
-    _lastAcceptedDriverLocationTs =
-        rawTs;
+    _lastAcceptedDriverLocationTs = rawTs;
     if (seq != null && seq > 0) {
       _lastAcceptedDriverSeq = seq;
     }
-    // [track-gap] DIAGNOSTIC (hop 4/4: server → customer). Fires only when the
+    // [track-gap] DIAGNOSTIC (hop 4/4: server â†’ customer). Fires only when the
     // customer resumes ACCEPTING real location packets after an anomalous
-    // silence (>3s) — i.e. the exact moment the marker un-freezes and jumps
+    // silence (>3s) â€” i.e. the exact moment the marker un-freezes and jumps
     // ahead. Correlate by timestamp with the driver/server [track-gap] logs:
-    //   • driver-emit gap too  -> driver stopped sending (device/FGS/handoff).
-    //   • server-inbound gap    -> network driver→server dropped.
-    //   • server-emit gap only  -> server suppressed/throttled its own forward.
-    //   • only this one fires    -> network server→customer (or seq-gate drops).
+    //   â€¢ driver-emit gap too  -> driver stopped sending (device/FGS/handoff).
+    //   â€¢ server-inbound gap    -> network driverâ†’server dropped.
+    //   â€¢ server-emit gap only  -> server suppressed/throttled its own forward.
+    //   â€¢ only this one fires    -> network serverâ†’customer (or seq-gate drops).
     if (_lastAcceptedUpdateLocationAt.millisecondsSinceEpoch > 0) {
       final recvGapMs =
-          DateTime.now().difference(_lastAcceptedUpdateLocationAt).inMilliseconds;
+          DateTime.now()
+              .difference(_lastAcceptedUpdateLocationAt)
+              .inMilliseconds;
       if (recvGapMs > 3000) {
         AppLogger.log.w(
           '[track-gap] hop=customer-recv gap_ms=$recvGapMs seq=${seq ?? "na"} '
@@ -1898,14 +1914,15 @@ class OrderConfirmController extends GetxController
     // it's the client snap/engine. grep LIVETRACK.
     if (kDebugMode) {
       final prevAccepted = _lastAcceptedDriverLocationPos;
-      final moveM = prevAccepted == null
-          ? 0.0
-          : Geolocator.distanceBetween(
-              prevAccepted.latitude,
-              prevAccepted.longitude,
-              newPos.latitude,
-              newPos.longitude,
-            );
+      final moveM =
+          prevAccepted == null
+              ? 0.0
+              : Geolocator.distanceBetween(
+                prevAccepted.latitude,
+                prevAccepted.longitude,
+                newPos.latitude,
+                newPos.longitude,
+              );
       final nowMs = DateTime.now();
       if (_lastLiveTrackRecvLogAt == null ||
           nowMs.difference(_lastLiveTrackRecvLogAt!) >=
@@ -1945,7 +1962,7 @@ class OrderConfirmController extends GetxController
     _updateRideMetrics(payload, packetPos: newPos);
     // Phase transitions are owned by _applyMonotonicPhase (run at the top of
     // this handler). These locals only decide the position-driven route re-fetch
-    // below — they no longer drive the mode switch.
+    // below â€” they no longer drive the mode switch.
     final derivedRideStarted = _isDropPhaseStatus(latestStatus);
     final derivedRideCompleted = _isCompletedStatus(latestStatus);
     final effectiveStatus =
@@ -1974,7 +1991,7 @@ class OrderConfirmController extends GetxController
     // Keep the controller pose fields in sync with the latest accepted packet.
     // (The visible marker is animated by CustomerRideMapView's playback engine;
     // these feed only route-fetch origin / framing helpers, so the raw accepted
-    // pose — fresher than any interpolation — is exactly what they want.)
+    // pose â€” fresher than any interpolation â€” is exactly what they want.)
     _displayPos = newPos;
     _emaPos = newPos;
     if (srvBearing != null) _lastBearing = srvBearing;
@@ -2797,7 +2814,7 @@ class OrderConfirmController extends GetxController
     // The route phase is decided by the authoritative `driverStartedRide` flag
     // (set by the `ride-started` event / a drop-phase status), NOT by the
     // per-packet status string. The server keeps sending `status: ACCEPTED` in
-    // driver-location packets even AFTER the ride starts — relying on that
+    // driver-location packets even AFTER the ride starts â€” relying on that
     // string previously left the drop route unfetched (no driver->drop line).
     // `_maybeRerouteFromDriver` reads `_activeDestination()` (pickup before
     // start, drop after), so we just always reroute and let it pick the leg.
@@ -2819,10 +2836,7 @@ class OrderConfirmController extends GetxController
   // ignore: avoid_unused_constructor_parameters
   void _trimActiveRouteVisual(LatLng driverPos) {}
 
-  LatLng _cameraFollowTarget({
-    required LatLng driverPos,
-    LatLng? anchorPos,
-  }) {
+  LatLng _cameraFollowTarget({required LatLng driverPos, LatLng? anchorPos}) {
     final bearing = _lastBearing;
     double backtrackMeters = driverStartedRide.value ? 55.0 : 36.0;
 
@@ -2845,7 +2859,8 @@ class OrderConfirmController extends GetxController
     final metersPerDegreeLng =
         metersPerDegreeLat * math.cos(driverPos.latitude * math.pi / 180.0);
 
-    final latOffset = (math.cos(headingRad) * backtrackMeters) / metersPerDegreeLat;
+    final latOffset =
+        (math.cos(headingRad) * backtrackMeters) / metersPerDegreeLat;
     final lngOffset =
         metersPerDegreeLng.abs() < 1
             ? 0.0
@@ -2909,7 +2924,7 @@ class OrderConfirmController extends GetxController
       if (cached != null && cached.length >= 2) {
         if (kDebugMode) {
           AppLogger.log.i(
-            '🧭 route cache hit: $resolvedCacheKey (${cached.length} pts)',
+            'ðŸ§­ route cache hit: $resolvedCacheKey (${cached.length} pts)',
           );
         }
         final sig = _routeSig(cached);
@@ -2929,7 +2944,7 @@ class OrderConfirmController extends GetxController
       _routeInFlightKey = resolvedCacheKey;
       if (kDebugMode) {
         AppLogger.log.i(
-          '🧭 route fetch: $resolvedCacheKey (origin=${origin.latitude.toStringAsFixed(5)},${origin.longitude.toStringAsFixed(5)} dest=${destination.latitude.toStringAsFixed(5)},${destination.longitude.toStringAsFixed(5)})',
+          'ðŸ§­ route fetch: $resolvedCacheKey (origin=${origin.latitude.toStringAsFixed(5)},${origin.longitude.toStringAsFixed(5)} dest=${destination.latitude.toStringAsFixed(5)},${destination.longitude.toStringAsFixed(5)})',
         );
       }
       final route = await _dir.getRouteInfo(
@@ -2956,7 +2971,7 @@ class OrderConfirmController extends GetxController
           _trimActiveRouteVisual(livePos);
         }
         if (kDebugMode) {
-          AppLogger.log.i('🧭 route applied: ${pts.length} pts ($polyId)');
+          AppLogger.log.i('ðŸ§­ route applied: ${pts.length} pts ($polyId)');
         }
       }
     } catch (e) {

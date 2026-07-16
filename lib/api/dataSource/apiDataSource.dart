@@ -235,9 +235,10 @@ class ApiDataSource extends BaseApiDataSource {
         'POST',
         true,
       );
-      final data = (response is Response && response.data is Map)
-          ? Map<String, dynamic>.from(response.data as Map)
-          : <String, dynamic>{};
+      final data =
+          (response is Response && response.data is Map)
+              ? Map<String, dynamic>.from(response.data as Map)
+              : <String, dynamic>{};
       if (response is Response && (response.statusCode ?? 0) == 200) {
         return Right(data);
       }
@@ -246,10 +247,213 @@ class ApiDataSource extends BaseApiDataSource {
       );
     } on DioException catch (e) {
       final d = e.response?.data;
-      final msg = (d is Map && d['message'] != null)
-          ? d['message'].toString()
-          : 'Could not resend OTP';
+      final msg =
+          (d is Map && d['message'] != null)
+              ? d['message'].toString()
+              : 'Could not resend OTP';
       return Left(ServerFailure(msg));
+    } catch (e) {
+      AppLogger.log.e(e);
+      return Left(ServerFailure('Something went wrong'));
+    }
+  }
+
+  /// Package delivery trust (Phase 1): sender-only Pickup OTP retrieval.
+  /// Returns `{otp, otpAvailable, expiresAt, verified}` on 200 — `otp` is
+  /// null on a process-local cache miss. A 409 means "not available right
+  /// now" (already verified / past pre-pickup status) — not a real error,
+  /// callers should treat it as "hide the card", not show an error toast.
+  Future<Either<Failure, Map<String, dynamic>>> getParcelPickupOtp({
+    required String bookingId,
+  }) async {
+    try {
+      final url = ApiConsents.parcelPickupOtp(bookingId);
+      final response = await Request.sendGetRequest(url, {}, 'GET', true);
+
+      if (response is Response && response.statusCode == 200) {
+        final body = response.data;
+        final data =
+            (body is Map && body['data'] is Map)
+                ? Map<String, dynamic>.from(body['data'] as Map)
+                : <String, dynamic>{};
+        return Right(data);
+      } else if (response is Response) {
+        return Left(
+          ServerFailure(
+            (response.data is Map ? response.data['message'] : null)
+                    ?.toString() ??
+                'Pickup OTP is not available right now',
+          ),
+        );
+      }
+      return Left(ServerFailure('Unexpected error'));
+    } catch (e) {
+      AppLogger.log.e(e);
+      return Left(ServerFailure('Something went wrong'));
+    }
+  }
+
+  /// Parcel payment — deliberately separate from paymentDetails() (car-ride).
+  /// paymentType ∈ {PAYSTACK, FLUTTERWAVE, WALLET, CASH}. Returns the
+  /// backend's `data` map on success: WALLET/CASH resolve synchronously
+  /// (`parcelPaymentStatus: PAID` / `CASH_PENDING`); PAYSTACK/FLUTTERWAVE only
+  /// record intent (`parcelPaymentStatus: PENDING`) — the caller still needs
+  /// to open the existing generic gateway-checkout flow (same one car-ride
+  /// payment uses) to actually collect the money.
+  Future<Either<Failure, Map<String, dynamic>>> payParcelBooking({
+    required String bookingId,
+    required String paymentType,
+  }) async {
+    try {
+      final url = ApiConsents.parcelPay;
+      final response = await Request.sendRequest(
+        url,
+        {"bookingId": bookingId, "paymentType": paymentType},
+        'Post',
+        false,
+      );
+      if (response is Response && response.statusCode == 200) {
+        final body = response.data;
+        if (body is Map && body['success'] == true) {
+          final data =
+              (body['data'] is Map)
+                  ? Map<String, dynamic>.from(body['data'] as Map)
+                  : <String, dynamic>{};
+          return Right(data);
+        }
+        return Left(
+          ServerFailure(
+            (body is Map ? body['message'] : null)?.toString() ??
+                'Payment failed',
+          ),
+        );
+      } else if (response is Response) {
+        return Left(
+          ServerFailure(
+            (response.data is Map ? response.data['message'] : null)
+                    ?.toString() ??
+                'Payment failed',
+          ),
+        );
+      }
+      return Left(ServerFailure('Unexpected error'));
+    } catch (e) {
+      AppLogger.log.e(e);
+      return Left(ServerFailure('Something went wrong'));
+    }
+  }
+
+  /// Starts a Paystack checkout for the given booking (parcel or ride — the
+  /// endpoint is generic, keyed on `userBookingId`). Returns the raw backend
+  /// body on success (`authorization_url`, `reference`, ...) so the caller
+  /// can open it in a WebView. Goes through the shared `Request` helper
+  /// (auth header attached automatically) instead of a raw `http.post` with
+  /// a hardcoded base URL.
+  Future<Either<Failure, Map<String, dynamic>>> initPaystackPayment({
+    required String bookingId,
+    required String email,
+  }) async {
+    try {
+      final response = await Request.sendRequest(
+        ApiConsents.paystackInit,
+        {"userBookingId": bookingId, "email": email},
+        'Post',
+        true,
+      );
+      if (response is Response) {
+        final body = response.data;
+        if (response.statusCode == 200 &&
+            body is Map &&
+            body['authorization_url'] != null) {
+          return Right(Map<String, dynamic>.from(body as Map));
+        }
+        return Left(
+          ServerFailure(
+            (body is Map ? body['message'] : null)?.toString() ??
+                'Failed to initialize payment',
+          ),
+        );
+      }
+      return Left(ServerFailure('Unexpected error'));
+    } catch (e) {
+      AppLogger.log.e(e);
+      return Left(ServerFailure('Something went wrong'));
+    }
+  }
+
+  /// Starts a Flutterwave checkout for the given booking. Same shape as
+  /// [initPaystackPayment] — see its doc comment.
+  Future<Either<Failure, Map<String, dynamic>>> initFlutterwavePayment({
+    required String bookingId,
+    required double amount,
+    required String email,
+    required String name,
+    required String phone,
+  }) async {
+    try {
+      final response = await Request.sendRequest(
+        ApiConsents.flutterwaveInitialize,
+        {
+          "userBookingId": bookingId,
+          "amount": amount.toString(),
+          "email": email,
+          "name": name,
+          "phone": phone,
+        },
+        'Post',
+        true,
+      );
+      if (response is Response) {
+        final body = response.data;
+        if (response.statusCode == 200 &&
+            body is Map &&
+            body['paymentLink'] != null) {
+          return Right(Map<String, dynamic>.from(body as Map));
+        }
+        return Left(
+          ServerFailure(
+            (body is Map ? body['message'] : null)?.toString() ??
+                'Failed to initialize payment',
+          ),
+        );
+      }
+      return Left(ServerFailure('Unexpected error'));
+    } catch (e) {
+      AppLogger.log.e(e);
+      return Left(ServerFailure('Something went wrong'));
+    }
+  }
+
+  /// Receiver Tracking + WhatsApp Share MVP: sender-authorized share payload.
+  /// Returns `{receiverName, normalizedReceiverPhone, publicPackageId,
+  /// trackingUrl, deliveryOtp, message, expiresAt}` on 200. `deliveryOtp` is
+  /// null once delivery is verified or the package is delivered. A 409 means
+  /// "not available yet" (pickup not verified) — callers should hide the
+  /// share card, not show an error toast.
+  Future<Either<Failure, Map<String, dynamic>>> getParcelShareDetails({
+    required String bookingId,
+  }) async {
+    try {
+      final url = ApiConsents.parcelShareDetails(bookingId);
+      final response = await Request.sendGetRequest(url, {}, 'GET', true);
+
+      if (response is Response && response.statusCode == 200) {
+        final body = response.data;
+        final data =
+            (body is Map && body['data'] is Map)
+                ? Map<String, dynamic>.from(body['data'] as Map)
+                : <String, dynamic>{};
+        return Right(data);
+      } else if (response is Response) {
+        return Left(
+          ServerFailure(
+            (response.data is Map ? response.data['message'] : null)
+                    ?.toString() ??
+                'Share details are not available right now',
+          ),
+        );
+      }
+      return Left(ServerFailure('Unexpected error'));
     } catch (e) {
       AppLogger.log.e(e);
       return Left(ServerFailure('Something went wrong'));
@@ -667,9 +871,7 @@ class ApiDataSource extends BaseApiDataSource {
             (response.data is Map<String, dynamic>)
                 ? (response.data['message'] ?? '').toString()
                 : '';
-        return Left(
-          ServerFailure(msg.isEmpty ? 'Failed to load ticket' : msg),
-        );
+        return Left(ServerFailure(msg.isEmpty ? 'Failed to load ticket' : msg));
       }
 
       final data = response.data;
@@ -1330,9 +1532,10 @@ class ApiDataSource extends BaseApiDataSource {
         }
       } else if (response is Response) {
         final data = response.data;
-        final msg = (data is Map && data['message'] != null)
-            ? data['message'].toString()
-            : "Unexpected error";
+        final msg =
+            (data is Map && data['message'] != null)
+                ? data['message'].toString()
+                : "Unexpected error";
         return Left(ServerFailure(msg));
       } else if (response is DioException) {
         final isTimeout =

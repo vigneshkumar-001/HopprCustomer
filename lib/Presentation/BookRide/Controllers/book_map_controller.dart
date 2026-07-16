@@ -13,6 +13,7 @@ import 'package:http/http.dart' as http;
 
 import 'package:hopper/Core/Consents/app_logger.dart';
 import 'package:hopper/Core/Utility/app_images.dart';
+import 'package:hopper/Presentation/BookRide/Models/selected_location.dart';
 import 'package:hopper/Presentation/OnBoarding/Controller/home_map_controller.dart';
 import 'package:hopper/uitls/map/drop_pulse.dart';
 import 'package:hopper/api/repository/api_consents.dart';
@@ -38,6 +39,24 @@ class BookMapController extends GetxController {
   LatLng? pickupPosition;
   LatLng? destinationPosition;
   LatLng? currentPosition;
+
+  // ---------- BOOKING STATE (single source of truth) ----------
+  // The full pickup/destination selection (address + coordinates + placeId +
+  // source), reactive so screens can Obx off it directly instead of relying
+  // on a TextEditingController or a raw LatLng alone. `pickupPosition`/
+  // `destinationPosition` above are kept in sync for the existing map/marker
+  // drawing code and stay the cheap read path for hot loops (camera moves).
+  final Rx<SelectedLocation?> pickupLocation = Rx<SelectedLocation?>(null);
+  final Rx<SelectedLocation?> destinationLocation = Rx<SelectedLocation?>(
+    null,
+  );
+
+  // Monotonic per-field sequence numbers. Guards against a slower/older
+  // selection (e.g. a reverse-geocode that resolves late) overwriting a
+  // newer one that already landed.
+  int _pickupSeq = 0;
+  int _destinationSeq = 0;
+  int _geocodeSeq = 0;
 
   // Map style
   String? mapStyle;
@@ -107,7 +126,26 @@ class BookMapController extends GetxController {
     required LatLng destination,
     required String pickupLabel,
     required String dropLabel,
+    String pickupSource = 'unknown',
+    String destinationSource = 'unknown',
   }) async {
+    // Route through the single-source-of-truth setters so `pickupLocation`/
+    // `destinationLocation` are populated from the very first entry into
+    // this screen, not just `pickupPosition`/`destinationPosition`. Bumps
+    // the sequence guards directly (no redundant redraw here) — the actual
+    // draw happens once, below, after both are set.
+    pickupLocation.value = SelectedLocation.fromLatLng(
+      pickup,
+      address: pickupLabel.trim().isEmpty ? 'Pickup' : pickupLabel.trim(),
+      source: pickupSource,
+    );
+    destinationLocation.value = SelectedLocation.fromLatLng(
+      destination,
+      address: dropLabel.trim().isEmpty ? 'Drop' : dropLabel.trim(),
+      source: destinationSource,
+    );
+    _pickupSeq++;
+    _destinationSeq++;
     pickupPosition = pickup;
     destinationPosition = destination;
 
@@ -129,6 +167,96 @@ class BookMapController extends GetxController {
     // Re-fit now that positions exist — covers the case where the map was
     // created (attachMap) before these positions were set.
     await fitBounds();
+  }
+
+  /// Centralised setter for pickup — the single source of truth for the rest
+  /// of the booking flow. Validates, stores the full selection, keeps the
+  /// legacy `pickupPosition` LatLng + map markers/route in sync, and guards
+  /// against a slower/older async caller (e.g. a stale reverse-geocode)
+  /// overwriting a newer selection that already landed.
+  Future<void> setPickupLocation(SelectedLocation location) async {
+    if (!location.isValid) {
+      AppLogger.log.w(
+        '[BOOKMAP] Rejected invalid pickup selection: $location',
+      );
+      return;
+    }
+    final mySeq = ++_pickupSeq;
+    pickupLocation.value = location;
+    pickupPosition = location.latLng;
+    if (mySeq != _pickupSeq) return; // superseded while we were validating
+    await _afterLocationChanged();
+  }
+
+  /// Centralised setter for destination — mirrors [setPickupLocation].
+  Future<void> setDestinationLocation(SelectedLocation location) async {
+    if (!location.isValid) {
+      AppLogger.log.w(
+        '[BOOKMAP] Rejected invalid destination selection: $location',
+      );
+      return;
+    }
+    final mySeq = ++_destinationSeq;
+    destinationLocation.value = location;
+    destinationPosition = location.latLng;
+    if (mySeq != _destinationSeq) return;
+    await _afterLocationChanged();
+  }
+
+  /// Redraws the route/markers once both pickup and destination are valid.
+  /// Cheap no-op guard: `drawPolyline`/`setPickupDropMarkers` themselves also
+  /// bail out early if either position is still missing.
+  Future<void> _afterLocationChanged() async {
+    if (pickupPosition == null || destinationPosition == null) return;
+    _dropPulse.start(destinationPosition!);
+    await drawPolyline();
+    await setPickupDropMarkers(
+      pickupLabel: pickupLocation.value?.address ?? 'Pickup',
+      dropLabel: destinationLocation.value?.address ?? 'Drop',
+      estimatedMin: '',
+      pickupAsset: AppImages.pin,
+      dropAsset: AppImages.pin,
+    );
+    await fitBounds();
+  }
+
+  /// Clears pickup only. Never called automatically by navigation/ride-type
+  /// switching — only from an explicit "clear" user action.
+  void clearPickup() {
+    pickupLocation.value = null;
+    pickupPosition = null;
+    _pickupSeq++;
+  }
+
+  /// Clears destination only. Same explicit-action-only contract as
+  /// [clearPickup].
+  void clearDestination() {
+    destinationLocation.value = null;
+    destinationPosition = null;
+    _destinationSeq++;
+  }
+
+  /// Full reset — only for a completed/cancelled booking or a brand new
+  /// booking session, never for ordinary screen navigation.
+  void clearAll() {
+    clearPickup();
+    clearDestination();
+    markers.clear();
+    polylines.clear();
+    circles.clear();
+  }
+
+  /// Stops in-flight/pending transient map work (debounced camera-idle
+  /// reverse-geocode, debounced marker redraw) without disposing the
+  /// controller itself. Safe to call when the user is leaving the screen —
+  /// bumping the sequence guards makes any already-in-flight async result
+  /// (e.g. a geocode that resolves after this call) a no-op when it lands.
+  void stopTransientWork() {
+    _cameraIdleDebounce?.cancel();
+    _markerDebounce?.cancel();
+    _pickupSeq++;
+    _destinationSeq++;
+    _geocodeSeq++;
   }
 
   Future<void> attachMap(GoogleMapController controller) async {
@@ -217,11 +345,15 @@ class BookMapController extends GetxController {
   }
 
   Future<void> getAddressFromLatLng(LatLng position) async {
+    final mySeq = ++_geocodeSeq;
     try {
       final placemarks = await placemarkFromCoordinates(
         position.latitude,
         position.longitude,
       );
+      // A newer camera-idle reverse-geocode already resolved — drop this
+      // (now stale) result instead of overwriting it.
+      if (mySeq != _geocodeSeq) return;
       if (placemarks.isNotEmpty) {
         final p = placemarks.first;
         final value = "${p.street ?? ''}, ${p.locality ?? ''}".trim();

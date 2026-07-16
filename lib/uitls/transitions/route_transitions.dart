@@ -11,8 +11,10 @@ Route<T> bottomUpRoute<T>(
   Widget page, {
   Duration duration = const Duration(milliseconds: 360),
   Duration reverseDuration = const Duration(milliseconds: 280),
+  RouteSettings? settings,
 }) {
   return PageRouteBuilder<T>(
+    settings: settings,
     transitionDuration: duration,
     reverseTransitionDuration: reverseDuration,
     opaque: true,

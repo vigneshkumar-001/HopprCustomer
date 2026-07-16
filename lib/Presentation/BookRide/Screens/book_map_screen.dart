@@ -20,6 +20,7 @@ import 'package:hopper/Core/Utility/app_toasts.dart';
 import 'package:hopper/Presentation/Authentication/widgets/textfields.dart';
 import 'package:hopper/Presentation/BookRide/Controllers/driver_search_controller.dart';
 import 'package:hopper/Presentation/BookRide/Controllers/book_map_controller.dart';
+import 'package:hopper/Presentation/BookRide/Models/selected_location.dart';
 import 'package:hopper/Presentation/BookRide/Screens/confirm_booking.dart';
 import 'package:hopper/Presentation/BookRide/Screens/search_screen.dart';
 import 'package:hopper/Presentation/BookRide/SharedRideScreens/Screens/ride_share_screen.dart';
@@ -70,6 +71,11 @@ class _BookMapScreenState extends State<BookMapScreen>
           ? Get.find<BookMapController>()
           : Get.put(BookMapController());
 
+  // Navigation lock for handleBookMapBack() — prevents a double back-tap
+  // (system gesture + the on-screen back button firing together, or rapid
+  // repeated taps) from running the handler twice concurrently.
+  bool _isHandlingBack = false;
+
   @override
   void initState() {
     super.initState();
@@ -82,33 +88,59 @@ class _BookMapScreenState extends State<BookMapScreen>
     // the vehicle list has loaded and the scroll extent grows).
     WidgetsBinding.instance.addPostFrameCallback((_) => _refreshScrollHint());
 
-    _startController.text = widget.pickupAddress;
-    _destController.text = widget.destinationAddress;
+    // Resume in place if the (shared) BookMapController already holds a
+    // valid selection — e.g. this same widget instance rebuilding, or a
+    // future permanent-controller scenario. Never overwrite a live
+    // selection with the possibly-stale constructor args in that case.
+    final existingPickup = mapC.pickupLocation.value;
+    final existingDestination = mapC.destinationLocation.value;
+    final resumingExisting =
+        existingPickup?.isValid == true && existingDestination?.isValid == true;
 
-    LatLng? pickupLocation;
-    LatLng? destinationLocation;
+    _startController.text =
+        resumingExisting ? existingPickup!.address : widget.pickupAddress;
+    _destController.text =
+        resumingExisting
+            ? existingDestination!.address
+            : widget.destinationAddress;
 
-    if (widget.pickupData.containsKey('location')) {
-      pickupLocation = widget.pickupData['location'];
-    } else if (widget.pickupData.containsKey('lat') &&
-        widget.pickupData.containsKey('lng')) {
-      pickupLocation = LatLng(
-        widget.pickupData['lat'],
-        widget.pickupData['lng'],
-      );
+    if (resumingExisting) {
+      _initialCamTarget = existingPickup!.latLng;
+      // Markers/route/camera already live on the shared controller from the
+      // previous selection — nothing else to (re)initialise.
+      if (mounted) {
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _refreshScrollHint(),
+        );
+      }
+      return;
     }
 
-    if (widget.destinationData.containsKey('location')) {
-      destinationLocation = widget.destinationData['location'];
-    } else if (widget.destinationData.containsKey('lat') &&
-        widget.destinationData.containsKey('lng')) {
-      destinationLocation = LatLng(
-        widget.destinationData['lat'],
-        widget.destinationData['lng'],
-      );
-    }
+    // `widget.pickupAddress`/`widget.destinationAddress` are the
+    // authoritative label — every caller supplies them, and some callers'
+    // `pickupData`/`destinationData` maps use a different description key
+    // (e.g. `'name'`) or omit one entirely. Only lat/lng/placeId/source come
+    // from the map.
+    final pickupLocation = SelectedLocation.fromMap(
+      widget.pickupData,
+      source: 'search',
+    ).copyWith(
+      address:
+          widget.pickupAddress.trim().isNotEmpty
+              ? widget.pickupAddress
+              : null,
+    );
+    final destinationLocation = SelectedLocation.fromMap(
+      widget.destinationData,
+      source: 'search',
+    ).copyWith(
+      address:
+          widget.destinationAddress.trim().isNotEmpty
+              ? widget.destinationAddress
+              : null,
+    );
 
-    if (pickupLocation == null || destinationLocation == null) {
+    if (!pickupLocation.isValid || !destinationLocation.isValid) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         Get.back();
         AppToasts.showErrorGlobal("Location data is missing", title: "Error");
@@ -116,8 +148,8 @@ class _BookMapScreenState extends State<BookMapScreen>
       return;
     }
 
-    final resolvedPickup = pickupLocation;
-    final resolvedDestination = destinationLocation;
+    final resolvedPickup = pickupLocation.latLng;
+    final resolvedDestination = destinationLocation.latLng;
 
     // Centre the map on the pickup from the very first frame (no ocean flash).
     _initialCamTarget = resolvedPickup;
@@ -143,8 +175,10 @@ class _BookMapScreenState extends State<BookMapScreen>
       await mapC.initPositions(
         pickup: resolvedPickup,
         destination: resolvedDestination,
-        pickupLabel: widget.pickupAddress,
-        dropLabel: widget.destinationAddress,
+        pickupLabel: pickupLocation.address,
+        dropLabel: destinationLocation.address,
+        pickupSource: pickupLocation.source,
+        destinationSource: destinationLocation.source,
       );
 
       // Prefetch both once
@@ -195,6 +229,200 @@ class _BookMapScreenState extends State<BookMapScreen>
     );
   }
 
+  // ---- Back navigation ----------------------------------------------------
+
+  /// Single entry point for leaving this screen — wired to BOTH the system
+  /// back button/gesture (via PopScope) and the on-screen back arrow, so
+  /// there is exactly one place deciding what "back" means here. Always
+  /// performs its own explicit navigation rather than deferring to a plain
+  /// pop, because a plain pop can't skip over Search/Map-picker/duplicate
+  /// BookMapScreen/ConfirmBooking routes that may sit between here and Home.
+  Future<bool> handleBookMapBack() async {
+    // A. Another back action is already being handled — ignore this one.
+    if (_isHandlingBack) return false;
+    _isHandlingBack = true;
+    try {
+      // B. A critical booking submission is in flight — don't let the user
+      // navigate away mid-request.
+      if (driverController.isLoading.value) {
+        if (mounted) {
+          AppToasts.customToast(
+            context,
+            'Please wait while we process your booking.',
+          );
+        }
+        return false;
+      }
+
+      // C. A booking was already created from this screen (e.g. the Book
+      // button succeeded but the forward navigation hasn't completed yet) —
+      // never treat that as an abandonable draft. Go to its tracking screen.
+      final existingBooking = driverController.carBooking.value;
+      if (existingBooking != null && existingBooking.bookingId.isNotEmpty) {
+        await _goToActiveBooking(existingBooking);
+        return false;
+      }
+
+      final hasDraft =
+          (mapC.pickupLocation.value?.isValid ?? false) ||
+          (mapC.destinationLocation.value?.isValid ?? false);
+
+      // D. Nothing selected yet — nothing to lose, leave immediately.
+      if (!hasDraft) {
+        mapC.stopTransientWork();
+        await _returnToHome();
+        return false;
+      }
+
+      // E. A draft pickup/destination exists — confirm before discarding it.
+      final leave = await _showLeaveBookingSheet();
+      if (leave == true) {
+        // G. Leave and Clear.
+        mapC.stopTransientWork();
+        mapC.clearAll();
+        driverController.resetDraftSelection();
+        _startController.clear();
+        _destController.clear();
+        await _returnToHome();
+      }
+      // F. Continue Booking (or the sheet was dismissed) — stay put, nothing
+      // else to do.
+      return false;
+    } finally {
+      _isHandlingBack = false;
+    }
+  }
+
+  /// Reuses the exact same navigation the "Book" button uses on success —
+  /// this is the ride lifecycle's own tracking entry point, not a new one.
+  Future<void> _goToActiveBooking(dynamic existingBooking) async {
+    if (!mounted) return;
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder:
+            (context) => ConfirmBooking(
+              carType: driverController.selectedCarType.value,
+              bookingId: existingBooking.bookingId,
+              selectedCarType: driverController.selectedCarType.value,
+              pickupData: {
+                'description':
+                    mapC.pickupLocation.value?.address ??
+                    widget.pickupAddress,
+                'lat': mapC.pickupPosition?.latitude ?? 0.0,
+                'lng': mapC.pickupPosition?.longitude ?? 0.0,
+              },
+              destinationData: {
+                'description':
+                    mapC.destinationLocation.value?.address ??
+                    widget.destinationAddress,
+                'lat': mapC.destinationPosition?.latitude ?? 0.0,
+                'lng': mapC.destinationPosition?.longitude ?? 0.0,
+              },
+              pickupAddress:
+                  mapC.pickupLocation.value?.address ?? widget.pickupAddress,
+              destinationAddress:
+                  mapC.destinationLocation.value?.address ??
+                  widget.destinationAddress,
+            ),
+      ),
+    );
+  }
+
+  /// Rounded-top confirmation sheet. Returns true = "Leave and Clear",
+  /// false/null (dismissed) = "Continue Booking".
+  Future<bool?> _showLeaveBookingSheet() {
+    return showModalBottomSheet<bool>(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 24, 20, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Leave booking?',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 10),
+                const Text(
+                  'Your selected pickup and destination will be cleared if '
+                  'you leave this screen.',
+                  style: TextStyle(fontSize: 14, color: Colors.black54),
+                ),
+                const SizedBox(height: 24),
+                SizedBox(
+                  width: double.infinity,
+                  child: AppButtons.button(
+                    text: 'Continue Booking',
+                    onTap: () => Navigator.pop(sheetContext, false),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  height: 48,
+                  child: OutlinedButton(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.red,
+                      side: const BorderSide(color: Colors.red),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                    onPressed: () => Navigator.pop(sheetContext, true),
+                    child: const Text(
+                      'Leave and Clear',
+                      style: TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  /// Pops down to the existing Home shell (`CommonBottomNavigation`) —
+  /// verified to always be the root route in this app (installed once via
+  /// `Get.off`/`Get.offAll` after splash/login, never pushed on top of
+  /// itself) — so `isFirst` reliably identifies it without needing route
+  /// names threaded through every call site that can reach this screen.
+  /// Falls back to replacing whatever route we land on with a fresh Home
+  /// ONLY if the stack is somehow missing it, and never pushes a second one
+  /// on top of an existing Home.
+  Future<void> _returnToHome() async {
+    if (!mounted) return;
+    final navigator = Navigator.of(context);
+
+    // Checked BEFORE popping, while `context` is still guaranteed valid —
+    // avoids having to introspect a possibly-already-disposed context
+    // afterward. Only true in a corrupted/unusual stack (e.g. a deep link
+    // that landed here with no Home installed yet).
+    final noHomeBeneathUs = ModalRoute.of(context)?.isFirst ?? false;
+    if (noHomeBeneathUs) {
+      navigator.pushReplacement(
+        MaterialPageRoute(
+          builder: (_) => const CommonBottomNavigation(initialIndex: 0),
+        ),
+      );
+      return;
+    }
+
+    // Normal case: an existing Home shell is already at the root of the
+    // stack — reveal it by popping everything on top of it (Search screen,
+    // map picker, a duplicate BookMapScreen, ConfirmBooking, etc.) instead
+    // of pushing/replacing with a new instance.
+    navigator.popUntil((route) => route.isFirst);
+  }
+
   @override
   void dispose() {
     _arrowBounceCtrl.dispose();
@@ -211,8 +439,15 @@ class _BookMapScreenState extends State<BookMapScreen>
   @override
   Widget build(BuildContext context) {
     return NoInternetOverlay(
-      child: WillPopScope(
-        onWillPop: () async => false,
+      child: PopScope(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, result) async {
+          // System back button/gesture. AppBar-equivalent back arrow calls
+          // the same handleBookMapBack() below — one method decides "back"
+          // for both triggers.
+          if (didPop) return;
+          await handleBookMapBack();
+        },
         child: Scaffold(
           body: Stack(
             children: [
@@ -304,17 +539,7 @@ class _BookMapScreenState extends State<BookMapScreen>
                           top: 50,
                           left: 15,
                           child: GestureDetector(
-                            onTap: () {
-                              Navigator.pushReplacement(
-                                context,
-                                MaterialPageRoute(
-                                  builder:
-                                      (context) => const CommonBottomNavigation(
-                                        initialIndex: 0,
-                                      ),
-                                ),
-                              );
-                            },
+                            onTap: () => handleBookMapBack(),
                             child: Container(
                               padding: const EdgeInsets.all(5),
                               decoration: BoxDecoration(
@@ -387,49 +612,52 @@ class _BookMapScreenState extends State<BookMapScreen>
                                   final selected = await Navigator.push(
                                     context,
                                     bottomUpRoute(
-                                          BookRideSearchScreen(
-                                            isPickup: true,
-                                            pickupData: {
-                                              'description':
-                                                  _startController.text,
-                                              'lat':
-                                                  mapC.pickupPosition?.latitude,
-                                              'lng':
-                                                  mapC
-                                                      .pickupPosition
-                                                      ?.longitude,
-                                            },
-                                            destinationData: {
-                                              'description':
-                                                  _destController.text,
-                                              'lat':
-                                                  mapC
-                                                      .destinationPosition
-                                                      ?.latitude,
-                                              'lng':
-                                                  mapC
-                                                      .destinationPosition
-                                                      ?.longitude,
-                                            },
-                                          ),
+                                      BookRideSearchScreen(
+                                        isPickup: true,
+                                        pickupData: {
+                                          'description': _startController.text,
+                                          'lat': mapC.pickupPosition?.latitude,
+                                          'lng':
+                                              mapC.pickupPosition?.longitude,
+                                        },
+                                        destinationData: {
+                                          'description': _destController.text,
+                                          'lat':
+                                              mapC
+                                                  .destinationPosition
+                                                  ?.latitude,
+                                          'lng':
+                                              mapC
+                                                  .destinationPosition
+                                                  ?.longitude,
+                                        },
+                                      ),
+                                      // Tells BookRideSearchScreen to pop back
+                                      // to THIS screen with the result instead
+                                      // of pushing a whole new BookMapScreen
+                                      // (which used to leave a stale, still-
+                                      // registered duplicate underneath).
+                                      settings: const RouteSettings(
+                                        arguments: 'fromMap',
+                                      ),
                                     ),
                                   );
 
                                   if (selected != null &&
                                       selected['pickup'] != null) {
-                                    final pickup = selected['pickup'];
-                                    final LatLng updatedPickupLoc =
-                                        pickup['location'];
-
-                                    _startController.text =
-                                        pickup['description'];
-
-                                    mapC.pickupPosition = updatedPickupLoc;
-                                    await mapC.drawPolyline();
-                                    await mapC.fitBounds();
-
-                                    // reset marker time cache
-                                    driverController.markerAdded.value = false;
+                                    final pickup = SelectedLocation.fromMap(
+                                      Map<String, dynamic>.from(
+                                        selected['pickup'],
+                                      ),
+                                      source: 'search',
+                                    );
+                                    if (pickup.isValid) {
+                                      _startController.text = pickup.address;
+                                      await mapC.setPickupLocation(pickup);
+                                      // reset marker time cache
+                                      driverController.markerAdded.value =
+                                          false;
+                                    }
                                   }
                                 },
                                 hintStyle: const TextStyle(fontSize: 11),
@@ -456,47 +684,46 @@ class _BookMapScreenState extends State<BookMapScreen>
                                   final selected = await Navigator.push(
                                     context,
                                     bottomUpRoute(
-                                          BookRideSearchScreen(
-                                            isPickup: false,
-                                            pickupData: {
-                                              'description':
-                                                  _startController.text,
-                                              'lat':
-                                                  mapC.pickupPosition?.latitude,
-                                              'lng':
-                                                  mapC
-                                                      .pickupPosition
-                                                      ?.longitude,
-                                            },
-                                            destinationData: {
-                                              'description':
-                                                  _destController.text,
-                                              'lat':
-                                                  mapC
-                                                      .destinationPosition
-                                                      ?.latitude,
-                                              'lng':
-                                                  mapC
-                                                      .destinationPosition
-                                                      ?.longitude,
-                                            },
-                                          ),
+                                      BookRideSearchScreen(
+                                        isPickup: false,
+                                        pickupData: {
+                                          'description': _startController.text,
+                                          'lat': mapC.pickupPosition?.latitude,
+                                          'lng':
+                                              mapC.pickupPosition?.longitude,
+                                        },
+                                        destinationData: {
+                                          'description': _destController.text,
+                                          'lat':
+                                              mapC
+                                                  .destinationPosition
+                                                  ?.latitude,
+                                          'lng':
+                                              mapC
+                                                  .destinationPosition
+                                                  ?.longitude,
+                                        },
+                                      ),
+                                      settings: const RouteSettings(
+                                        arguments: 'fromMap',
+                                      ),
                                     ),
                                   );
 
                                   if (selected != null &&
                                       selected['destination'] != null) {
-                                    final dest = selected['destination'];
-                                    final LatLng updatedDestLoc =
-                                        dest['location'];
-
-                                    _destController.text = dest['description'];
-
-                                    mapC.destinationPosition = updatedDestLoc;
-                                    await mapC.drawPolyline();
-                                    await mapC.fitBounds();
-
-                                    driverController.markerAdded.value = false;
+                                    final dest = SelectedLocation.fromMap(
+                                      Map<String, dynamic>.from(
+                                        selected['destination'],
+                                      ),
+                                      source: 'search',
+                                    );
+                                    if (dest.isValid) {
+                                      _destController.text = dest.address;
+                                      await mapC.setDestinationLocation(dest);
+                                      driverController.markerAdded.value =
+                                          false;
+                                    }
                                   }
                                 },
                                 controller: _destController,
@@ -511,7 +738,7 @@ class _BookMapScreenState extends State<BookMapScreen>
                         ),
                         const SizedBox(height: 20),
 
-                        /// Ride Only vs Shared toggle
+                        /// Solo Ride vs Shared Ride toggle
                         Obx(() {
                           return PackageContainer.bookContainers(
                             isSendSelected: mapC.isRideOnly.value,
@@ -521,7 +748,7 @@ class _BookMapScreenState extends State<BookMapScreen>
                               mapC.isRideOnly.value = selected;
 
                               AppLogger.log.i(
-                                'Ride type: ${mapC.isRideOnly.value ? 'Ride Only' : 'Shared'}',
+                                'Ride type: ${mapC.isRideOnly.value ? 'Solo Ride' : 'Shared Ride'}',
                               );
 
                               if (mapC.pickupPosition == null ||
@@ -636,8 +863,15 @@ class _BookMapScreenState extends State<BookMapScreen>
                                     driverController.estimatedTime.value =
                                         d.estimatedTime?.toString() ?? '';
                                     mapC.updateMarkersDebounced(
-                                      pickupLabel: widget.pickupAddress,
-                                      dropLabel: widget.destinationAddress,
+                                      pickupLabel:
+                                          mapC.pickupLocation.value?.address ??
+                                          widget.pickupAddress,
+                                      dropLabel:
+                                          mapC
+                                              .destinationLocation
+                                              .value
+                                              ?.address ??
+                                          widget.destinationAddress,
                                       estimatedMin:
                                           driverController.estimatedTime.value,
                                     );
@@ -674,8 +908,15 @@ class _BookMapScreenState extends State<BookMapScreen>
                                   _,
                                 ) {
                                   mapC.updateMarkersDebounced(
-                                    pickupLabel: widget.pickupAddress,
-                                    dropLabel: widget.destinationAddress,
+                                    pickupLabel:
+                                        mapC.pickupLocation.value?.address ??
+                                        widget.pickupAddress,
+                                    dropLabel:
+                                        mapC
+                                            .destinationLocation
+                                            .value
+                                            ?.address ??
+                                        widget.destinationAddress,
                                     estimatedMin:
                                         driverController.estimatedTime.value,
                                   );
@@ -719,8 +960,15 @@ class _BookMapScreenState extends State<BookMapScreen>
                                   driverController.estimatedTime.value =
                                       d.estimatedTime?.toString() ?? '';
                                   mapC.updateMarkersDebounced(
-                                    pickupLabel: widget.pickupAddress,
-                                    dropLabel: widget.destinationAddress,
+                                    pickupLabel:
+                                        mapC.pickupLocation.value?.address ??
+                                        widget.pickupAddress,
+                                    dropLabel:
+                                        mapC
+                                            .destinationLocation
+                                            .value
+                                            ?.address ??
+                                        widget.destinationAddress,
                                     estimatedMin:
                                         driverController.estimatedTime.value,
                                   );
@@ -753,8 +1001,12 @@ class _BookMapScreenState extends State<BookMapScreen>
                                   defaultDriver.estimatedTime?.toString() ?? '';
                               WidgetsBinding.instance.addPostFrameCallback((_) {
                                 mapC.updateMarkersDebounced(
-                                  pickupLabel: widget.pickupAddress,
-                                  dropLabel: widget.destinationAddress,
+                                  pickupLabel:
+                                      mapC.pickupLocation.value?.address ??
+                                      widget.pickupAddress,
+                                  dropLabel:
+                                      mapC.destinationLocation.value?.address ??
+                                      widget.destinationAddress,
                                   estimatedMin:
                                       driverController.estimatedTime.value,
                                 );
@@ -863,6 +1115,18 @@ class _BookMapScreenState extends State<BookMapScreen>
                           final selectedCarType =
                               driverController.selectedCarType.value;
 
+                          // Live selection from the controller — reflects any
+                          // edit the passenger made to pickup/destination on
+                          // this screen. `widget.pickupAddress`/
+                          // `widget.destinationAddress` are the ORIGINAL
+                          // constructor values and go stale after an edit.
+                          final livePickupAddress =
+                              mapC.pickupLocation.value?.address ??
+                              widget.pickupAddress;
+                          final liveDestinationAddress =
+                              mapC.destinationLocation.value?.address ??
+                              widget.destinationAddress;
+
                           if (mapC.isRideOnly.value) {
                             final result = await driverController
                                 .createBookingCar(
@@ -893,7 +1157,7 @@ class _BookMapScreenState extends State<BookMapScreen>
                                         bookingId: bookingId,
                                         selectedCarType: selectedCarType,
                                         pickupData: {
-                                          'description': widget.pickupAddress,
+                                          'description': livePickupAddress,
                                           'lat':
                                               mapC.pickupPosition?.latitude ??
                                               0.0,
@@ -902,8 +1166,7 @@ class _BookMapScreenState extends State<BookMapScreen>
                                               0.0,
                                         },
                                         destinationData: {
-                                          'description':
-                                              widget.destinationAddress,
+                                          'description': liveDestinationAddress,
                                           'lat':
                                               mapC
                                                   .destinationPosition
@@ -915,9 +1178,9 @@ class _BookMapScreenState extends State<BookMapScreen>
                                                   ?.longitude ??
                                               0.0,
                                         },
-                                        pickupAddress: widget.pickupAddress,
+                                        pickupAddress: livePickupAddress,
                                         destinationAddress:
-                                            widget.destinationAddress,
+                                            liveDestinationAddress,
                                       ),
                                 ),
                               );
@@ -944,7 +1207,7 @@ class _BookMapScreenState extends State<BookMapScreen>
                                       seats: sharedDriver.seats,
                                       selectedCarType: selectedCarType,
                                       pickupData: {
-                                        'description': widget.pickupAddress,
+                                        'description': livePickupAddress,
                                         'lat':
                                             mapC.pickupPosition?.latitude ??
                                             0.0,
@@ -953,8 +1216,7 @@ class _BookMapScreenState extends State<BookMapScreen>
                                             0.0,
                                       },
                                       destinationData: {
-                                        'description':
-                                            widget.destinationAddress,
+                                        'description': liveDestinationAddress,
                                         'lat':
                                             mapC
                                                 .destinationPosition
@@ -966,9 +1228,9 @@ class _BookMapScreenState extends State<BookMapScreen>
                                                 ?.longitude ??
                                             0.0,
                                       },
-                                      pickupAddress: widget.pickupAddress,
+                                      pickupAddress: livePickupAddress,
                                       destinationAddress:
-                                          widget.destinationAddress,
+                                          liveDestinationAddress,
                                     ),
                               ),
                             );

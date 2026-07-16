@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -23,6 +24,40 @@ import 'package:hopper/Core/Consents/app_logger.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // TEMPORARY DIAGNOSTIC — release builds silently render a blank box on any
+  // widget build() error instead of the debug-mode red screen. This makes
+  // the actual error text visible on screen instead, AND writes it to
+  // AppLogger's on-device file (Drawer > "Share ride logs") so it can be
+  // retrieved without a connected device. Remove once the current
+  // package-tracking-screen crash is found and fixed.
+  ErrorWidget.builder = (FlutterErrorDetails details) {
+    AppLogger.log.e(
+      'DIAGNOSTIC widget build error: ${details.exceptionAsString()}\n${details.stack}',
+    );
+    return Material(
+      color: Colors.black,
+      child: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: Text(
+            'DIAGNOSTIC — widget build error:\n\n${details.exceptionAsString()}\n\n${details.stack}',
+            style: const TextStyle(color: Color(0xFFFF6B6B), fontSize: 11),
+          ),
+        ),
+      ),
+    );
+  };
+  FlutterError.onError = (FlutterErrorDetails details) {
+    AppLogger.log.e(
+      'DIAGNOSTIC FlutterError: ${details.exceptionAsString()}\n${details.stack}',
+    );
+    FlutterError.presentError(details);
+  };
+  PlatformDispatcher.instance.onError = (error, stack) {
+    AppLogger.log.e('DIAGNOSTIC uncaught error: $error\n$stack');
+    return false; // still let the platform report it too
+  };
 
   // Pre-warm the Android Google Maps renderer (latest, faster + smoother) so the
   // very first map on the home screen opens quickly instead of feeling heavy.
