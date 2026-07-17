@@ -696,7 +696,7 @@ class ApiDataSource extends BaseApiDataSource {
       AppLogger.log.i(url);
       AppLogger.log.i(data);
       dynamic response = await Request.sendRequest(url, data, 'Post', false);
-      if (response.statusCode == 200) {
+      if (response.statusCode == 200 || response.statusCode == 202) {
         return Right(SendPackageDriverResponse.fromJson(response.data));
         // if (response.data['success'] == 200) {
         //   return Right(SendDriverRequestModels.fromJson(response.data));

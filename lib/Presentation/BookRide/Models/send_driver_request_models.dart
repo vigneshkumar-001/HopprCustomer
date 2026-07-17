@@ -53,13 +53,30 @@ class SendDriverRequestModels {
 
 class BookingDriverData {
   final String driversNotified;
+  final String dispatchStatus;
+  final bool dispatchInProgress;
+  final bool driverAssigned;
+  final bool noDriverFound;
+  final DateTime? deadlineAt;
 
-  BookingDriverData({required this.driversNotified});
+  BookingDriverData({
+    required this.driversNotified,
+    required this.dispatchStatus,
+    required this.dispatchInProgress,
+    required this.driverAssigned,
+    required this.noDriverFound,
+    this.deadlineAt,
+  });
 
   factory BookingDriverData.fromJson(Map<String, dynamic> json) {
     // handle if key is missing or null
     return BookingDriverData(
       driversNotified: json['totalDrivers']?.toString() ?? '0',
+      dispatchStatus: (json['dispatchStatus'] ?? '').toString(),
+      dispatchInProgress: json['dispatchInProgress'] == true,
+      driverAssigned: json['driverAssigned'] == true,
+      noDriverFound: json['noDriverFound'] == true,
+      deadlineAt: DateTime.tryParse((json['deadlineAt'] ?? '').toString()),
     );
   }
 }

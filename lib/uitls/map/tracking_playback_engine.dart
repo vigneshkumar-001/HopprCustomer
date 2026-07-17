@@ -38,6 +38,7 @@ class TrackingPlaybackEngine {
     Duration playbackDelay = const Duration(milliseconds: 1500),
     Duration maxPredict = const Duration(seconds: 5),
     double hardJumpMeters = 150.0,
+    double maxTeleportSpeedMps = 45.0,
     double maxTurnDegPerSec = 120.0,
     double posEmaAlpha = 0.45,
     double bearingEmaAlpha = 0.30,
@@ -45,6 +46,7 @@ class TrackingPlaybackEngine {
   })  : _playbackMs = playbackDelay.inMilliseconds,
         _maxPredictMs = maxPredict.inMilliseconds,
         _hardJump = hardJumpMeters,
+        _maxTeleportSpeedMps = maxTeleportSpeedMps,
         _maxTurnDegPerSec = maxTurnDegPerSec,
         _posAlpha = posEmaAlpha,
         _brgAlpha = bearingEmaAlpha,
@@ -58,6 +60,7 @@ class TrackingPlaybackEngine {
   final int _playbackMs;
   final int _maxPredictMs;
   final double _hardJump;
+  final double _maxTeleportSpeedMps;
   final double _maxTurnDegPerSec;
   final double _posAlpha;
   final double _brgAlpha;
@@ -139,21 +142,27 @@ class TrackingPlaybackEngine {
     if (_buf.isNotEmpty) {
       final last = _buf.last;
       final d = _dist(last.pos, pos);
-      // Teleport guard: a single huge hop = GPS garbage / resumed-after-gap warp.
-      // Re-seed instead of animating across the map.
-      if (d > _hardJump) {
-        reset(pos, bearing: bearing ?? _lastBearing);
-        return;
-      }
       // Keep the buffer strictly time-ordered. The controller already drops
       // stale/out-of-order packets by ts+seq, but clamp defensively so a tie
       // (or clock quirk) can never produce a zero/negative span downstream.
       if (tMs <= last.tMs) tMs = last.tMs + 1;
-      // Update the live speed estimate from the real (server-spaced) interval.
       final dtMs = tMs - last.tMs;
+      final impliedSpeed = dtMs > 0 ? d / (dtMs / 1000.0) : double.infinity;
+      // Teleport guard: judge by IMPLIED SPEED, not a flat distance. A sparse
+      // fix gap (background throttling / brief signal loss — tens of seconds
+      // between pings) can legitimately cover 150m+ at ordinary road speed;
+      // treating that as a "teleport" reset SNAPPED the marker instantly
+      // instead of gliding it across the real elapsed time, which is what
+      // actually read as "the bike jumped" right after a stretch where it
+      // looked frozen. Only a genuinely impossible speed (GPS glitch /
+      // resumed-after-a-long-gap warp) re-seeds instead of animating.
+      if (d > _hardJump && impliedSpeed > _maxTeleportSpeedMps) {
+        reset(pos, bearing: bearing ?? _lastBearing);
+        return;
+      }
+      // Update the live speed estimate from the real (server-spaced) interval.
       if (dtMs > 0) {
-        final implied = d / (dtMs / 1000.0);
-        _lastSpeedMps = implied.clamp(0.0, 35.0).toDouble();
+        _lastSpeedMps = impliedSpeed.clamp(0.0, 35.0).toDouble();
       }
     }
 

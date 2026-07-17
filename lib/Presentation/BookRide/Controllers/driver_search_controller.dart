@@ -468,5 +468,23 @@ class DriverSearchController extends GetxController {
     }
   }
 
+  Future<BookingDriverData?> getDispatchStatus({
+    required String bookingId,
+  }) async {
+    try {
+      final results = await apiDataSource.noDriverFound(
+        status: false,
+        bookingId: bookingId,
+      );
+      return results.fold((failure) {
+        AppLogger.log.e("Dispatch status failed: ${failure.message}");
+        return null;
+      }, (response) => response.data);
+    } catch (e) {
+      AppLogger.log.e("Dispatch status error: $e");
+      return null;
+    }
+  }
+
   void clearState() {}
 }

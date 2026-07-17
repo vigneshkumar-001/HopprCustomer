@@ -457,6 +457,16 @@ class PackageController extends GetxController {
         (response) {
           isConfirmLoading.value = false;
           AppLogger.log.i('${response.data}');
+          final state = response.data.dispatchStatus.trim().toUpperCase();
+          final acceptedState =
+              state == 'SEARCHING' || state == 'OFFERED' || state == 'ASSIGNED';
+          if (!response.data.dispatchAccepted || !acceptedState) {
+            AppToasts.showErrorGlobal(
+              'Courier search could not be started. Please try again.',
+              title: 'Courier request failed',
+            );
+            return false;
+          }
           return true;
         },
       );

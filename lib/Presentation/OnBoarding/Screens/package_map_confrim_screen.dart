@@ -520,6 +520,8 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
   late final AnimationController _searchingAnimController;
   Timer? _searchingElapsedTimer;
+  Timer? _dispatchStatusPollTimer;
+  bool _dispatchStatusPollInFlight = false;
   int _searchingElapsedSeconds = 0;
 
   String _estimateText() {
@@ -2127,24 +2129,62 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
 
   bool isWaitingForDriver = true;
   bool noDriverFound = false;
-  void startDriverSearch() {
-    isWaitingForDriver = true;
-    noDriverFound = false;
 
-    Future.delayed(Duration(minutes: 1), () async {
-      if (!_isDriverConfirmed) {
-        bool hasDriver = await driverSearchController.noDriverFound(
-          context: context,
-          bookingId: widget.bookingId,
-          status: true,
-        );
+  void _showNoDriverFound() {
+    _dispatchStatusPollTimer?.cancel();
+    if (!mounted || _isDriverConfirmed) return;
+    setState(() {
+      isWaitingForDriver = false;
+      noDriverFound = true;
+    });
+  }
 
+  Future<void> _pollDispatchStatus() async {
+    if (!mounted || _isDriverConfirmed || _dispatchStatusPollInFlight) return;
+    _dispatchStatusPollInFlight = true;
+    try {
+      final snapshot = await driverSearchController.getDispatchStatus(
+        bookingId: widget.bookingId,
+      );
+      if (!mounted || snapshot == null || _isDriverConfirmed) return;
+      final status = snapshot.dispatchStatus.trim().toUpperCase();
+      if (snapshot.driverAssigned || status == 'ASSIGNED') {
+        _dispatchStatusPollTimer?.cancel();
+        await _seedOtpFromActiveBooking();
+        return;
+      }
+      if (snapshot.noDriverFound ||
+          status == 'NO_DRIVER_FOUND' ||
+          status == 'FAILED') {
+        _showNoDriverFound();
+        return;
+      }
+      if (snapshot.dispatchInProgress ||
+          status == 'SEARCHING' ||
+          status == 'OFFERED') {
         setState(() {
-          isWaitingForDriver = false;
-          noDriverFound = !hasDriver;
+          isWaitingForDriver = true;
+          noDriverFound = false;
         });
       }
-    });
+    } finally {
+      _dispatchStatusPollInFlight = false;
+    }
+  }
+
+  void startDriverSearch() {
+    _dispatchStatusPollTimer?.cancel();
+    if (mounted) {
+      setState(() {
+        isWaitingForDriver = true;
+        noDriverFound = false;
+      });
+    }
+    unawaited(_pollDispatchStatus());
+    _dispatchStatusPollTimer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => unawaited(_pollDispatchStatus()),
+    );
   }
 
   final PackageController packageController = Get.put(PackageController());
@@ -2315,12 +2355,20 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       final status = (payload['status'] ?? '').toString().trim().toUpperCase();
       final driverId = (payload['driverId'] ?? '').toString().trim();
 
+      if (status == 'NO_DRIVERS_AVAILABLE' ||
+          (payload['dispatchStatus'] ?? '').toString().toUpperCase() ==
+              'NO_DRIVER_FOUND') {
+        _showNoDriverFound();
+        return;
+      }
+
       final isAccepted =
           status == 'DRIVER_ACCEPTED' ||
           status == 'ACCEPTED' ||
           status == 'DRIVER_ASSIGNED';
       if (!isAccepted) return;
 
+      _dispatchStatusPollTimer?.cancel();
       setState(() {
         _isDriverConfirmed = true;
         isWaitingForDriver = false;
@@ -2334,6 +2382,16 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
           bookingId: widget.bookingId,
           driverId: driverId,
         );
+      }
+    });
+
+    socketService.on('no_driver_found', (data) {
+      if (!mounted) return;
+      final payload = _normalizeSocketPayload(data);
+      final status =
+          (payload['dispatchStatus'] ?? '').toString().trim().toUpperCase();
+      if (status == 'NO_DRIVER_FOUND' || status == 'FAILED') {
+        _showNoDriverFound();
       }
     });
 
@@ -3734,6 +3792,7 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
         final restoredDriverId =
             (active.data?.driverId ?? '').toString().trim();
         if (restoredDriverId.isNotEmpty && !_isDriverConfirmed) {
+          _dispatchStatusPollTimer?.cancel();
           setState(() {
             _isDriverConfirmed = true;
             isWaitingForDriver = false;
@@ -3836,12 +3895,14 @@ class _PackageMapConfirmScreenState extends State<PackageMapConfirmScreen>
       socketService.off('driver-reached-destination');
       socketService.off('customer-cancelled');
       socketService.off('driver-cancelled');
+      socketService.off('no_driver_found');
     } catch (_) {}
 
     _pulseTimer?.cancel();
     _driverMarkerFlushTimer?.cancel();
     _paymentNavTimer?.cancel();
     _searchingElapsedTimer?.cancel();
+    _dispatchStatusPollTimer?.cancel();
     _etaTicker?.cancel();
     _searchingAnimController.dispose();
     _motion.dispose();

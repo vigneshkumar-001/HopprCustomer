@@ -56,7 +56,8 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
   /// One-shot guard so a retry after a failed dispatch (payment already
   /// settled) never re-dispatches a courier a second time. Screen-lifecycle
   /// scoped — a fresh screen instance (new booking) always starts false.
-  bool _dispatchSucceeded = false;
+  // An accepted asynchronous search, not a driver-found flag.
+  bool _dispatchStarted = false;
 
   @override
   void initState() {
@@ -125,16 +126,14 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
     }
     packageController.parcelPaymentStatusMessage.value = '';
     packageController.selectedParcelPaymentMethod.value = method;
-    packageController.parcelPaymentUiState.value =
-        ParcelPaymentUiState.methodSelected;
+    packageController.parcelPaymentUiState.value = ParcelPaymentUiState.methodSelected;
   }
 
   Future<void> _onBottomActionTap() async {
     final state = packageController.parcelPaymentUiState.value;
     final method = packageController.selectedParcelPaymentMethod.value;
     if (method == null) return;
-    if (state != ParcelPaymentUiState.methodSelected &&
-        state != ParcelPaymentUiState.failed) {
+    if (state != ParcelPaymentUiState.methodSelected && state != ParcelPaymentUiState.failed) {
       return;
     }
     packageController.parcelPaymentStatusMessage.value = '';
@@ -219,8 +218,8 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
     );
   }
 
-  /// Dispatches (once — see [_dispatchSucceeded]) then shows success and
-  /// navigates to tracking. If dispatch itself fails post-payment (customer
+  /// Starts dispatch once, confirms only the payment, then navigates to the
+  /// authoritative searching screen. If dispatch fails post-payment (customer
   /// has already paid), surfaces a distinct retryable failure rather than a
   /// generic one, since re-tapping "Try Again" here must NOT re-charge.
   Future<void> _dispatchAndFinish({
@@ -229,9 +228,8 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
     bool showSheet = true,
     String? successToast,
   }) async {
-    if (!_dispatchSucceeded) {
-      packageController.parcelPaymentUiState.value =
-          ParcelPaymentUiState.dispatching;
+    if (!_dispatchStarted) {
+      packageController.parcelPaymentUiState.value = ParcelPaymentUiState.dispatching;
       final dispatched = await _dispatchDriverRequest();
       if (!mounted) return;
       if (!dispatched) {
@@ -239,13 +237,12 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
         // already settled/planned at this point — don't call it a payment
         // failure, and the next "Try Again" tap will skip straight back
         // here (payParcelBooking short-circuits as already-satisfied).
-        packageController.parcelPaymentUiState.value =
-            ParcelPaymentUiState.failed;
+        packageController.parcelPaymentUiState.value = ParcelPaymentUiState.failed;
         packageController.parcelPaymentStatusMessage.value =
             'Payment confirmed, but we could not reach a courier yet. Tap Try Again.';
         return;
       }
-      _dispatchSucceeded = true;
+      _dispatchStarted = true;
     }
 
     packageController.parcelPaymentUiState.value = ParcelPaymentUiState.success;
@@ -253,6 +250,10 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
       await _showSuccessSheet(
         paymentMethod: paymentMethodLabel,
         transactionId: transactionId,
+        headline: 'Payment confirmed',
+        subheadline:
+            'We are now searching for an available Bike courier. '
+            'You will see the result on the next screen.',
       );
     } else {
       if (successToast != null && mounted) {
@@ -283,39 +284,21 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
                 Container(
                   width: 48,
                   height: 5,
-                  decoration: BoxDecoration(
-                    color: Colors.grey[300],
-                    borderRadius: BorderRadius.circular(10),
-                  ),
+                  decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(10)),
                 ),
                 const SizedBox(height: 18),
                 Container(
                   padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: AppColors.resendBlue.withOpacity(0.1),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(
-                    Icons.payments_rounded,
-                    color: AppColors.resendBlue,
-                    size: 28,
-                  ),
+                  decoration: BoxDecoration(color: AppColors.resendBlue.withOpacity(0.1), shape: BoxShape.circle),
+                  child: Icon(Icons.payments_rounded, color: AppColors.resendBlue, size: 28),
                 ),
                 const SizedBox(height: 16),
-                const Text(
-                  'Confirm Cash Payment',
-                  style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800),
-                ),
+                const Text('Confirm Cash Payment', style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800)),
                 const SizedBox(height: 8),
                 Text(
                   'You\'ll pay ₦${widget.amount.toStringAsFixed(0)} in cash to the courier at pickup. Continue?',
                   textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.grey[700],
-                    height: 1.45,
-                  ),
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.grey[700], height: 1.45),
                 ),
                 const SizedBox(height: 22),
                 SizedBox(
@@ -332,11 +315,7 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
                     onPressed: () => Navigator.pop(sheetContext, false),
                     child: Text(
                       'Not yet',
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.grey[700],
-                      ),
+                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.grey[700]),
                     ),
                   ),
                 ),
@@ -352,16 +331,11 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
     final confirmed = await _showConfirmCashSheet();
     if (!mounted) return;
     if (confirmed != true) {
-      packageController.parcelPaymentUiState.value =
-          ParcelPaymentUiState.methodSelected;
+      packageController.parcelPaymentUiState.value = ParcelPaymentUiState.methodSelected;
       return;
     }
-    packageController.parcelPaymentUiState.value =
-        ParcelPaymentUiState.confirmingCash;
-    final data = await packageController.payParcelBooking(
-      bookingId: widget.bookingId,
-      paymentType: 'CASH',
-    );
+    packageController.parcelPaymentUiState.value = ParcelPaymentUiState.confirmingCash;
+    final data = await packageController.payParcelBooking(bookingId: widget.bookingId, paymentType: 'CASH');
     if (!mounted) return;
     if (data == null) {
       _fail(
@@ -379,12 +353,8 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
   }
 
   Future<void> _processWallet() async {
-    packageController.parcelPaymentUiState.value =
-        ParcelPaymentUiState.initializingOnlinePayment;
-    final data = await packageController.payParcelBooking(
-      bookingId: widget.bookingId,
-      paymentType: 'WALLET',
-    );
+    packageController.parcelPaymentUiState.value = ParcelPaymentUiState.initializingOnlinePayment;
+    final data = await packageController.payParcelBooking(bookingId: widget.bookingId, paymentType: 'WALLET');
     if (!mounted) return;
     if (data == null) {
       _fail(
@@ -402,9 +372,7 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
     await _dispatchAndFinish(paymentMethodLabel: 'Hoppr Wallet');
   }
 
-  Future<Map<String, String>?> _collectContactInfo({
-    required bool needsNamePhone,
-  }) async {
+  Future<Map<String, String>?> _collectContactInfo({required bool needsNamePhone}) async {
     final prefs = await SharedPreferences.getInstance();
     String? email = prefs.getString('flutterwave_email');
     String? name = prefs.getString('flutterwave_name');
@@ -412,9 +380,7 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
 
     final missing =
         (email == null || email.trim().isEmpty) ||
-        (needsNamePhone &&
-            ((name == null || name.trim().isEmpty) ||
-                (phone == null || phone.trim().isEmpty)));
+        (needsNamePhone && ((name == null || name.trim().isEmpty) || (phone == null || phone.trim().isEmpty)));
 
     if (!missing) {
       return {'email': email, 'name': name ?? '', 'phone': phone ?? ''};
@@ -430,12 +396,7 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
     return {'email': email, 'name': name ?? '', 'phone': phone ?? ''};
   }
 
-  Future<bool?> _showContactInfoSheet(
-    String? email,
-    String? name,
-    String? phone,
-    bool needsNamePhone,
-  ) {
+  Future<bool?> _showContactInfoSheet(String? email, String? name, String? phone, bool needsNamePhone) {
     final emailController = TextEditingController(text: email);
     final nameController = TextEditingController(text: name);
     final phoneController = TextEditingController(text: phone);
@@ -446,9 +407,7 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
       backgroundColor: Colors.transparent,
       builder: (sheetContext) {
         return Padding(
-          padding: EdgeInsets.only(
-            bottom: MediaQuery.of(sheetContext).viewInsets.bottom,
-          ),
+          padding: EdgeInsets.only(bottom: MediaQuery.of(sheetContext).viewInsets.bottom),
           child: Container(
             decoration: const BoxDecoration(
               color: Colors.white,
@@ -461,16 +420,10 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
                 Container(
                   width: 50,
                   height: 5,
-                  decoration: BoxDecoration(
-                    color: Colors.grey[300],
-                    borderRadius: BorderRadius.circular(10),
-                  ),
+                  decoration: BoxDecoration(color: Colors.grey[300], borderRadius: BorderRadius.circular(10)),
                 ),
                 const SizedBox(height: 15),
-                const Text(
-                  'Enter Payment Info',
-                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                ),
+                const Text('Enter Payment Info', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
                 const SizedBox(height: 25),
                 _contactField(emailController, 'Email', Icons.email, TextInputType.emailAddress),
                 if (needsNamePhone) ...[
@@ -484,8 +437,7 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
                   onTap: () async {
                     if (emailController.text.trim().isEmpty ||
                         (needsNamePhone &&
-                            (nameController.text.trim().isEmpty ||
-                                phoneController.text.trim().isEmpty))) {
+                            (nameController.text.trim().isEmpty || phoneController.text.trim().isEmpty))) {
                       AppToasts.showError(sheetContext, 'All fields are required');
                       return;
                     }
@@ -508,12 +460,7 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
     );
   }
 
-  Widget _contactField(
-    TextEditingController controller,
-    String label,
-    IconData icon,
-    TextInputType type,
-  ) {
+  Widget _contactField(TextEditingController controller, String label, IconData icon, TextInputType type) {
     return TextField(
       controller: controller,
       keyboardType: type,
@@ -523,10 +470,7 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
         labelStyle: TextStyle(color: Colors.grey[700]),
         filled: true,
         fillColor: Colors.grey[100],
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(15),
-          borderSide: BorderSide.none,
-        ),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none),
         contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
       ),
     );
@@ -540,10 +484,7 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
   Future<bool> _verifyOnlinePaymentSettled(String paymentType) async {
     const maxAttempts = 4;
     for (var attempt = 0; attempt < maxAttempts; attempt++) {
-      final data = await packageController.payParcelBooking(
-        bookingId: widget.bookingId,
-        paymentType: paymentType,
-      );
+      final data = await packageController.payParcelBooking(bookingId: widget.bookingId, paymentType: paymentType);
       if (data != null && data['parcelPaymentStatus'] == 'PAID') return true;
       if (attempt < maxAttempts - 1) {
         await Future.delayed(const Duration(seconds: 2));
@@ -557,16 +498,12 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
     final contact = await _collectContactInfo(needsNamePhone: needsNamePhone);
     if (!mounted || contact == null) return;
 
-    packageController.parcelPaymentUiState.value =
-        ParcelPaymentUiState.initializingOnlinePayment;
+    packageController.parcelPaymentUiState.value = ParcelPaymentUiState.initializingOnlinePayment;
 
     // Records intent server-side (dispatchEligible=true) — settlement still
     // happens later via the webhook, confirmed below in
     // _verifyOnlinePaymentSettled before we ever dispatch a courier.
-    final intent = await packageController.payParcelBooking(
-      bookingId: widget.bookingId,
-      paymentType: method,
-    );
+    final intent = await packageController.payParcelBooking(bookingId: widget.bookingId, paymentType: method);
     if (!mounted) return;
     if (intent == null) {
       _fail(
@@ -580,18 +517,13 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
     if (intent['parcelPaymentStatus'] == 'PAID') {
       // Idempotent re-entry (already settled from a previous attempt) — skip
       // straight to dispatch, no need to open the gateway checkout again.
-      await _dispatchAndFinish(
-        paymentMethodLabel: method == 'PAYSTACK' ? 'Paystack' : 'FlutterWave',
-      );
+      await _dispatchAndFinish(paymentMethodLabel: method == 'PAYSTACK' ? 'Paystack' : 'FlutterWave');
       return;
     }
 
     final Map<String, dynamic>? init;
     if (method == 'PAYSTACK') {
-      init = await packageController.initParcelPaystackPayment(
-        bookingId: widget.bookingId,
-        email: contact['email']!,
-      );
+      init = await packageController.initParcelPaystackPayment(bookingId: widget.bookingId, email: contact['email']!);
     } else {
       init = await packageController.initParcelFlutterwavePayment(
         bookingId: widget.bookingId,
@@ -603,9 +535,7 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
     }
     if (!mounted) return;
     final checkoutUrl =
-        method == 'PAYSTACK'
-            ? (init?['authorization_url'] as String?)
-            : (init?['paymentLink'] as String?);
+        method == 'PAYSTACK' ? (init?['authorization_url'] as String?) : (init?['paymentLink'] as String?);
     if (checkoutUrl == null || checkoutUrl.isEmpty) {
       _fail(
         packageController.parcelPaymentError.value.isNotEmpty
@@ -615,12 +545,8 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
       return;
     }
 
-    packageController.parcelPaymentUiState.value =
-        ParcelPaymentUiState.awaitingPayment;
-    final result = await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => PaymentWebView(url: checkoutUrl)),
-    );
+    packageController.parcelPaymentUiState.value = ParcelPaymentUiState.awaitingPayment;
+    final result = await Navigator.push(context, MaterialPageRoute(builder: (_) => PaymentWebView(url: checkoutUrl)));
     if (!mounted) return;
 
     if (result == null || result['status'] != 'success') {
@@ -628,8 +554,7 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
       return;
     }
 
-    packageController.parcelPaymentUiState.value =
-        ParcelPaymentUiState.verifyingPayment;
+    packageController.parcelPaymentUiState.value = ParcelPaymentUiState.verifyingPayment;
     final settled = await _verifyOnlinePaymentSettled(method);
     if (!mounted) return;
     if (!settled) {
@@ -659,10 +584,7 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
         onPopInvokedWithResult: (didPop, result) {
           if (didPop) return;
           if (busy) {
-            AppToasts.showInfoGlobal(
-              'Please wait for the current step to finish',
-              title: 'Please wait',
-            );
+            AppToasts.showInfoGlobal('Please wait for the current step to finish', title: 'Please wait');
             return;
           }
           // Every entry point today pushes this screen with Get.to/Navigator.push
@@ -703,11 +625,12 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           GestureDetector(
-                            onTap: busy
-                                ? null
-                                : () {
-                                    Navigator.maybePop(context);
-                                  },
+                            onTap:
+                                busy
+                                    ? null
+                                    : () {
+                                      Navigator.maybePop(context);
+                                    },
                             child: Opacity(
                               opacity: busy ? 0.35 : 1,
                               child: Image.asset(AppImages.backImage, height: 20, width: 20),
@@ -742,9 +665,7 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
                                 decoration: BoxDecoration(
                                   color: AppColors.commonWhite,
                                   border: Border.all(
-                                    color: selected == 'PAYSTACK'
-                                        ? Colors.black
-                                        : AppColors.containerColor,
+                                    color: selected == 'PAYSTACK' ? Colors.black : AppColors.containerColor,
                                     width: selected == 'PAYSTACK' ? 2 : 1,
                                   ),
                                   borderRadius: BorderRadius.circular(10),
@@ -773,9 +694,7 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
                                 decoration: BoxDecoration(
                                   color: AppColors.commonWhite,
                                   border: Border.all(
-                                    color: selected == 'FLUTTERWAVE'
-                                        ? Colors.black
-                                        : AppColors.containerColor,
+                                    color: selected == 'FLUTTERWAVE' ? Colors.black : AppColors.containerColor,
                                     width: selected == 'FLUTTERWAVE' ? 2 : 1,
                                   ),
                                   borderRadius: BorderRadius.circular(10),
@@ -807,14 +726,9 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
                       Opacity(
                         opacity: tilesEnabled ? 1 : 0.5,
                         child: Obx(() {
-                          final balance = walletController
-                                  .walletBalance.value?.customerWalletBalance
-                                  .toString() ??
-                              '0';
+                          final balance = walletController.walletBalance.value?.customerWalletBalance.toString() ?? '0';
                           return PackageContainer.customWalletContainer(
-                            borderColor: selected == 'WALLET'
-                                ? Colors.black
-                                : AppColors.containerColor,
+                            borderColor: selected == 'WALLET' ? Colors.black : AppColors.containerColor,
                             onTap: tilesEnabled ? () => _selectMethod('WALLET') : () {},
                             title: 'Hoppr Wallet',
                             leadingImagePath: AppImages.wallet,
@@ -833,9 +747,7 @@ class _PackagePaymentScreenState extends State<PackagePaymentScreen> {
                       Opacity(
                         opacity: tilesEnabled ? 1 : 0.5,
                         child: PackageContainer.customWalletContainer(
-                          borderColor: selected == 'CASH'
-                              ? Colors.black
-                              : AppColors.containerColor,
+                          borderColor: selected == 'CASH' ? Colors.black : AppColors.containerColor,
                           onTap: tilesEnabled ? () => _selectMethod('CASH') : () {},
                           title: 'Cash Payment',
                           leadingImagePath: AppImages.cash,
